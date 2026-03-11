@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Agent WebMCP",
+  "version": "1.0.0",
+  "description": "LangGraph.js agent with MCP, MCP Apps, WebMCP tab tools, and dynamic WebMCP discovery",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Open Agent WebMCP"
+  }
+}

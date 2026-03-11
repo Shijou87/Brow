@@ -1,0 +1,124 @@
+// ─── Options Page ───────────────────────────────────────────────────────────
+// MCP config, feature flags, and debug logging settings.
+
+import './options-style.scss';
+
+import type { ExtensionSettings, DEFAULT_SETTINGS } from '../shared/types';
+
+const STORAGE_KEY = 'agent-webmcp-settings';
+
+// ─── Build UI ──────────────────────────────────────────────────────────────
+
+const app = document.getElementById('options-app')!;
+app.innerHTML = `
+  <div class="options-container">
+    <h1>Agent WebMCP Settings</h1>
+
+    <section class="options-section">
+      <h2>MCP Server</h2>
+      <div class="option-field">
+        <label for="mcp-endpoint">Endpoint</label>
+        <input type="text" id="mcp-endpoint" placeholder="http://localhost:3000/mcp" />
+      </div>
+      <div class="option-field">
+        <label for="mcp-transport">Transport</label>
+        <select id="mcp-transport">
+          <option value="sse">SSE</option>
+          <option value="streamable-http">Streamable HTTP</option>
+          <option value="http">HTTP</option>
+        </select>
+      </div>
+      <div class="option-field">
+        <label for="mcp-auth">Auth Token (optional)</label>
+        <input type="password" id="mcp-auth" placeholder="Bearer token" />
+      </div>
+    </section>
+
+    <section class="options-section">
+      <h2>Feature Flags</h2>
+      <div class="option-toggle">
+        <label>
+          <input type="checkbox" id="enable-webmcp" checked />
+          <span>Enable WebMCP (per-tab tool discovery)</span>
+        </label>
+      </div>
+      <div class="option-toggle">
+        <label>
+          <input type="checkbox" id="enable-mcp-apps" checked />
+          <span>Enable MCP Apps rendering</span>
+        </label>
+      </div>
+      <div class="option-toggle">
+        <label>
+          <input type="checkbox" id="debug-logging" checked />
+          <span>Debug logging (WebMCP discovery)</span>
+        </label>
+      </div>
+    </section>
+
+    <div class="options-actions">
+      <button id="save-btn" class="primary-btn">Save Settings</button>
+      <span id="save-status"></span>
+    </div>
+  </div>
+`;
+
+// ─── Load settings ─────────────────────────────────────────────────────────
+
+async function loadSettings(): Promise<void> {
+  const result = await chrome.storage.local.get(STORAGE_KEY);
+  const settings = result[STORAGE_KEY] as ExtensionSettings | undefined;
+  if (!settings) return;
+
+  const setVal = (id: string, v: string) => {
+    const el = document.getElementById(id) as HTMLInputElement;
+    if (el) el.value = v;
+  };
+  const setChecked = (id: string, v: boolean) => {
+    const el = document.getElementById(id) as HTMLInputElement;
+    if (el) el.checked = v;
+  };
+
+  setVal('mcp-endpoint', settings.mcp?.endpoint ?? '');
+  setVal('mcp-transport', settings.mcp?.transport ?? 'sse');
+  setVal('mcp-auth', settings.mcp?.authToken ?? '');
+  setChecked('enable-webmcp', settings.enableWebMCP ?? true);
+  setChecked('enable-mcp-apps', settings.enableMCPApps ?? true);
+  setChecked('debug-logging', settings.debugLogging ?? true);
+}
+
+// ─── Save settings ─────────────────────────────────────────────────────────
+
+async function saveSettings(): Promise<void> {
+  const getVal = (id: string): string => {
+    const el = document.getElementById(id) as HTMLInputElement;
+    return el?.value?.trim() ?? '';
+  };
+  const getChecked = (id: string): boolean => {
+    const el = document.getElementById(id) as HTMLInputElement;
+    return el?.checked ?? false;
+  };
+
+  const settings: Partial<ExtensionSettings> = {
+    mcp: {
+      endpoint: getVal('mcp-endpoint'),
+      transport: getVal('mcp-transport') as 'http' | 'sse' | 'streamable-http',
+      authToken: getVal('mcp-auth') || undefined,
+    },
+    enableWebMCP: getChecked('enable-webmcp'),
+    enableMCPApps: getChecked('enable-mcp-apps'),
+    debugLogging: getChecked('debug-logging'),
+  };
+
+  await chrome.storage.local.set({ [STORAGE_KEY]: settings });
+
+  const status = document.getElementById('save-status')!;
+  status.textContent = 'Saved!';
+  status.className = 'save-success';
+  setTimeout(() => { status.textContent = ''; status.className = ''; }, 2000);
+}
+
+// ─── Wire events ───────────────────────────────────────────────────────────
+
+document.getElementById('save-btn')?.addEventListener('click', saveSettings);
+loadSettings();

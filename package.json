@@ -1,0 +1,31 @@
+{
+  "name": "agent-webmcp",
+  "version": "1.0.0",
+  "description": "Chrome extension: LangGraph.js agent + MCP + WebMCP + Tab Tools",
+  "private": true,
+  "scripts": {
+    "dev": "webpack --mode development --watch",
+    "build": "webpack --mode production",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "copy-webpack-plugin": "^12.0.2",
+    "css-loader": "^7.1.2",
+    "html-webpack-plugin": "^5.6.0",
+    "mini-css-extract-plugin": "^2.9.0",
+    "sass": "^1.77.0",
+    "sass-loader": "^14.2.0",
+    "style-loader": "^4.0.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.4.5",
+    "webpack": "^5.91.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.0",
+    "@langchain/langgraph": "^0.2.0",
+    "@langchain/openai": "^0.3.0",
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

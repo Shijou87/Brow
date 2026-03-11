@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebMCP Test Page</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      background: #1a1b1e;
+      color: #dcddde;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.5s ease;
+    }
+
+    .container {
+      max-width: 640px;
+      width: 90%;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .subtitle {
+      color: #72767d;
+      margin-bottom: 32px;
+    }
+
+    .status-card {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid #40444b;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+
+    .status-card h2 {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #72767d;
+      margin-bottom: 12px;
+    }
+
+    .tool-list {
+      text-align: left;
+    }
+
+    .tool-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .tool-item:last-child {
+      border-bottom: none;
+    }
+
+    .tool-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #5cb582;
+      margin-top: 6px;
+      flex-shrink: 0;
+    }
+
+    .tool-name {
+      font-weight: 600;
+      color: #dcddde;
+      font-size: 14px;
+    }
+
+    .tool-desc {
+      color: #72767d;
+      font-size: 13px;
+      margin-top: 2px;
+    }
+
+    .log-card {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid #40444b;
+      border-radius: 12px;
+      padding: 16px;
+      text-align: left;
+    }
+
+    .log-card h2 {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #72767d;
+      margin-bottom: 8px;
+    }
+
+    #log {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      color: #5ba8c8;
+      min-height: 60px;
+      max-height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .badge {
+      display: inline-block;
+      background: #5cb582;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    .current-bg {
+      margin-top: 20px;
+      padding: 12px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 8px;
+      font-size: 13px;
+      color: #72767d;
+    }
+
+    .current-bg span {
+      color: #dcddde;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🧪 WebMCP Test Page</h1>
+    <p class="subtitle">This page exposes WebMCP tools via <code>navigator.modelContext</code></p>
+
+    <div class="status-card">
+      <h2>Registered Tools <span class="badge">3 tools</span></h2>
+      <div class="tool-list">
+        <div class="tool-item">
+          <div class="tool-dot"></div>
+          <div>
+            <div class="tool-name">change_background</div>
+            <div class="tool-desc">Change the page background color. Accepts a CSS color string.</div>
+          </div>
+        </div>
+        <div class="tool-item">
+          <div class="tool-dot"></div>
+          <div>
+            <div class="tool-name">get_page_info</div>
+            <div class="tool-desc">Returns current page title, URL, and background color.</div>
+          </div>
+        </div>
+        <div class="tool-item">
+          <div class="tool-dot"></div>
+          <div>
+            <div class="tool-name">add_message</div>
+            <div class="tool-desc">Display a message on the page with optional style (info, success, warning, error).</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="current-bg">
+      Current background: <span id="bg-display">#1a1b1e</span>
+    </div>
+
+    <div class="log-card" style="margin-top: 16px;">
+      <h2>Tool Invocation Log</h2>
+      <div id="log">Waiting for tool calls…</div>
+    </div>
+  </div>
+
+  <script>
+    // ─── Logger ──────────────────────────────────────────────────────
+    const logEl = document.getElementById('log');
+    const bgDisplay = document.getElementById('bg-display');
+    let firstLog = true;
+
+    function log(msg) {
+      const ts = new Date().toLocaleTimeString();
+      if (firstLog) { logEl.textContent = ''; firstLog = false; }
+      logEl.textContent += `[${ts}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // ─── Tool implementations ────────────────────────────────────────
+
+    function changeBackground(args) {
+      const color = args.color || args.colour || '#1a1b1e';
+      document.body.style.background = color;
+      bgDisplay.textContent = color;
+      log(`change_background → "${color}"`);
+      return { success: true, message: `Background changed to ${color}`, color };
+    }
+
+    function getPageInfo() {
+      const info = {
+        title: document.title,
+        url: location.href,
+        backgroundColor: document.body.style.background || '#1a1b1e',
+      };
+      log(`get_page_info → ${JSON.stringify(info)}`);
+      return info;
+    }
+
+    function addMessage(args) {
+      const text = args.text || args.message || 'Hello!';
+      const style = args.style || 'info';
+      const colors = {
+        info: '#5ba8c8',
+        success: '#5cb582',
+        warning: '#e6b800',
+        error: '#dc3545',
+      };
+      const el = document.createElement('div');
+      el.style.cssText = `
+        margin: 12px auto; padding: 12px 20px; max-width: 640px;
+        background: ${colors[style] || colors.info}22;
+        border: 1px solid ${colors[style] || colors.info};
+        border-radius: 8px; color: #dcddde; font-size: 14px;
+        animation: fadeIn 0.3s ease;
+      `;
+      el.textContent = text;
+      document.body.appendChild(el);
+      log(`add_message → "${text}" (${style})`);
+      return { success: true, message: `Displayed: ${text}` };
+    }
+
+    // ─── Register navigator.modelContext ─────────────────────────────
+
+    const tools = [
+      {
+        name: 'change_background',
+        description: 'Change the page background color. Accepts a CSS color string (e.g. "#ff5733", "red", "rgb(0,128,255)").',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            color: {
+              type: 'string',
+              description: 'CSS color value (hex, named, rgb, hsl)',
+            },
+          },
+          required: ['color'],
+        },
+        invoke: async (args) => changeBackground(args),
+      },
+      {
+        name: 'get_page_info',
+        description: 'Returns the current page title, URL, and background color.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+        invoke: async () => getPageInfo(),
+      },
+      {
+        name: 'add_message',
+        description: 'Display a styled message banner on the page.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            text: {
+              type: 'string',
+              description: 'The message text to display',
+            },
+            style: {
+              type: 'string',
+              enum: ['info', 'success', 'warning', 'error'],
+              description: 'Message style/severity (default: info)',
+            },
+          },
+          required: ['text'],
+        },
+        invoke: async (args) => addMessage(args),
+      },
+    ];
+
+    // Expose via navigator.modelContext (the WebMCP standard)
+    Object.defineProperty(navigator, 'modelContext', {
+      value: {
+        tools: tools,
+
+        // Also provide listTools() API
+        listTools: async () => tools.map(t => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+
+        // And invokeTool() API
+        invokeTool: async (name, args) => {
+          const tool = tools.find(t => t.name === name);
+          if (!tool) throw new Error(`Unknown tool: ${name}`);
+          return tool.invoke(args);
+        },
+      },
+      writable: false,
+      configurable: false,
+    });
+
+    log('WebMCP registered: ' + tools.map(t => t.name).join(', '));
+    console.log('[WebMCP] navigator.modelContext registered with', tools.length, 'tools');
+  </script>
+</body>
+</html>

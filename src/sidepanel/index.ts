@@ -1,0 +1,311 @@
+// ─── Side Panel Entry Point ─────────────────────────────────────────────────
+// Bootstraps the chat UI, wires the agent, listens for registry updates.
+
+import './style.scss';
+
+import { ChatView } from './chat-view';
+import type { SavedConversation } from './chat-view';
+import { getAgentApi, configureAndRebuild, type AgentAPI, type ChatTurn, type ToolStepEvent } from './agent';
+import type { WebMCPRegistryEntry, DirectLLMConfig, LMaaSConfig } from '../shared/types';
+import { logInfo } from '../shared/logger';
+
+// ─── WebMCP registry (mirror of background SW registry) ────────────────────
+
+const registry = new Map<number, WebMCPRegistryEntry>();
+let activeTabId: number | undefined;
+
+// ─── Boot ──────────────────────────────────────────────────────────────────
+
+const app = document.getElementById('app')!;
+
+const view = new ChatView(app, {
+  onSendMessage: handleSendMessage,
+  onConfigApply: handleConfigApply,
+  onRefreshWebMCP: handleRefreshWebMCP,
+  onToolToggle: handleToolToggle,
+  onToolGroupToggle: handleToolGroupToggle,
+  onConversationLoad: handleConversationLoad,
+  onConversationNew: handleConversationNew,
+  onConversationDelete: handleConversationDelete,
+  onMCPServerAdd: handleMCPServerAdd,
+  onMCPServerRemove: handleMCPServerRemove,
+  onMCPServerReconnect: handleMCPServerReconnect,
+});
+
+// Restore saved config on startup
+restoreSavedConfig();
+
+// Enable input
+view.enableInput();
+view.addSystemMessage('Welcome! Agent ready with default Qwen LLM. Use ⚙️ to switch to LMaaS or change settings.');
+
+// Wire agent callbacks
+const agent = getAgentApi();
+const chatHistory: ChatTurn[] = [];
+
+agent.onToolStep((steps: ToolStepEvent[]) => view.updateToolSteps(steps));
+
+// Provide tool manifest to ChatView
+view.setToolManifestProvider(() => agent.getToolManifest());
+
+// Provide MCP server list to ChatView
+view.setMCPServerProvider(() => agent.getMCPServers());
+
+// Restore MCP servers from storage
+agent.restoreMCPServers().then(() => {
+  logInfo('sidepanel', 'MCP servers restored from storage');
+  view.refreshMCPPanel();
+}).catch(() => {});
+
+// Restore disabled tools from storage
+chrome.storage.local.get('agent-webmcp-disabled-tools', (result) => {
+  const saved = result['agent-webmcp-disabled-tools'] as string[] | undefined;
+  if (saved && saved.length > 0) {
+    agent.setDisabledTools(saved);
+    logInfo('sidepanel', `Restored ${saved.length} disabled tools from storage`);
+  }
+});
+
+agent.onStreamText((text: string) => {
+  // Each stream text callback delivers the full (latest) content.
+  // The ChatView already manages its own streaming — we just set it here.
+});
+
+// ─── Message handling ──────────────────────────────────────────────────────
+
+async function handleSendMessage(message: string): Promise<void> {
+  view.addUserMessage(message);
+  chatHistory.push({ role: 'user', content: message });
+  view.disableInput();
+  view.showTypingIndicator();
+
+  try {
+    const response = await agent.query(message, chatHistory);
+    chatHistory.push({ role: 'assistant', content: response });
+    view.hideTypingIndicator();
+    view.finalizeToolSteps();
+    view.streamAssistantMessage(response);
+
+    // Wait for streaming to finish then finalize and auto-save
+    setTimeout(() => {
+      view.finalizeStreaming();
+      view.saveCurrentConversation(chatHistory);
+    }, Math.min(response.length * 35, 5000) + 500);
+  } catch (err: any) {
+    view.hideTypingIndicator();
+    view.addSystemMessage(`Error: ${err.message ?? err}`);
+  } finally {
+    view.enableInput();
+  }
+}
+
+// ─── Config handling ───────────────────────────────────────────────────────
+
+function handleConfigApply(config: { mode: 'direct' | 'lmaas'; fields: Record<string, string> }): void {
+  if (config.mode === 'direct') {
+    const llmConfig: DirectLLMConfig = {
+      provider: 'direct',
+      baseUrl: config.fields.baseUrl ?? '',
+      apiKey: config.fields.apiKey ?? '',
+      model: config.fields.model ?? '',
+    };
+    configureAndRebuild(llmConfig);
+    view.updateConnectionStatus(`Direct: ${llmConfig.model}`);
+  } else {
+    const llmConfig: LMaaSConfig = {
+      provider: 'lmaas',
+      clientId: config.fields.clientId ?? '',
+      clientSecret: config.fields.clientSecret ?? '',
+      audience: config.fields.audience ?? '',
+      deployment: config.fields.deployment ?? '',
+    };
+    configureAndRebuild(llmConfig);
+    view.updateConnectionStatus(`LMaaS: ${llmConfig.deployment}`);
+  }
+  view.addSystemMessage('LLM configuration applied. Agent ready.');
+}
+
+const DEFAULT_CONFIG = {
+  mode: 'direct' as const,
+  fields: {
+    baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4008/v1',
+    apiKey: 'test',
+    model: 'Qwen/Qwen3-Coder-Next-FP8',
+  },
+};
+
+function restoreSavedConfig(): void {
+  chrome.storage.local.get('agent-webmcp-config', (result) => {
+    const saved = result['agent-webmcp-config'] as Record<string, any> | undefined;
+    if (saved) {
+      const mode: 'direct' | 'lmaas' = saved.activeMode ?? 'direct';
+      const fields = mode === 'direct' ? saved.direct : saved.lmaas;
+      if (fields) {
+        handleConfigApply({ mode, fields });
+        return;
+      }
+    }
+    // No saved config — auto-apply defaults
+    handleConfigApply(DEFAULT_CONFIG);
+  });
+}
+
+// ─── MCP Server handling ───────────────────────────────────────────────────
+
+async function handleMCPServerAdd(name: string, url: string, authToken?: string) {
+  const entry = await agent.addMCPServer(name, url, authToken);
+  if (entry.status === 'connected') {
+    view.addSystemMessage(`MCP server "${name}" connected: ${entry.tools.length} tool${entry.tools.length !== 1 ? 's' : ''} available.`);
+  } else {
+    view.addSystemMessage(`MCP server "${name}" failed: ${entry.error ?? 'unknown error'}`);
+  }
+  return entry;
+}
+
+function handleMCPServerRemove(id: string) {
+  agent.removeMCPServer(id);
+  view.addSystemMessage('MCP server removed.');
+}
+
+async function handleMCPServerReconnect(id: string) {
+  const entry = await agent.reconnectMCPServer(id);
+  if (entry.status === 'connected') {
+    view.addSystemMessage(`MCP server "${entry.name}" reconnected: ${entry.tools.length} tool${entry.tools.length !== 1 ? 's' : ''}.`);
+  } else {
+    view.addSystemMessage(`MCP server "${entry.name}" reconnection failed: ${entry.error ?? 'unknown error'}`);
+  }
+  return entry;
+}
+
+// ─── WebMCP refresh ────────────────────────────────────────────────────────
+
+async function handleRefreshWebMCP(): Promise<void> {
+  if (activeTabId !== undefined) {
+    chrome.runtime.sendMessage(
+      { type: 'FORCE_DISCOVER', payload: { tabId: activeTabId } },
+      () => {},
+    );
+  }
+}
+
+// ─── Tool toggle handling ──────────────────────────────────────────────────
+
+function persistDisabledTools(): void {
+  const disabled = Array.from(agent.getDisabledTools());
+  chrome.storage.local.set({ 'agent-webmcp-disabled-tools': disabled });
+}
+
+function handleToolToggle(toolName: string, enabled: boolean): void {
+  agent.setToolEnabled(toolName, enabled);
+  persistDisabledTools();
+  logInfo('sidepanel', `Tool ${toolName} ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+function handleToolGroupToggle(toolNames: string[], enabled: boolean): void {
+  agent.setToolsEnabled(toolNames, enabled);
+  persistDisabledTools();
+  logInfo('sidepanel', `${toolNames.length} tools ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+// ─── Conversation handling ─────────────────────────────────────────────────
+
+function handleConversationLoad(conversation: SavedConversation): void {
+  // Clear current chat and load saved conversation
+  chatHistory.length = 0;
+  chatHistory.push(...conversation.chatHistory as ChatTurn[]);
+  view.loadConversation(conversation);
+  view.enableInput();
+  logInfo('sidepanel', `Loaded conversation: ${conversation.title}`);
+}
+
+function handleConversationNew(): void {
+  // Clear current chat and start fresh
+  chatHistory.length = 0;
+  view.clearMessages();
+  view.setCurrentConversationId(null);
+  view.addSystemMessage('New conversation started. Agent ready.');
+  view.enableInput();
+  logInfo('sidepanel', 'Started new conversation');
+}
+
+function handleConversationDelete(id: string): void {
+  view.deleteConversation(id);
+  logInfo('sidepanel', `Deleted conversation: ${id}`);
+}
+
+// ─── WebMCP annotation helper ─────────────────────────────────────────────
+
+function refreshWebMCPAnnotation(): void {
+  let totalTools = 0;
+  let tabCount = 0;
+  for (const entry of registry.values()) {
+    if (entry.available && entry.tools?.length > 0) {
+      totalTools += entry.tools.length;
+      tabCount++;
+    }
+  }
+  view.updateWebMCPStatusAllTabs(totalTools, tabCount);
+}
+
+// ─── Listen for registry updates from background SW ────────────────────────
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === 'WEBMCP_REGISTRY_UPDATE') {
+    const { tabId, entry } = message.payload;
+    registry.set(tabId, entry);
+    logInfo('sidepanel', `Registry update: tab=${tabId} available=${entry.available} tools=${entry.tools?.length ?? 0}`);
+
+    // Refresh the aggregated annotation (all tabs)
+    refreshWebMCPAnnotation();
+
+    // Wire WebMCP tools for this tab into the agent (all tabs, not just active)
+    if (entry.available && entry.tools?.length > 0) {
+      agent.updateWebMCPTools(tabId, entry.tools, entry.url, entry.title);
+      logInfo('sidepanel', `Wired ${entry.tools.length} WebMCP tools into agent for tab ${tabId}`);
+    } else {
+      agent.removeWebMCPToolsForTab(tabId);
+    }
+  }
+});
+
+// Track active tab
+chrome.tabs.onActivated?.addListener(({ tabId }) => {
+  activeTabId = tabId;
+  // Annotation always shows all-tabs aggregate, no change needed
+});
+
+// When a tab is closed, remove its WebMCP tools from the agent and update annotation
+chrome.tabs.onRemoved?.addListener((tabId) => {
+  registry.delete(tabId);
+  agent.removeWebMCPToolsForTab(tabId);
+  refreshWebMCPAnnotation();
+});
+
+// Get initial active tab
+chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+  if (tab?.id !== undefined) {
+    activeTabId = tab.id;
+    // Request full registry from background and wire ALL tabs' WebMCP tools
+    chrome.runtime.sendMessage({ type: 'GET_REGISTRY' }, (reg) => {
+      if (reg && Object.keys(reg).length > 0) {
+        Object.entries(reg).forEach(([k, v]) => {
+          const tid = Number(k);
+          const ent = v as WebMCPRegistryEntry;
+          registry.set(tid, ent);
+
+          // Wire each tab's tools into the agent
+          if (ent.available && ent.tools?.length > 0) {
+            agent.updateWebMCPTools(tid, ent.tools, ent.url, ent.title);
+          }
+        });
+        refreshWebMCPAnnotation();
+      } else {
+        // Registry empty — discover all open tabs
+        logInfo('sidepanel', 'Registry empty at init, discovering all tabs');
+        chrome.runtime.sendMessage({ type: 'DISCOVER_ALL' }, (res) => {
+          logInfo('sidepanel', `DISCOVER_ALL complete: ${res?.discovered ?? 0} tabs`);
+        });
+      }
+    });
+  }
+});
