@@ -91,10 +91,19 @@ export interface LMaaSConfig {
 
 export type LLMConfig = DirectLLMConfig | LMaaSConfig;
 
+// ─── VLM Config ─────────────────────────────────────────────────────────────
+
+export interface VLMConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 // ─── Extension settings (stored via chrome.storage) ─────────────────────────
 
 export interface ExtensionSettings {
   llm: LLMConfig;
+  vlm: VLMConfig;
   mcp: MCPConfig;
   enableWebMCP: boolean;
   enableMCPApps: boolean;
@@ -107,6 +116,11 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     baseUrl: 'http://localhost:11434/v1',
     apiKey: '',
     model: 'qwen2.5',
+  },
+  vlm: {
+    baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
+    apiKey: '',
+    model: 'Qwen3-VL-30B-A3B-Thinking',
   },
   mcp: {
     endpoint: '',

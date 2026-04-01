@@ -8,6 +8,7 @@ module.exports = {
     'background': './src/background/index.ts',
     'content-script': './src/content-script/index.ts',
     'page-bridge': './src/content-script/page-bridge.ts',
+    'webmcp-polyfill': './src/content-script/webmcp-polyfill.ts',
     'options': './src/options/index.ts',
   },
   output: {

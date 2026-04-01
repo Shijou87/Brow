@@ -115,8 +115,13 @@ export function createWebMCPTools(
   descriptors: WebMCPToolDescriptor[],
 ): StructuredToolInterface[] {
   return descriptors.map((descriptor) => {
-    const zodSchema = descriptor.inputSchema
-      ? jsonSchemaToZod(descriptor.inputSchema)
+    // inputSchema may arrive as a JSON string from Chrome's native API — parse it
+    let rawSchema = descriptor.inputSchema;
+    if (typeof rawSchema === 'string') {
+      try { rawSchema = JSON.parse(rawSchema); } catch { rawSchema = undefined; }
+    }
+    const zodSchema = rawSchema
+      ? jsonSchemaToZod(rawSchema as Record<string, unknown>)
       : z.object({});
 
     // Include tabId in tool name so tools from different tabs don't collide

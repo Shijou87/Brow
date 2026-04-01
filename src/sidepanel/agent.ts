@@ -19,9 +19,15 @@ import {
   tabsActivate,
   tabsCreate,
   tabsUpdateUrl,
+  tabCaptureScreenshot,
+  vlmQuery,
+  bookmarksGetAll,
+  bookmarksSearch,
+  historySearch,
   webmcpDiscover,
   webmcpInvoke,
 } from './tab-tools';
+import type { VLMConfig } from './tab-tools';
 import {
   ensureLlm,
   getLlmSync,
@@ -41,7 +47,7 @@ import {
   type MCPServerEntry,
   type MCPToolDescriptor,
 } from './mcp-client';
-import type { WebMCPToolDescriptor } from '../shared/types';
+import type { WebMCPToolDescriptor, VLMConfig as SharedVLMConfig } from '../shared/types';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -96,6 +102,9 @@ export interface AgentAPI {
   reconnectMCPServer: (id: string) => Promise<MCPServerEntry>;
   getMCPServers: () => MCPServerEntry[];
   restoreMCPServers: () => Promise<void>;
+  // VLM config
+  setVLMConfig: (config: VLMConfig) => void;
+  getVLMConfig: () => VLMConfig | null;
 }
 
 type ReactAgent = {
@@ -111,6 +120,10 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   tabs_activate: 'Activating tab',
   tabs_create: 'Creating tab',
   tabs_updateUrl: 'Navigating tab',
+  bookmarks_getAll: 'Getting all bookmarks',
+  bookmarks_search: 'Searching bookmarks',
+  history_search: 'Searching history',
+  tab_screenshot_vlm: 'Capturing & querying VLM',
   webmcp_discover: 'Discovering WebMCP tools',
   webmcp_invoke: 'Invoking WebMCP tool',
 };
@@ -149,6 +162,10 @@ function getToolCompletionDescription(toolName: string, result?: string): string
     tabs_activate: 'Tab activated',
     tabs_create: 'Tab created',
     tabs_updateUrl: 'Tab navigated',
+    bookmarks_getAll: 'Retrieved bookmarks',
+    bookmarks_search: 'Bookmarks search complete',
+    history_search: 'History search complete',
+    tab_screenshot_vlm: 'VLM analysis complete',
     webmcp_discover: 'Discovery complete',
     webmcp_invoke: 'Tool invoked',
   };
@@ -177,6 +194,16 @@ You have access to browser tab management tools and WebMCP tools.
 - tabs_activate: Switch to a specific tab
 - tabs_create: Create a new tab with a URL (you decide URLs for user intent like "go to my email" → https://mail.google.com/)
 - tabs_updateUrl: Navigate an existing tab to a new URL
+
+**Bookmark tools:**
+- bookmarks_getAll: Get all browser bookmarks (flattened list)
+- bookmarks_search: Search bookmarks by title or URL keyword
+
+**History tools:**
+- history_search: Search browser history by query, with optional max results and start time
+
+**Vision tools:**
+- tab_screenshot_vlm: Capture a screenshot of a tab and send it with a query to a Vision Language Model. Use this to visually analyze what's on a webpage (e.g., "describe what you see", "extract text from the image", "what product is shown?").
 
 **WebMCP tools:**
 - webmcp_discover: Discover WebMCP tools available on a tab (via navigator.modelContext)
@@ -274,6 +301,77 @@ function createBuiltinTools(): StructuredToolInterface[] {
     },
   );
 
+  const bookmarksGetAllTool = tool(
+    async () => {
+      const bookmarks = await bookmarksGetAll();
+      return JSON.stringify(bookmarks, null, 2);
+    },
+    {
+      name: 'bookmarks_getAll',
+      description: 'Get all browser bookmarks as a flat list. Returns id, title, url, parentId, dateAdded for each bookmark.',
+      schema: z.object({}),
+    },
+  );
+
+  const bookmarksSearchTool = tool(
+    async ({ query }: { query: string }) => {
+      const results = await bookmarksSearch(query);
+      return JSON.stringify(results, null, 2);
+    },
+    {
+      name: 'bookmarks_search',
+      description: 'Search bookmarks by title or URL keyword.',
+      schema: z.object({
+        query: z.string().describe('Search query to match against bookmark titles and URLs'),
+      }),
+    },
+  );
+
+  const historySearchTool = tool(
+    async ({ query, maxResults, startTime }: { query: string; maxResults?: number; startTime?: number }) => {
+      const results = await historySearch(query, maxResults ?? 50, startTime);
+      return JSON.stringify(results, null, 2);
+    },
+    {
+      name: 'history_search',
+      description: 'Search browser history. Returns matching history items with url, title, lastVisitTime, visitCount.',
+      schema: z.object({
+        query: z.string().describe('Text to search for in history URLs and titles'),
+        maxResults: z.number().optional().describe('Maximum number of results to return (default: 50)'),
+        startTime: z.number().optional().describe('Only return results visited after this timestamp (ms since epoch)'),
+      }),
+    },
+  );
+
+  const tabScreenshotVlmTool = tool(
+    async ({ tabId, query }: { tabId?: number; query: string }) => {
+      // Get VLM config from the singleton agent
+      const agentInstance = singletonAgent;
+      const vlmConfig = agentInstance?.getVLMConfig();
+      if (!vlmConfig || !vlmConfig.baseUrl || !vlmConfig.model) {
+        return JSON.stringify({ ok: false, error: 'VLM not configured. Please set VLM endpoint, model, and API key in the config panel.' });
+      }
+
+      // Capture screenshot
+      const screenshot = await tabCaptureScreenshot(tabId);
+      if (!screenshot.ok || !screenshot.dataUrl) {
+        return JSON.stringify({ ok: false, error: screenshot.error ?? 'Failed to capture screenshot' });
+      }
+
+      // Send to VLM
+      const result = await vlmQuery(vlmConfig, screenshot.dataUrl, query);
+      return JSON.stringify(result, null, 2);
+    },
+    {
+      name: 'tab_screenshot_vlm',
+      description: 'Capture a screenshot of a browser tab and send it with a text query to a Vision Language Model (VLM). Use this to visually analyze webpage content. Returns the VLM\'s text response.',
+      schema: z.object({
+        tabId: z.number().optional().describe('Tab ID to screenshot (default: current active tab)'),
+        query: z.string().describe('Question or instruction for the VLM about the screenshot (e.g., "describe what you see", "extract all text", "what products are shown?")'),
+      }),
+    },
+  );
+
   const webmcpDiscoverTool = tool(
     async ({ tabId }: { tabId?: number }) => {
       const result = await webmcpDiscover(tabId);
@@ -311,6 +409,10 @@ function createBuiltinTools(): StructuredToolInterface[] {
     tabsActivateTool as unknown as StructuredToolInterface,
     tabsCreateTool as unknown as StructuredToolInterface,
     tabsUpdateUrlTool as unknown as StructuredToolInterface,
+    bookmarksGetAllTool as unknown as StructuredToolInterface,
+    bookmarksSearchTool as unknown as StructuredToolInterface,
+    historySearchTool as unknown as StructuredToolInterface,
+    tabScreenshotVlmTool as unknown as StructuredToolInterface,
     webmcpDiscoverTool as unknown as StructuredToolInterface,
     webmcpInvokeTool as unknown as StructuredToolInterface,
   ];
@@ -332,6 +434,8 @@ export class Agent implements AgentAPI {
   private mcpServers = new Map<string, MCPServerEntry & { langchainTools: StructuredToolInterface[] }>();
   /** Disabled tool names — these are excluded from the agent graph */
   private disabledTools = new Set<string>();
+  /** VLM configuration for the screenshot analysis tool */
+  private vlmConfig: VLMConfig | null = null;
   private toolStepCallbacks: ToolStepCallback[] = [];
   private streamTextCallbacks: StreamTextCallback[] = [];
   private queryAbortController: AbortController | null = null;
@@ -572,6 +676,17 @@ export class Agent implements AgentAPI {
       ({ id, name, url, authToken }) => ({ id, name, url, authToken }),
     );
     saveServers(configs);
+  }
+
+  // ─── VLM config management ───────────────────────────────────────────
+
+  setVLMConfig(config: VLMConfig): void {
+    this.vlmConfig = config;
+    console.log('[agent] VLM config set:', config.model, '@', config.baseUrl);
+  }
+
+  getVLMConfig(): VLMConfig | null {
+    return this.vlmConfig;
   }
 
   // ─── Callback registration ───────────────────────────────────────────

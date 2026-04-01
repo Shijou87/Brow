@@ -21,6 +21,7 @@ const app = document.getElementById('app')!;
 const view = new ChatView(app, {
   onSendMessage: handleSendMessage,
   onConfigApply: handleConfigApply,
+  onVLMConfigApply: handleVLMConfigApply,
   onRefreshWebMCP: handleRefreshWebMCP,
   onToolToggle: handleToolToggle,
   onToolGroupToggle: handleToolGroupToggle,
@@ -125,6 +126,11 @@ function handleConfigApply(config: { mode: 'direct' | 'lmaas'; fields: Record<st
   view.addSystemMessage('LLM configuration applied. Agent ready.');
 }
 
+function handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: string }): void {
+  agent.setVLMConfig(config);
+  console.log('[sidepanel] VLM config applied:', config.model, '@', config.baseUrl);
+}
+
 const DEFAULT_CONFIG = {
   mode: 'direct' as const,
   fields: {
@@ -142,11 +148,30 @@ function restoreSavedConfig(): void {
       const fields = mode === 'direct' ? saved.direct : saved.lmaas;
       if (fields) {
         handleConfigApply({ mode, fields });
-        return;
+      } else {
+        handleConfigApply(DEFAULT_CONFIG);
       }
+
+      // Restore VLM config
+      if (saved.vlm && saved.vlm.baseUrl && saved.vlm.model) {
+        handleVLMConfigApply(saved.vlm);
+      } else {
+        // Apply VLM defaults
+        handleVLMConfigApply({
+          baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
+          apiKey: '',
+          model: 'Qwen3-VL-30B-A3B-Thinking',
+        });
+      }
+      return;
     }
     // No saved config — auto-apply defaults
     handleConfigApply(DEFAULT_CONFIG);
+    handleVLMConfigApply({
+      baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
+      apiKey: '',
+      model: 'Qwen3-VL-30B-A3B-Thinking',
+    });
   });
 }
 

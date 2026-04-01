@@ -3,7 +3,7 @@
 
 import './options-style.scss';
 
-import type { ExtensionSettings, DEFAULT_SETTINGS } from '../shared/types';
+import type { ExtensionSettings } from '../shared/types';
 
 const STORAGE_KEY = 'agent-webmcp-settings';
 
@@ -11,11 +11,21 @@ const STORAGE_KEY = 'agent-webmcp-settings';
 
 const app = document.getElementById('options-app')!;
 app.innerHTML = `
-  <div class="options-container">
-    <h1>Agent WebMCP Settings</h1>
+  <div class="options-shell">
+    <header class="options-hero">
+      <div class="options-hero-copy">
+        <p class="options-kicker">Chrome Extension Control Surface</p>
+        <h1>Agent WebMCP Settings</h1>
+        <p class="options-summary">Apply the same dark neon theme to the extension configuration surface while keeping the existing MCP and feature controls intact.</p>
+      </div>
+      <div class="options-hero-badge">Runtime Config</div>
+    </header>
 
     <section class="options-section">
-      <h2>MCP Server</h2>
+      <div class="section-heading">
+        <h2>MCP Server</h2>
+        <p>Point the extension at a remote MCP endpoint and choose the transport the agent should use.</p>
+      </div>
       <div class="option-field">
         <label for="mcp-endpoint">Endpoint</label>
         <input type="text" id="mcp-endpoint" placeholder="http://localhost:3000/mcp" />
@@ -35,7 +45,10 @@ app.innerHTML = `
     </section>
 
     <section class="options-section">
-      <h2>Feature Flags</h2>
+      <div class="section-heading">
+        <h2>Feature Flags</h2>
+        <p>Toggle runtime capabilities for discovery, embedded MCP apps, and debugging.</p>
+      </div>
       <div class="option-toggle">
         <label>
           <input type="checkbox" id="enable-webmcp" checked />
@@ -58,7 +71,7 @@ app.innerHTML = `
 
     <div class="options-actions">
       <button id="save-btn" class="primary-btn">Save Settings</button>
-      <span id="save-status"></span>
+      <span id="save-status" class="save-status"></span>
     </div>
   </div>
 `;
@@ -114,8 +127,8 @@ async function saveSettings(): Promise<void> {
 
   const status = document.getElementById('save-status')!;
   status.textContent = 'Saved!';
-  status.className = 'save-success';
-  setTimeout(() => { status.textContent = ''; status.className = ''; }, 2000);
+  status.className = 'save-status save-success';
+  setTimeout(() => { status.textContent = ''; status.className = 'save-status'; }, 2000);
 }
 
 // ─── Wire events ───────────────────────────────────────────────────────────

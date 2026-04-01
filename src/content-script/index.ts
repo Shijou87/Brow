@@ -27,6 +27,7 @@ function callPageBridge(action: string, extra: Record<string, unknown> = {}): Pr
     const id = ++rpcCounter;
     const timer = setTimeout(() => {
       pendingRpcs.delete(id);
+      console.error(`[WebMCP][content-script] Bridge TIMEOUT for action="${action}" id=${id} (5s)`);
       resolve(action === 'discover'
         ? { available: false, tools: [], error: 'BRIDGE_TIMEOUT' }
         : { ok: false, error: 'BRIDGE_TIMEOUT' });
@@ -40,9 +41,11 @@ function callPageBridge(action: string, extra: Record<string, unknown> = {}): Pr
 
 async function discoverWebMCP(): Promise<WebMCPDiscoveryResult> {
   const tabId = -1; // filled by background
+  console.log('[WebMCP][content-script] Starting discovery on', location.href);
   const bridgeResult = await callPageBridge('discover');
 
   if (!bridgeResult.available) {
+    console.warn('[WebMCP][content-script] Discovery unavailable:', bridgeResult.error);
     return {
       available: false,
       tools: [],
@@ -52,12 +55,20 @@ async function discoverWebMCP(): Promise<WebMCPDiscoveryResult> {
     };
   }
 
-  const tools: WebMCPToolDescriptor[] = (bridgeResult.tools ?? []).map((t: any) => ({
-    name: t.name,
-    description: t.description ?? '',
-    inputSchema: t.inputSchema,
-  }));
+  const tools: WebMCPToolDescriptor[] = (bridgeResult.tools ?? []).map((t: any) => {
+    // inputSchema may arrive as a JSON string from Chrome's native API — parse it
+    let schema = t.inputSchema;
+    if (typeof schema === 'string') {
+      try { schema = JSON.parse(schema); } catch { /* leave as-is */ }
+    }
+    return {
+      name: t.name,
+      description: t.description ?? '',
+      inputSchema: schema,
+    };
+  });
 
+  console.log(`[WebMCP][content-script] Discovery OK: ${tools.length} tool(s)`, tools.map(t => t.name));
   return {
     available: true,
     tools,
@@ -94,9 +105,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'WEBMCP_INVOKE') {
     const { toolName, args } = message.payload ?? {};
     if (toolName) {
+      console.log(`[WebMCP][content-script] Invoking tool="${toolName}"`, args);
       invokeWebMCPTool(toolName, args ?? {})
-        .then((result) => sendResponse(result))
-        .catch((err) => sendResponse({ ok: false, error: err.message }));
+        .then((result) => {
+          if (!result.ok) console.error(`[WebMCP][content-script] Invoke FAILED: tool="${toolName}"`, result.error);
+          else console.log(`[WebMCP][content-script] Invoke OK: tool="${toolName}"`);
+          sendResponse(result);
+        })
+        .catch((err) => {
+          console.error(`[WebMCP][content-script] Invoke ERROR: tool="${toolName}"`, err);
+          sendResponse({ ok: false, error: err.message });
+        });
       return true;
     }
   }

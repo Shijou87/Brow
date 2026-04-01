@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700;800;900&amp;family=Manrope:wght@200;300;400;500;600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            "on-primary": "#4f006c",
+            "on-tertiary-fixed": "#003f43",
+            "on-tertiary-fixed-variant": "#005e64",
+            "tertiary-fixed-dim": "#00deec",
+            "secondary": "#d9c1ff",
+            "tertiary-container": "#00eefc",
+            "surface-container": "#19191d",
+            "inverse-surface": "#fbf8fc",
+            "on-primary-fixed-variant": "#4c0068",
+            "primary-container": "#d978ff",
+            "on-secondary": "#4d3a6e",
+            "primary-fixed-dim": "#d160ff",
+            "on-secondary-fixed": "#3d2a5d",
+            "outline": "#767578",
+            "primary": "#e08dff",
+            "on-tertiary": "#005d63",
+            "surface-container-highest": "#25252a",
+            "on-error-container": "#ffb2b9",
+            "error-dim": "#d73357",
+            "on-surface": "#fbf8fc",
+            "primary-fixed": "#d978ff",
+            "on-secondary-fixed-variant": "#5a477c",
+            "on-surface-variant": "#acaaae",
+            "on-primary-fixed": "#000000",
+            "surface-container-low": "#131316",
+            "inverse-primary": "#9a00cf",
+            "outline-variant": "#48474b",
+            "secondary-dim": "#cbb4f1",
+            "surface-tint": "#e08dff",
+            "secondary-fixed-dim": "#d1b9f6",
+            "background": "#0e0e11",
+            "surface-dim": "#0e0e11",
+            "tertiary-dim": "#00deec",
+            "surface": "#0e0e11",
+            "tertiary": "#8ff5ff",
+            "tertiary-fixed": "#00eefc",
+            "secondary-container": "#503d71",
+            "on-tertiary-container": "#005359",
+            "surface-bright": "#2c2c30",
+            "error": "#ff6e84",
+            "surface-container-lowest": "#000000",
+            "error-container": "#a70138",
+            "on-error": "#490013",
+            "surface-container-high": "#1f1f23",
+            "on-background": "#fbf8fc",
+            "inverse-on-surface": "#555458",
+            "on-secondary-container": "#ddc6ff",
+            "primary-dim": "#bc00fb",
+            "secondary-fixed": "#dec8ff",
+            "on-primary-container": "#3d0055",
+            "surface-variant": "#25252a"
+          },
+          fontFamily: {
+            "headline": ["Space Grotesk"],
+            "body": ["Manrope"],
+            "label": ["Space Grotesk"]
+          },
+          borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+        },
+      },
+    }
+  </script>
+<style>
+    .material-symbols-outlined {
+      font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+      display: inline-block;
+      line-height: 1;
+      text-transform: none;
+      letter-spacing: normal;
+      word-wrap: normal;
+      white-space: nowrap;
+      direction: ltr;
+    }
+    .scanline-overlay {
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.03) 0px,
+        rgba(0, 0, 0, 0.03) 1px,
+        transparent 1px,
+        transparent 2px
+      );
+      pointer-events: none;
+      z-index: 100;
+    }
+    .digital-grid {
+      background-image: linear-gradient(rgba(224, 141, 255, 0.03) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(224, 141, 255, 0.03) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: rgba(224, 141, 255, 0.2);
+      border-radius: 2px;
+    }
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="bg-background text-on-background font-body selection:bg-primary/30 min-h-screen flex flex-col overflow-hidden">
+<div class="scanline-overlay"></div>
+<div class="digital-grid fixed inset-0 pointer-events-none"></div>
+<!-- Shared Component: TopAppBar -->
+<header class="fixed top-0 w-full z-50 bg-[#0e0e11] backdrop-blur-xl bg-opacity-80 shadow-[0_0_20px_rgba(224,141,255,0.06)] border-b border-[#ffffff10]">
+<div class="flex justify-between items-center px-6 py-4 w-full">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-[#e08dff]" data-icon="language">language</span>
+<span class="text-lg font-bold text-[#e08dff] uppercase tracking-widest font-['Space_Grotesk']">Agent MyBrow</span>
+</div>
+<div class="hidden sm:flex items-center bg-[#1c1c21] rounded-full px-3 py-1 gap-2 border border-white/5">
+<span class="text-[10px] text-slate-400 font-label tracking-tighter">Direct: Qwen/Qwen3-Coder-Next-FP8</span>
+<div class="flex gap-1.5 ml-2">
+<span class="material-symbols-outlined text-[14px] text-slate-400" data-icon="construction">construction</span>
+<span class="material-symbols-outlined text-[14px] text-slate-400" data-icon="view_agenda">view_agenda</span>
+<span class="material-symbols-outlined text-[14px] text-slate-400" data-icon="chat">chat</span>
+<span class="material-symbols-outlined text-[14px] text-slate-400" data-icon="settings">settings</span>
+</div>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-1.5">
+<span class="w-2 h-2 bg-slate-500 rounded-full"></span>
+<span class="text-[11px] font-headline font-bold text-[#e08dff] tracking-tight">WebMCP: N/A</span>
+</div>
+<button class="text-slate-400 hover:text-primary transition-colors active:rotate-180 duration-500">
+<span class="material-symbols-outlined text-lg" data-icon="refresh">refresh</span>
+</button>
+</div>
+</div>
+</header>
+<main class="flex-grow flex pt-[72px] pb-[100px] overflow-hidden relative">
+<!-- Chat Canvas -->
+<section class="flex-grow flex flex-col px-4 md:px-8 max-w-4xl mx-auto w-full overflow-hidden">
+<!-- Messages Area -->
+<div class="flex-grow overflow-y-auto space-y-6 pr-2 custom-scrollbar pt-8 pb-4">
+<!-- Minimal Message Block: System Info -->
+<div class="flex justify-center">
+<div class="bg-[#1c1c21]/80 border border-white/5 px-6 py-4 rounded-xl max-w-[90%] text-center shadow-lg">
+<p class="text-xs text-slate-300 font-body leading-relaxed">
+            Welcome! Agent ready with default Qwen LLM. Use <span class="material-symbols-outlined text-[12px] align-middle" data-icon="settings">settings</span> to switch to LMaaS or change settings.
+          </p>
+</div>
+</div>
+<!-- Minimal Message Block: Status -->
+<div class="flex justify-center">
+<div class="bg-[#1c1c21]/80 border border-white/5 px-6 py-2 rounded-lg shadow-sm">
+<p class="text-[11px] text-slate-400 font-label tracking-wide uppercase">
+            LLM configuration applied. Agent ready.
+          </p>
+</div>
+</div>
+<!-- User Message (styled more minimally for the new layout) -->
+<div class="flex flex-col items-end gap-1.5 self-end max-w-[85%]">
+<div class="bg-primary/10 border border-primary/20 px-4 py-3 rounded-2xl rounded-tr-none">
+<p class="text-sm text-on-background">Initialize a deep scan on the recent LLM configuration changes.</p>
+</div>
+<span class="text-[9px] font-label text-slate-500 mr-1 uppercase">09:42:15 AST</span>
+</div>
+<!-- Agent Message (styled more minimally for the new layout) -->
+<div class="flex flex-col items-start gap-1.5 max-w-[85%]">
+<div class="bg-[#1c1c21] border border-white/5 px-4 py-3 rounded-2xl rounded-tl-none">
+<p class="text-sm text-on-background">Accessing latent space archives... Semantic indexing optimized.</p>
+</div>
+<span class="text-[9px] font-label text-slate-500 ml-1 uppercase">09:42:18 AST</span>
+</div>
+</div>
+<!-- Input Area -->
+<div class="pb-6 bg-transparent">
+<div class="relative flex items-center bg-[#1c1c21] border border-white/10 rounded-full px-6 py-3 shadow-2xl focus-within:border-primary/40 transition-all">
+<input class="flex-grow bg-transparent border-none focus:ring-0 text-on-surface text-sm font-body placeholder:text-slate-500" placeholder="Ask the agent anything..." type="text"/>
+<button class="flex items-center justify-center bg-primary text-on-primary w-8 h-8 rounded-lg shadow-[0_0_10px_rgba(224,141,255,0.4)] active:scale-95 transition-transform">
+<span class="material-symbols-outlined text-lg" data-icon="send">send</span>
+</button>
+</div>
+</div>
+</section>
+</main>
+<!-- Shared Component: BottomNavBar (Mobile-ready updated structure) -->
+<nav class="fixed bottom-0 left-0 w-full z-50 bg-[#0e0e11] backdrop-blur-xl bg-opacity-90 border-t border-[#ffffff15] rounded-t-xl shadow-[0_-4px_20px_rgba(0,0,0,0.5)]">
+<div class="flex justify-around items-center px-4 pb-6 pt-2">
+<a class="flex items-center justify-center text-slate-500 p-3 hover:text-[#e08dff] hover:bg-[#ffffff05] active:scale-95 transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="build">build</span>
+</a>
+<a class="flex items-center justify-center text-slate-500 p-3 hover:text-[#e08dff] hover:bg-[#ffffff05] active:scale-95 transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="database">database</span>
+</a>
+<a class="flex items-center justify-center bg-[#e08dff20] text-[#e08dff] rounded-lg p-3 shadow-[0_0_10px_rgba(224,141,255,0.3)] active:scale-95 transition-all duration-150 text-slate-500" href="#">
+<span class="material-symbols-outlined" data-icon="chat_bubble">chat_bubble</span>
+</a>
+<a class="flex items-center justify-center text-slate-500 p-3 hover:text-[#e08dff] hover:bg-[#ffffff05] active:scale-95 transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+</a>
+<a class="flex items-center justify-center p-3 hover:text-[#e08dff] hover:bg-[#ffffff05] active:scale-95 transition-all duration-150 bg-[#e08dff20] text-[#e08dff] rounded-lg shadow-[0_0_10px_rgba(224,141,255,0.3)]" href="#">
+<span class="material-symbols-outlined" data-icon="add" style="font-variation-settings: 'FILL' 1;">add</span>
+</a>
+</div>
+</nav>
+</body></html>

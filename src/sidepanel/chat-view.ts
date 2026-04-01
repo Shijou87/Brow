@@ -18,6 +18,7 @@ export interface SavedConversation {
 export interface ChatViewCallbacks {
   onSendMessage: (message: string) => void;
   onConfigApply: (config: { mode: 'direct' | 'lmaas'; fields: Record<string, string> }) => void;
+  onVLMConfigApply: (config: { baseUrl: string; apiKey: string; model: string }) => void;
   onRefreshWebMCP: () => void;
   onToolToggle: (toolName: string, enabled: boolean) => void;
   onToolGroupToggle: (toolNames: string[], enabled: boolean) => void;
@@ -29,6 +30,8 @@ export interface ChatViewCallbacks {
   onMCPServerReconnect: (id: string) => Promise<MCPServerEntry>;
 }
 
+type SurfaceMode = 'chat' | 'tools' | 'mcp' | 'conversations' | 'config';
+
 export class ChatView {
   private container: HTMLElement;
   private callbacks: ChatViewCallbacks;
@@ -37,10 +40,11 @@ export class ChatView {
   private chatHeader!: HTMLElement;
   private chatBody!: HTMLElement;
   private messagesContainer!: HTMLElement;
+  private inputContainer!: HTMLElement;
   private messageInput!: HTMLInputElement;
   private sendButton!: HTMLButtonElement;
-  private statusBar!: HTMLElement;
   private webmcpIndicator!: HTMLElement;
+  private bottomNav!: HTMLElement;
   private configPanel!: HTMLElement;
   private toolsPanel!: HTMLElement;
   private conversationsPanel!: HTMLElement;
@@ -52,6 +56,7 @@ export class ChatView {
   private isToolsVisible = false;
   private isConversationsVisible = false;
   private isMCPVisible = false;
+  private activeSurface: SurfaceMode = 'chat';
 
   // Current conversation
   private currentConversationId: string | null = null;
@@ -64,7 +69,7 @@ export class ChatView {
 
   // Tool steps
   private currentToolStepsContainer: HTMLElement | null = null;
-  private toolStepsCollapsed = true;
+  private toolStepsCollapsed = false;
 
   constructor(container: HTMLElement, callbacks: ChatViewCallbacks) {
     this.container = container;
@@ -302,8 +307,52 @@ export class ChatView {
    * The existing widget stays in the chat history.
    */
   public finalizeToolSteps(): void {
+    if (this.currentToolStepsContainer) {
+      const finalized = this.currentToolStepsContainer.cloneNode(true) as HTMLElement;
+      finalized.classList.add('finalized');
+
+      const header = finalized.querySelector('.tool-steps-header') as HTMLElement | null;
+      const body = finalized.querySelector('.tool-steps-body') as HTMLElement | null;
+      const toggleBtn = finalized.querySelector('.tool-steps-toggle') as HTMLElement | null;
+      const chevronSvg = (collapsed: boolean) =>
+        `<svg class="tool-steps-chevron${collapsed ? '' : ' rotated'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+
+      let collapsed = false;
+
+      const render = () => {
+        if (body) {
+          body.classList.toggle('collapsed', collapsed);
+          body.style.maxHeight = '';
+          body.style.opacity = '';
+          body.style.overflow = '';
+        }
+
+        finalized.querySelectorAll('.tool-steps-header .tool-steps-chevron').forEach((el) => {
+          el.classList.toggle('rotated', !collapsed);
+        });
+
+        if (toggleBtn) {
+          toggleBtn.innerHTML = `${collapsed ? 'Show details' : 'Hide details'} ${chevronSvg(collapsed)}`;
+        }
+      };
+
+      const toggle = () => {
+        collapsed = !collapsed;
+        render();
+      };
+
+      header?.addEventListener('click', toggle);
+      toggleBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggle();
+      });
+
+      render();
+
+      this.currentToolStepsContainer.replaceWith(finalized);
+    }
     this.currentToolStepsContainer = null;
-    this.toolStepsCollapsed = true;
+    this.toolStepsCollapsed = false;
   }
 
   /** Render an MCP App inside a sandboxed iframe */
@@ -337,55 +386,23 @@ export class ChatView {
     this.chatHeader = document.createElement('div');
     this.chatHeader.className = 'chat-header';
     this.chatHeader.innerHTML = `
-      <h3>Agent WebMCP</h3>
-      <div class="header-controls">
+      <div class="header-brand">
+        <div class="brand-copy">
+          <h3>BROW</h3>
+        </div>
+      </div>
+      <div class="header-meta">
+        <div class="webmcp-indicator"><span class="status-dot unavailable"></span> WebMCP: N/A</div>
         <span class="connection-status">Ready</span>
-        <button class="tools-toggle-btn" title="Manage Tools">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
-          </svg>
-        </button>
-        <button class="mcp-toggle-btn" title="MCP Servers">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-            <line x1="6" y1="6" x2="6.01" y2="6"></line>
-            <line x1="6" y1="18" x2="6.01" y2="18"></line>
-          </svg>
-        </button>
-        <button class="conversations-toggle-btn" title="Conversations">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-            <line x1="9" y1="9" x2="15" y2="9"></line>
-            <line x1="9" y1="13" x2="13" y2="13"></line>
-          </svg>
-        </button>
-        <button class="config-toggle-btn" title="Configure LLM">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
+        <button class="refresh-webmcp-btn" title="Refresh WebMCP discovery" aria-label="Refresh WebMCP discovery">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
         </button>
       </div>`;
     this.container.appendChild(this.chatHeader);
 
-    // Status bar
-    this.statusBar = document.createElement('div');
-    this.statusBar.className = 'status-bar';
-
-    this.webmcpIndicator = document.createElement('div');
-    this.webmcpIndicator.className = 'webmcp-indicator';
-    this.webmcpIndicator.innerHTML = `<span class="status-dot unavailable"></span> WebMCP: N/A`;
-
-    const refreshBtn = document.createElement('button');
-    refreshBtn.className = 'refresh-webmcp-btn';
-    refreshBtn.title = 'Refresh WebMCP discovery';
-    refreshBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>`;
-    refreshBtn.addEventListener('click', () => this.callbacks.onRefreshWebMCP());
-
-    this.statusBar.appendChild(this.webmcpIndicator);
-    this.statusBar.appendChild(refreshBtn);
-    this.container.appendChild(this.statusBar);
+    this.webmcpIndicator = this.chatHeader.querySelector('.webmcp-indicator') as HTMLElement;
+    const refreshBtn = this.chatHeader.querySelector('.refresh-webmcp-btn');
+    refreshBtn?.addEventListener('click', () => this.callbacks.onRefreshWebMCP());
 
     // Chat body
     this.chatBody = document.createElement('div');
@@ -394,8 +411,8 @@ export class ChatView {
     this.messagesContainer = document.createElement('div');
     this.messagesContainer.className = 'chat-messages';
 
-    const inputContainer = document.createElement('div');
-    inputContainer.className = 'chat-input-container';
+    this.inputContainer = document.createElement('div');
+    this.inputContainer.className = 'chat-input-container';
 
     this.messageInput = document.createElement('input');
     this.messageInput.id = 'chat-input';
@@ -407,8 +424,8 @@ export class ChatView {
     this.sendButton.disabled = true;
     this.sendButton.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
 
-    inputContainer.appendChild(this.messageInput);
-    inputContainer.appendChild(this.sendButton);
+    this.inputContainer.appendChild(this.messageInput);
+    this.inputContainer.appendChild(this.sendButton);
 
     // Tools panel (hidden, sits between messages and input)
     this.toolsPanel = this.createToolsPanel();
@@ -423,15 +440,54 @@ export class ChatView {
     this.chatBody.appendChild(this.toolsPanel);
     this.chatBody.appendChild(this.mcpPanel);
     this.chatBody.appendChild(this.conversationsPanel);
-    this.chatBody.appendChild(inputContainer);
+    this.chatBody.appendChild(this.inputContainer);
     this.container.appendChild(this.chatBody);
 
     // Config panel (hidden)
     this.configPanel = this.createConfigPanel();
     this.container.appendChild(this.configPanel);
 
+    // Bottom nav
+    this.bottomNav = document.createElement('nav');
+    this.bottomNav.className = 'bottom-nav';
+    this.bottomNav.innerHTML = `
+      <button class="bottom-nav-btn tools-toggle-btn" data-surface="tools" title="Manage Tools" aria-label="Manage Tools">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+        </svg>
+      </button>
+      <button class="bottom-nav-btn mcp-toggle-btn" data-surface="mcp" title="MCP Servers" aria-label="MCP Servers">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+          <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+          <line x1="6" y1="6" x2="6.01" y2="6"></line>
+          <line x1="6" y1="18" x2="6.01" y2="18"></line>
+        </svg>
+      </button>
+      <button class="bottom-nav-btn chat-home-btn" data-surface="chat" title="Chat" aria-label="Chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        </svg>
+      </button>
+      <button class="bottom-nav-btn conversations-toggle-btn" data-surface="conversations" title="Conversations" aria-label="Conversations">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <line x1="7" y1="7" x2="17" y2="7"></line>
+          <line x1="7" y1="12" x2="17" y2="12"></line>
+          <line x1="7" y1="17" x2="13" y2="17"></line>
+          <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+        </svg>
+      </button>
+      <button class="bottom-nav-btn config-toggle-btn" data-surface="config" title="Configure LLM" aria-label="Configure LLM">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>`;
+    this.container.appendChild(this.bottomNav);
+
     // Event listeners
     this.setupEventListeners();
+    this.setActiveSurface('chat');
   }
 
   private setupEventListeners(): void {
@@ -455,71 +511,66 @@ export class ChatView {
     this.messageInput.addEventListener('keyup', (e) => e.stopPropagation());
     this.messageInput.addEventListener('keypress', (e) => e.stopPropagation());
 
-    // Config toggle
-    const configBtn = this.chatHeader.querySelector('.config-toggle-btn');
-    configBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.toggleConfigPanel();
-    });
-
-    // Tools toggle
-    const toolsBtn = this.chatHeader.querySelector('.tools-toggle-btn');
-    toolsBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.toggleToolsPanel();
-    });
-
-    // Conversations toggle
-    const convoBtn = this.chatHeader.querySelector('.conversations-toggle-btn');
-    convoBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.toggleConversationsPanel();
-    });
-
-    // MCP servers toggle
-    const mcpBtn = this.chatHeader.querySelector('.mcp-toggle-btn');
-    mcpBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.toggleMCPPanel();
+    this.bottomNav.querySelectorAll<HTMLButtonElement>('.bottom-nav-btn[data-surface]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const surface = btn.dataset.surface as SurfaceMode;
+        switch (surface) {
+          case 'tools':
+            this.toggleToolsPanel();
+            break;
+          case 'mcp':
+            this.toggleMCPPanel();
+            break;
+          case 'conversations':
+            this.toggleConversationsPanel();
+            break;
+          case 'config':
+            this.toggleConfigPanel();
+            break;
+          default:
+            this.setActiveSurface('chat');
+        }
+      });
     });
   }
 
   // ─── Tools Panel ────────────────────────────────────────────────────────
 
-  private toggleToolsPanel(): void {
-    // Close config if open
-    if (this.isConfigVisible) {
-      this.isConfigVisible = false;
-      this.configPanel.style.display = 'none';
-      this.chatBody.style.display = '';
-      this.statusBar.style.display = '';
-    }
-    // Close conversations if open
-    if (this.isConversationsVisible) {
-      this.isConversationsVisible = false;
-      this.conversationsPanel.style.display = 'none';
-      const convoBtn = this.chatHeader.querySelector('.conversations-toggle-btn');
-      if (convoBtn) convoBtn.classList.toggle('active', false);
-    }
-    // Close MCP panel if open
-    if (this.isMCPVisible) {
-      this.isMCPVisible = false;
-      this.mcpPanel.style.display = 'none';
-      const mcpBtn = this.chatHeader.querySelector('.mcp-toggle-btn');
-      if (mcpBtn) mcpBtn.classList.toggle('active', false);
-    }
+  private setActiveSurface(surface: SurfaceMode): void {
+    this.activeSurface = surface;
+    this.isToolsVisible = surface === 'tools';
+    this.isMCPVisible = surface === 'mcp';
+    this.isConversationsVisible = surface === 'conversations';
+    this.isConfigVisible = surface === 'config';
 
-    this.isToolsVisible = !this.isToolsVisible;
+    this.chatBody.style.display = this.isConfigVisible ? 'none' : 'flex';
+    this.configPanel.style.display = this.isConfigVisible ? 'flex' : 'none';
     this.toolsPanel.style.display = this.isToolsVisible ? 'flex' : 'none';
+    this.mcpPanel.style.display = this.isMCPVisible ? 'flex' : 'none';
+    this.conversationsPanel.style.display = this.isConversationsVisible ? 'flex' : 'none';
 
-    // Hide messages when tools panel is shown to give it room
-    this.messagesContainer.style.display = this.isToolsVisible ? 'none' : '';
+    const inBodyPanel = this.isToolsVisible || this.isMCPVisible || this.isConversationsVisible;
+    this.messagesContainer.style.display = inBodyPanel ? 'none' : 'flex';
+    this.inputContainer.style.display = inBodyPanel ? 'none' : 'flex';
 
-    // Toggle active state on wrench button
-    const toolsBtn = this.chatHeader.querySelector('.tools-toggle-btn');
-    if (toolsBtn) toolsBtn.classList.toggle('active', this.isToolsVisible);
+    this.bottomNav.querySelectorAll<HTMLElement>('.bottom-nav-btn[data-surface]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.surface === surface);
+    });
 
-    if (this.isToolsVisible) this.refreshToolsPanel();
+    if (surface === 'tools') {
+      this.refreshToolsPanel();
+    } else if (surface === 'mcp') {
+      this.refreshMCPPanel();
+    } else if (surface === 'conversations') {
+      this.refreshConversationsPanel();
+    } else if (surface === 'config') {
+      this.populateConfigFields();
+    }
+  }
+
+  private toggleToolsPanel(): void {
+    this.setActiveSurface(this.activeSurface === 'tools' ? 'chat' : 'tools');
   }
 
   private toolManifestProvider: (() => ToolManifestEntry[]) | null = null;
@@ -622,39 +673,7 @@ export class ChatView {
   // ─── MCP Servers Panel ──────────────────────────────────────────────────
 
   private toggleMCPPanel(): void {
-    // Close config if open
-    if (this.isConfigVisible) {
-      this.isConfigVisible = false;
-      this.configPanel.style.display = 'none';
-      this.chatBody.style.display = '';
-      this.statusBar.style.display = '';
-    }
-    // Close tools if open
-    if (this.isToolsVisible) {
-      this.isToolsVisible = false;
-      this.toolsPanel.style.display = 'none';
-      const toolsBtn = this.chatHeader.querySelector('.tools-toggle-btn');
-      if (toolsBtn) toolsBtn.classList.toggle('active', false);
-    }
-    // Close conversations if open
-    if (this.isConversationsVisible) {
-      this.isConversationsVisible = false;
-      this.conversationsPanel.style.display = 'none';
-      const convoBtn = this.chatHeader.querySelector('.conversations-toggle-btn');
-      if (convoBtn) convoBtn.classList.toggle('active', false);
-    }
-
-    this.isMCPVisible = !this.isMCPVisible;
-    this.mcpPanel.style.display = this.isMCPVisible ? 'flex' : 'none';
-    this.messagesContainer.style.display = this.isMCPVisible ? 'none' : '';
-
-    const mcpBtn = this.chatHeader.querySelector('.mcp-toggle-btn');
-    if (mcpBtn) mcpBtn.classList.toggle('active', this.isMCPVisible);
-
-    const title = this.chatHeader.querySelector('h3');
-    if (title) title.textContent = this.isMCPVisible ? 'MCP Servers' : 'Agent WebMCP';
-
-    if (this.isMCPVisible) this.refreshMCPPanel();
+    this.setActiveSurface(this.activeSurface === 'mcp' ? 'chat' : 'mcp');
   }
 
   private mcpServerProvider: (() => MCPServerEntry[]) | null = null;
@@ -873,42 +892,7 @@ export class ChatView {
   // ─── Conversations Panel ────────────────────────────────────────────────
 
   private toggleConversationsPanel(): void {
-    // Close config if open
-    if (this.isConfigVisible) {
-      this.isConfigVisible = false;
-      this.configPanel.style.display = 'none';
-      this.chatBody.style.display = '';
-      this.statusBar.style.display = '';
-    }
-    // Close tools if open
-    if (this.isToolsVisible) {
-      this.isToolsVisible = false;
-      this.toolsPanel.style.display = 'none';
-      const toolsBtn = this.chatHeader.querySelector('.tools-toggle-btn');
-      if (toolsBtn) toolsBtn.classList.toggle('active', false);
-    }
-    // Close MCP panel if open
-    if (this.isMCPVisible) {
-      this.isMCPVisible = false;
-      this.mcpPanel.style.display = 'none';
-      const mcpBtn = this.chatHeader.querySelector('.mcp-toggle-btn');
-      if (mcpBtn) mcpBtn.classList.toggle('active', false);
-    }
-
-    this.isConversationsVisible = !this.isConversationsVisible;
-    this.conversationsPanel.style.display = this.isConversationsVisible ? 'flex' : 'none';
-
-    // Hide messages when conversations panel is shown
-    this.messagesContainer.style.display = this.isConversationsVisible ? 'none' : '';
-
-    // Toggle active state on conversations button
-    const convoBtn = this.chatHeader.querySelector('.conversations-toggle-btn');
-    if (convoBtn) convoBtn.classList.toggle('active', this.isConversationsVisible);
-
-    const title = this.chatHeader.querySelector('h3');
-    if (title) title.textContent = this.isConversationsVisible ? 'Conversations' : 'Agent WebMCP';
-
-    if (this.isConversationsVisible) this.refreshConversationsPanel();
+    this.setActiveSurface(this.activeSurface === 'conversations' ? 'chat' : 'conversations');
   }
 
   private createConversationsPanel(): HTMLElement {
@@ -936,7 +920,7 @@ export class ChatView {
       e.stopPropagation();
       this.callbacks.onConversationNew();
       this.currentConversationId = null;
-      this.toggleConversationsPanel();
+      this.setActiveSurface('chat');
     });
 
     return panel;
@@ -990,7 +974,7 @@ export class ChatView {
         el.querySelector('.conversation-item-content')?.addEventListener('click', () => {
           this.currentConversationId = convo.id;
           this.callbacks.onConversationLoad(convo);
-          this.toggleConversationsPanel();
+          this.setActiveSurface('chat');
         });
 
         // Delete button
@@ -1117,40 +1101,7 @@ export class ChatView {
   // ─── Config Panel ───────────────────────────────────────────────────────
 
   private toggleConfigPanel(): void {
-    // Close tools panel if open
-    if (this.isToolsVisible) {
-      this.isToolsVisible = false;
-      this.toolsPanel.style.display = 'none';
-      this.messagesContainer.style.display = '';
-      const toolsBtn = this.chatHeader.querySelector('.tools-toggle-btn');
-      if (toolsBtn) toolsBtn.classList.toggle('active', false);
-    }
-    // Close conversations if open
-    if (this.isConversationsVisible) {
-      this.isConversationsVisible = false;
-      this.conversationsPanel.style.display = 'none';
-      this.messagesContainer.style.display = '';
-      const convoBtn = this.chatHeader.querySelector('.conversations-toggle-btn');
-      if (convoBtn) convoBtn.classList.toggle('active', false);
-    }
-    // Close MCP panel if open
-    if (this.isMCPVisible) {
-      this.isMCPVisible = false;
-      this.mcpPanel.style.display = 'none';
-      this.messagesContainer.style.display = '';
-      const mcpBtn = this.chatHeader.querySelector('.mcp-toggle-btn');
-      if (mcpBtn) mcpBtn.classList.toggle('active', false);
-    }
-
-    this.isConfigVisible = !this.isConfigVisible;
-    this.chatBody.style.display = this.isConfigVisible ? 'none' : '';
-    this.statusBar.style.display = this.isConfigVisible ? 'none' : '';
-    this.configPanel.style.display = this.isConfigVisible ? 'flex' : 'none';
-
-    const title = this.chatHeader.querySelector('h3');
-    if (title) title.textContent = this.isConfigVisible ? 'LLM Configuration' : 'Agent WebMCP';
-
-    if (this.isConfigVisible) this.populateConfigFields();
+    this.setActiveSurface(this.activeSurface === 'config' ? 'chat' : 'config');
   }
 
   private createConfigPanel(): HTMLElement {
@@ -1207,6 +1158,23 @@ export class ChatView {
           </div>
         </div>
 
+        <hr class="config-divider" />
+        <h3 class="config-section-title">Vision LM (VLM)</h3>
+        <div class="config-fields config-vlm-fields">
+          <div class="config-field">
+            <label for="vlm-config-endpoint">VLM Endpoint</label>
+            <input type="text" id="vlm-config-endpoint" placeholder="http://host:port/v1" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="vlm-config-api-key">VLM API Key (optional)</label>
+            <input type="password" id="vlm-config-api-key" placeholder="Bearer token" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="vlm-config-model">VLM Model</label>
+            <input type="text" id="vlm-config-model" placeholder="Qwen3-VL-30B-A3B-Thinking" autocomplete="off" />
+          </div>
+        </div>
+
         <button class="config-apply-btn">Apply &amp; Reconnect</button>
         <div class="config-status"></div>
       </div>`;
@@ -1259,11 +1227,17 @@ export class ChatView {
       audience: '0_b2dJB20TBhxzLIHCMzSG4RiQYa',
       deployment: 'integ-gpt-4.1-2025-04-14',
     };
+    const defaultVlm = {
+      baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
+      apiKey: '',
+      model: 'Qwen3-VL-30B-A3B-Thinking',
+    };
 
     chrome.storage.local.get('agent-webmcp-config', (result) => {
       const saved = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
       const direct = { ...defaultDirect, ...(saved.direct ?? {}) };
       const lmaas = { ...defaultLmaas, ...(saved.lmaas ?? {}) };
+      const vlm = { ...defaultVlm, ...(saved.vlm ?? {}) };
 
       this.setInput('llm-config-endpoint', direct.baseUrl);
       this.setInput('llm-config-api-key', direct.apiKey);
@@ -1272,6 +1246,9 @@ export class ChatView {
       this.setInput('llm-config-client-secret', lmaas.clientSecret);
       this.setInput('llm-config-audience', lmaas.audience);
       this.setInput('llm-config-deployment', lmaas.deployment);
+      this.setInput('vlm-config-endpoint', vlm.baseUrl);
+      this.setInput('vlm-config-api-key', vlm.apiKey);
+      this.setInput('vlm-config-model', vlm.model);
 
       if (saved.activeMode) {
         this.configMode = saved.activeMode;
@@ -1328,10 +1305,29 @@ export class ChatView {
         existing.lmaas = fields;
       }
       existing.activeMode = this.configMode;
+
+      // Always save VLM config alongside LLM config
+      existing.vlm = {
+        baseUrl: this.getInput('vlm-config-endpoint'),
+        apiKey: this.getInput('vlm-config-api-key'),
+        model: this.getInput('vlm-config-model'),
+      };
+
       chrome.storage.local.set({ 'agent-webmcp-config': existing });
     });
 
     this.callbacks.onConfigApply({ mode: this.configMode, fields });
+
+    // Apply VLM config
+    const vlmBaseUrl = this.getInput('vlm-config-endpoint');
+    const vlmModel = this.getInput('vlm-config-model');
+    if (vlmBaseUrl && vlmModel) {
+      this.callbacks.onVLMConfigApply({
+        baseUrl: vlmBaseUrl,
+        apiKey: this.getInput('vlm-config-api-key'),
+        model: vlmModel,
+      });
+    }
 
     if (statusEl) {
       statusEl.textContent = `Applied! Using ${this.configMode === 'direct' ? 'Direct' : 'LMaaS'} mode.`;
