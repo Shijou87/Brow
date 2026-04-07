@@ -2,27 +2,29 @@
 // Mirrors the proven pattern from agent-singleton / llmaas-config.
 
 import { ChatOpenAI } from '@langchain/openai';
-import type { DirectLLMConfig, LMaaSConfig } from '../shared/types';
+import type { DirectLLMConfig } from '../shared/types';
 
 export type ChatOpenAIInstance = InstanceType<typeof ChatOpenAI>;
-export type LLMConfigUnion = DirectLLMConfig | LMaaSConfig;
+export type LLMConfigUnion = DirectLLMConfig;
 
-// ─── Default configs (mirroring in-person-training-samples) ─────────────────
+// ─── Default configs ──────────────────────────────────────────────────────
 
-export const DEFAULT_DIRECT_CONFIG: DirectLLMConfig = {
+export const DEFAULT_OPENAI_CONFIG: DirectLLMConfig = {
   provider: 'direct',
-  baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4008/v1',
-  apiKey: 'test',
-  model: 'Qwen/Qwen3-Coder-Next-FP8',
+  baseUrl: 'http://localhost:11434/v1',
+  apiKey: 'not-needed',
+  model: 'gpt-4o',
 };
 
-export const DEFAULT_LMAAS_CONFIG: LMaaSConfig = {
-  provider: 'lmaas',
-  clientId: 'YgfOyfUMHU2oQxWQPKiuG4gifPAa',
-  clientSecret: 'teflpHu0UUtimxR1jS9lW4xI6jsa',
-  audience: '0_b2dJB20TBhxzLIHCMzSG4RiQYa',
-  deployment: 'integ-gpt-4.1-2025-04-14',
+export const DEFAULT_CLAUDE_CONFIG: DirectLLMConfig = {
+  provider: 'direct',
+  baseUrl: 'https://api.anthropic.com/v1',
+  apiKey: '',
+  model: 'claude-opus-4-5',
 };
+
+// Backwards-compat alias used by index.ts
+export const DEFAULT_DIRECT_CONFIG = DEFAULT_OPENAI_CONFIG;
 
 // ─── Runtime config override ───────────────────────────────────────────────
 
@@ -87,60 +89,13 @@ export function getLlmSync(): ChatOpenAIInstance {
  * Create a ChatOpenAI instance for the given configuration.
  */
 export async function createLlm(config: LLMConfigUnion): Promise<ChatOpenAIInstance> {
-  if (config.provider === 'direct') {
-    console.log(`[LLM] Creating Direct LLM → ${config.baseUrl} (model: ${config.model})`);
-    return new ChatOpenAI({
-      model: config.model,
-      apiKey: config.apiKey || 'not-needed',
-      temperature: 0,
-      configuration: {
-        baseURL: config.baseUrl,
-      },
-    });
-  }
-
-  // LMaaS provider
-  console.log(`[LLM] Creating LMaaS LLM → deployment: ${config.deployment}`);
-
-  // For LMaaS, we need to fetch an IDAM token first
-  // For now, create with placeholder — token refresh handled separately
-  const token = await fetchIdamToken(config);
-
+  console.log(`[LLM] Creating LLM → ${config.baseUrl} (model: ${config.model})`);
   return new ChatOpenAI({
-    model: config.deployment,
-    apiKey: token,
+    model: config.model,
+    apiKey: config.apiKey || 'not-needed',
+    temperature: 0,
     configuration: {
-      baseURL: `https://lmaas-integ-int.ailab.gehealthcare.net/openai/deployments/${config.deployment}`,
-      defaultQuery: { 'api-version': '2025-04-01-preview' },
+      baseURL: config.baseUrl,
     },
   });
-}
-
-/**
- * Fetch an IDAM token for LMaaS authentication.
- */
-async function fetchIdamToken(config: LMaaSConfig): Promise<string> {
-  const tokenEndpoint = config.tokenEndpoint || 'https://idam.gehealthcloud.io/oauth2/token';
-
-  try {
-    const body = new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      audience: config.audience,
-    });
-
-    const res = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-    });
-
-    if (!res.ok) throw new Error(`IDAM token request failed: HTTP ${res.status}`);
-    const data = await res.json();
-    return data.access_token;
-  } catch (err: any) {
-    console.error('[LLM] IDAM token fetch failed:', err.message);
-    return 'idam-token-failed';
-  }
 }

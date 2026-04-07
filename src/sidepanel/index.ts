@@ -4,9 +4,17 @@
 import './style.scss';
 
 import { ChatView } from './chat-view';
-import type { SavedConversation } from './chat-view';
-import { getAgentApi, configureAndRebuild, type AgentAPI, type ChatTurn, type ToolStepEvent } from './agent';
-import type { WebMCPRegistryEntry, DirectLLMConfig, LMaaSConfig } from '../shared/types';
+import type { ContextTabOption, SavedConversation } from './chat-view';
+import {
+  getAgentApi,
+  configureAndRebuild,
+  DEFAULT_AGENT_RECURSION_LIMIT,
+  DEFAULT_SYSTEM_PROMPT,
+  type AgentAPI,
+  type ChatTurn,
+  type ToolStepEvent,
+} from './agent';
+import type { WebMCPRegistryEntry, DirectLLMConfig } from '../shared/types';
 import { logInfo } from '../shared/logger';
 
 // ─── WebMCP registry (mirror of background SW registry) ────────────────────
@@ -20,6 +28,7 @@ const app = document.getElementById('app')!;
 
 const view = new ChatView(app, {
   onSendMessage: handleSendMessage,
+  onStopGeneration: handleStopGeneration,
   onConfigApply: handleConfigApply,
   onVLMConfigApply: handleVLMConfigApply,
   onRefreshWebMCP: handleRefreshWebMCP,
@@ -38,7 +47,6 @@ restoreSavedConfig();
 
 // Enable input
 view.enableInput();
-view.addSystemMessage('Welcome! Agent ready with default Qwen LLM. Use ⚙️ to switch to LMaaS or change settings.');
 
 // Wire agent callbacks
 const agent = getAgentApi();
@@ -74,14 +82,24 @@ agent.onStreamText((text: string) => {
 
 // ─── Message handling ──────────────────────────────────────────────────────
 
-async function handleSendMessage(message: string): Promise<void> {
+async function handleSendMessage(message: string, contextTabIds: number[]): Promise<void> {
+  if (agent.isBusy()) return;
+
   view.addUserMessage(message);
   chatHistory.push({ role: 'user', content: message });
-  view.disableInput();
+  view.setAgentBusy(true);
   view.showTypingIndicator();
 
   try {
-    const response = await agent.query(message, chatHistory);
+    const response = await agent.query(message, chatHistory, contextTabIds);
+    if (response === 'Agent turn was interrupted.') {
+      view.hideTypingIndicator();
+      view.finalizeToolSteps();
+      view.addSystemMessage('Generation stopped.');
+      view.saveCurrentConversation(chatHistory);
+      return;
+    }
+
     chatHistory.push({ role: 'assistant', content: response });
     view.hideTypingIndicator();
     view.finalizeToolSteps();
@@ -96,34 +114,57 @@ async function handleSendMessage(message: string): Promise<void> {
     view.hideTypingIndicator();
     view.addSystemMessage(`Error: ${err.message ?? err}`);
   } finally {
-    view.enableInput();
+    view.setAgentBusy(false);
+  }
+}
+
+function handleStopGeneration(): void {
+  if (!agent.isBusy()) return;
+  agent.abort();
+}
+
+function toContextTabOption(tab: chrome.tabs.Tab | undefined): ContextTabOption | null {
+  if (tab?.id === undefined || tab.id < 0) return null;
+  return {
+    tabId: tab.id,
+    title: tab.title ?? '',
+    url: tab.url ?? '',
+    active: tab.active ?? false,
+  };
+}
+
+async function refreshCurrentTabContext(tabId?: number): Promise<void> {
+  try {
+    const tab = tabId !== undefined
+      ? await chrome.tabs.get(tabId)
+      : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+    const nextContext = toContextTabOption(tab);
+    view.setCurrentContextTab(nextContext);
+  } catch {
+    view.setCurrentContextTab(null);
   }
 }
 
 // ─── Config handling ───────────────────────────────────────────────────────
 
-function handleConfigApply(config: { mode: 'direct' | 'lmaas'; fields: Record<string, string> }): void {
-  if (config.mode === 'direct') {
-    const llmConfig: DirectLLMConfig = {
-      provider: 'direct',
-      baseUrl: config.fields.baseUrl ?? '',
-      apiKey: config.fields.apiKey ?? '',
-      model: config.fields.model ?? '',
-    };
-    configureAndRebuild(llmConfig);
-    view.updateConnectionStatus(`Direct: ${llmConfig.model}`);
-  } else {
-    const llmConfig: LMaaSConfig = {
-      provider: 'lmaas',
-      clientId: config.fields.clientId ?? '',
-      clientSecret: config.fields.clientSecret ?? '',
-      audience: config.fields.audience ?? '',
-      deployment: config.fields.deployment ?? '',
-    };
-    configureAndRebuild(llmConfig);
-    view.updateConnectionStatus(`LMaaS: ${llmConfig.deployment}`);
-  }
-  view.addSystemMessage('LLM configuration applied. Agent ready.');
+function handleConfigApply(config: {
+  mode: 'openai' | 'claude';
+  fields: Record<string, string>;
+  recursionLimit?: number;
+  systemPrompt?: string;
+}): void {
+  const llmConfig: DirectLLMConfig = {
+    provider: 'direct',
+    baseUrl: config.fields.baseUrl ?? '',
+    apiKey: config.fields.apiKey ?? '',
+    model: config.fields.model ?? '',
+  };
+  configureAndRebuild(llmConfig);
+  const agentApi = getAgentApi();
+  agentApi.setRecursionLimit(config.recursionLimit ?? DEFAULT_AGENT_RECURSION_LIMIT);
+  agentApi.setSystemPrompt(config.systemPrompt ?? DEFAULT_SYSTEM_PROMPT);
+  const label = config.mode === 'openai' ? `OpenAI: ${llmConfig.model}` : `Claude: ${llmConfig.model}`;
+  view.updateConnectionStatus(label);
 }
 
 function handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: string }): void {
@@ -132,22 +173,26 @@ function handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: 
 }
 
 const DEFAULT_CONFIG = {
-  mode: 'direct' as const,
+  mode: 'openai' as const,
   fields: {
-    baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4008/v1',
-    apiKey: 'test',
-    model: 'Qwen/Qwen3-Coder-Next-FP8',
+    baseUrl: 'http://localhost:11434/v1',
+    apiKey: 'not-needed',
+    model: 'gpt-4o',
   },
+  recursionLimit: DEFAULT_AGENT_RECURSION_LIMIT,
+  systemPrompt: DEFAULT_SYSTEM_PROMPT,
 };
 
 function restoreSavedConfig(): void {
   chrome.storage.local.get('agent-webmcp-config', (result) => {
     const saved = result['agent-webmcp-config'] as Record<string, any> | undefined;
     if (saved) {
-      const mode: 'direct' | 'lmaas' = saved.activeMode ?? 'direct';
-      const fields = mode === 'direct' ? saved.direct : saved.lmaas;
+      const mode: 'openai' | 'claude' = saved.activeMode ?? 'openai';
+      const fields = mode === 'openai' ? (saved.openai ?? saved.direct) : saved.claude;
+      const recursionLimit = Number(saved.runtime?.recursionLimit) || DEFAULT_AGENT_RECURSION_LIMIT;
+      const systemPrompt = saved.runtime?.systemPrompt || DEFAULT_SYSTEM_PROMPT;
       if (fields) {
-        handleConfigApply({ mode, fields });
+        handleConfigApply({ mode, fields, recursionLimit, systemPrompt });
       } else {
         handleConfigApply(DEFAULT_CONFIG);
       }
@@ -248,7 +293,6 @@ function handleConversationNew(): void {
   chatHistory.length = 0;
   view.clearMessages();
   view.setCurrentConversationId(null);
-  view.addSystemMessage('New conversation started. Agent ready.');
   view.enableInput();
   logInfo('sidepanel', 'Started new conversation');
 }
@@ -296,20 +340,32 @@ chrome.runtime.onMessage.addListener((message) => {
 // Track active tab
 chrome.tabs.onActivated?.addListener(({ tabId }) => {
   activeTabId = tabId;
-  // Annotation always shows all-tabs aggregate, no change needed
+  void refreshCurrentTabContext(tabId);
+});
+
+chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
+  if (tabId !== activeTabId) return;
+  if (!changeInfo.title && !changeInfo.url && !changeInfo.status) return;
+  void refreshCurrentTabContext(tab.id);
 });
 
 // When a tab is closed, remove its WebMCP tools from the agent and update annotation
 chrome.tabs.onRemoved?.addListener((tabId) => {
   registry.delete(tabId);
   agent.removeWebMCPToolsForTab(tabId);
+  view.removeContextTab(tabId);
   refreshWebMCPAnnotation();
+  if (tabId === activeTabId) {
+    activeTabId = undefined;
+    void refreshCurrentTabContext();
+  }
 });
 
 // Get initial active tab
 chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
   if (tab?.id !== undefined) {
     activeTabId = tab.id;
+    void refreshCurrentTabContext(tab.id);
     // Request full registry from background and wire ALL tabs' WebMCP tools
     chrome.runtime.sendMessage({ type: 'GET_REGISTRY' }, (reg) => {
       if (reg && Object.keys(reg).length > 0) {
@@ -332,5 +388,7 @@ chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
         });
       }
     });
+  } else {
+    void refreshCurrentTabContext();
   }
 });

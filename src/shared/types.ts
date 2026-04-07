@@ -80,16 +80,7 @@ export interface DirectLLMConfig {
   model: string;
 }
 
-export interface LMaaSConfig {
-  provider: 'lmaas';
-  clientId: string;
-  clientSecret: string;
-  audience: string;
-  deployment: string;
-  tokenEndpoint?: string;
-}
-
-export type LLMConfig = DirectLLMConfig | LMaaSConfig;
+export type LLMConfig = DirectLLMConfig;
 
 // ─── VLM Config ─────────────────────────────────────────────────────────────
 

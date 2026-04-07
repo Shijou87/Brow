@@ -4,7 +4,7 @@ Chrome extension (Manifest V3) that runs a **LangGraph.js React agent** in the b
 
 - **MCP Servers** – connect to remote MCP (Model Context Protocol) HTTP servers, discover their tools, and invoke them from the agent
 - **WebMCP** – dynamically discover tools exposed by the active tab via the WebMCP page-level protocol
-- **Tab Tools** – built-in browser automation tools (click, type, navigate, screenshot, …)
+- **Tab Tools** – built-in browser tools for listing tabs, reading content, inspecting interactive elements, clicking, typing, filling forms, navigating, and screenshot analysis
 - **Configurable LLM** – switch between OpenAI-compatible endpoints from the options page
 
 ## Architecture

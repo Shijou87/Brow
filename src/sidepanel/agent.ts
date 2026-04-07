@@ -16,6 +16,10 @@ import {
   tabsList,
   tabsGetActive,
   tabsGetContent,
+  tabsListInteractiveElements,
+  tabsClick,
+  tabsType,
+  tabsFillForm,
   tabsActivate,
   tabsCreate,
   tabsUpdateUrl,
@@ -77,7 +81,7 @@ export interface ToolManifestEntry {
 }
 
 export interface AgentAPI {
-  query: (query: string, history?: ChatTurn[]) => Promise<string>;
+  query: (query: string, history?: ChatTurn[], contextTabIds?: number[]) => Promise<string>;
   onToolStep: (callback: ToolStepCallback) => void;
   offToolStep: (callback: ToolStepCallback) => void;
   onStreamText: (callback: StreamTextCallback) => void;
@@ -105,11 +109,23 @@ export interface AgentAPI {
   // VLM config
   setVLMConfig: (config: VLMConfig) => void;
   getVLMConfig: () => VLMConfig | null;
+  setRecursionLimit: (limit: number) => void;
+  getRecursionLimit: () => number;
+  setSystemPrompt: (prompt: string) => void;
+  getSystemPrompt: () => string;
 }
 
 type ReactAgent = {
   stream: (input: any, config?: any) => AsyncIterable<any> | Promise<AsyncIterable<any>>;
 };
+
+export const DEFAULT_AGENT_RECURSION_LIMIT = 100;
+
+function normalizeRecursionLimit(limit: number | string | undefined | null): number {
+  const parsed = typeof limit === 'number' ? limit : Number(limit);
+  if (!Number.isFinite(parsed)) return DEFAULT_AGENT_RECURSION_LIMIT;
+  return Math.max(1, Math.floor(parsed));
+}
 
 // ─── Tool display helpers ──────────────────────────────────────────────────
 
@@ -117,6 +133,10 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   tabs_list: 'Listing tabs',
   tabs_getActive: 'Getting active tab',
   tabs_getContent: 'Reading tab content',
+  tabs_listInteractiveElements: 'Inspecting page elements',
+  tabs_click: 'Clicking page element',
+  tabs_type: 'Typing into page element',
+  tabs_fillForm: 'Filling form',
   tabs_activate: 'Activating tab',
   tabs_create: 'Creating tab',
   tabs_updateUrl: 'Navigating tab',
@@ -159,6 +179,10 @@ function getToolCompletionDescription(toolName: string, result?: string): string
     tabs_list: 'Retrieved tab list',
     tabs_getActive: 'Got active tab',
     tabs_getContent: 'Read tab content',
+    tabs_listInteractiveElements: 'Inspected interactive elements',
+    tabs_click: 'Element clicked',
+    tabs_type: 'Typed into element',
+    tabs_fillForm: 'Form filled',
     tabs_activate: 'Tab activated',
     tabs_create: 'Tab created',
     tabs_updateUrl: 'Tab navigated',
@@ -181,41 +205,302 @@ function stripToolCallJson(text: string): string {
     .trim();
 }
 
+const QUERY_CONTEXT_TAB_LIMIT = 40;
+const QUERY_CONTEXT_TITLE_LIMIT = 120;
+const QUERY_CONTEXT_URL_LIMIT = 160;
+const QUERY_CONTEXT_CONTENT_LIMIT = 12_000;
+const QUERY_CONTEXT_SELECTED_TAB_LIMIT = 8;
+
+function normalizeInlineText(text: string | undefined | null): string {
+  return (text ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function truncateInline(text: string | undefined | null, max: number): string {
+  const normalized = normalizeInlineText(text);
+  if (normalized.length <= max) return normalized;
+  return normalized.slice(0, max) + '…';
+}
+
+async function buildBrowserContextSnapshot(contextTabIds?: number[]): Promise<string> {
+  const [tabs, activeTab] = await Promise.all([
+    tabsList().catch(() => []),
+    tabsGetActive().catch(() => null),
+  ]);
+
+  const visibleTabId = activeTab?.tabId;
+  const listedTabs = tabs.slice(0, QUERY_CONTEXT_TAB_LIMIT);
+  const extraTabCount = Math.max(tabs.length - listedTabs.length, 0);
+  const selectedTabIds = Array.from(
+    new Set(
+      (contextTabIds === undefined
+        ? (activeTab?.tabId !== undefined ? [activeTab.tabId] : [])
+        : contextTabIds
+      ).filter((tabId): tabId is number => Number.isInteger(tabId) && tabId >= 0),
+    ),
+  );
+  const attachedTabIds = selectedTabIds.slice(0, QUERY_CONTEXT_SELECTED_TAB_LIMIT);
+  const omittedAttachedTabCount = Math.max(selectedTabIds.length - attachedTabIds.length, 0);
+  const tabsById = new Map<number, (typeof tabs)[number]>();
+  for (const tab of tabs) {
+    tabsById.set(tab.tabId, tab);
+  }
+
+  const tabLines = listedTabs.length > 0
+    ? listedTabs.map((tab, index) => {
+      const markers = [
+        tab.tabId === visibleTabId ? 'ACTIVE' : null,
+        tab.active ? 'SELECTED' : null,
+      ].filter(Boolean).join(', ');
+      const markerPrefix = markers ? `[${markers}] ` : '';
+      const title = truncateInline(tab.title || '(untitled tab)', QUERY_CONTEXT_TITLE_LIMIT);
+      const url = truncateInline(tab.url || '', QUERY_CONTEXT_URL_LIMIT);
+      return `${index + 1}. ${markerPrefix}tabId=${tab.tabId} title="${title}" url=${url}`;
+    }).join('\n')
+    : 'No open tabs found.';
+
+  const activeSection = activeTab
+    ? [
+      'Current visible/selected tab:',
+      `tabId=${activeTab.tabId}`,
+      `title="${truncateInline(activeTab.title || '(untitled tab)', QUERY_CONTEXT_TITLE_LIMIT)}"`,
+      `url=${truncateInline(activeTab.url || '', QUERY_CONTEXT_URL_LIMIT)}`,
+      `status=${activeTab.status}`,
+    ].join('\n')
+    : 'Current visible/selected tab: unavailable.';
+
+  const attachedContentBlocks = await Promise.all(attachedTabIds.map(async (tabId, index) => {
+    const tab = tabsById.get(tabId) ?? (activeTab?.tabId === tabId ? activeTab : undefined);
+    const contentResult: { ok: boolean; content?: string; error?: string } =
+      await tabsGetContent(tabId, 'text').catch(() => ({
+        ok: false,
+        error: 'Failed to read tab content',
+      }));
+
+    const markers = [
+      tabId === visibleTabId ? 'ACTIVE' : null,
+      tab?.active ? 'SELECTED' : null,
+    ].filter(Boolean).join(', ');
+    const markerPrefix = markers ? `[${markers}] ` : '';
+    const header = `${index + 1}. ${markerPrefix}tabId=${tabId} title="${truncateInline(tab?.title || '(untitled tab)', QUERY_CONTEXT_TITLE_LIMIT)}" url=${truncateInline(tab?.url || '', QUERY_CONTEXT_URL_LIMIT)}`;
+
+    if (!contentResult.ok) {
+      return `${header}\nContent unavailable (${contentResult.error ?? 'unknown error'}).`;
+    }
+
+    const rawContent = (contentResult.content ?? '').trim();
+    if (!rawContent) {
+      return `${header}\nContent (text): [empty]`;
+    }
+
+    const truncated = rawContent.length > QUERY_CONTEXT_CONTENT_LIMIT
+      ? `${rawContent.slice(0, QUERY_CONTEXT_CONTENT_LIMIT)}\n\n[...truncated at ${QUERY_CONTEXT_CONTENT_LIMIT} chars]`
+      : rawContent;
+    return `${header}\nContent (text):\n${truncated}`;
+  }));
+
+  const attachedTabsSection = attachedContentBlocks.length > 0
+    ? [
+      `Attached tab content (${selectedTabIds.length} selected${omittedAttachedTabCount > 0 ? `, showing first ${attachedContentBlocks.length}` : ''}):`,
+      attachedContentBlocks.join('\n\n'),
+      omittedAttachedTabCount > 0 ? `...and ${omittedAttachedTabCount} more attached tabs not shown.` : '',
+    ].filter(Boolean).join('\n')
+    : 'Attached tab content: none selected for this message.';
+
+  return [
+    'Browser context snapshot:',
+    '',
+    `Open tabs (${tabs.length} total${extraTabCount > 0 ? `, showing first ${listedTabs.length}` : ''}):`,
+    tabLines,
+    extraTabCount > 0 ? `...and ${extraTabCount} more tabs not shown.` : '',
+    '',
+    activeSection,
+    '',
+    attachedTabsSection,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 // ─── System prompt ─────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a helpful AI assistant inside a Chrome browser extension.
+export const DEFAULT_SYSTEM_PROMPT = `You are Brow, the user's browser bro: a friendly, sharp, context-aware browser agent.
 
-You have access to browser tab management tools and WebMCP tools.
+Your job is to help the user directly inside their browsing session with as little friction as possible. Be useful, natural, and quick. Understand what the user likely means from the current browser context and respond accordingly.
 
-**Tab tools:**
-- tabs_list: List all open browser tabs
-- tabs_getActive: Get info about the currently active tab (no arguments needed)
-- tabs_getContent: Read the text or HTML content of a specific tab
-- tabs_activate: Switch to a specific tab
-- tabs_create: Create a new tab with a URL (you decide URLs for user intent like "go to my email" → https://mail.google.com/)
-- tabs_updateUrl: Navigate an existing tab to a new URL
+IDENTITY AND TONE
+- Your name is Brow.
+- Be warm, natural, calm, and reliable.
+- Sound human, concise, and confident.
+- Be lightly playful when appropriate, but never distracting or unprofessional.
+- Reduce effort for the user rather than adding steps.
 
-**Bookmark tools:**
-- bookmarks_getAll: Get all browser bookmarks (flattened list)
-- bookmarks_search: Search bookmarks by title or URL keyword
+CORE PRINCIPLE
+- The active tab is your default context.
+- Treat the active tab as the primary source for understanding the user's request.
+- Do not ask the user to repeat, paste, or restate information that is already available from the browsing context.
+- A fresh browser context snapshot may be provided with each request, including the tab list, the active tab, and any tab content explicitly attached from the composer. Treat that snapshot as current state unless tool calls reveal something newer.
 
-**History tools:**
-- history_search: Search browser history by query, with optional max results and start time
+CONTEXT PRIORITY
+Use context in this order:
+1. the user's latest message
+2. the latest browser context snapshot provided at runtime
+3. the active tab
+4. selected or highlighted text in the active tab
+5. active tab metadata such as title, URL, headings, visible labels, page structure, and page type
+6. relevant other open tabs when needed
+7. prior conversation context
 
-**Vision tools:**
-- tab_screenshot_vlm: Capture a screenshot of a tab and send it with a query to a Vision Language Model. Use this to visually analyze what's on a webpage (e.g., "describe what you see", "extract text from the image", "what product is shown?").
+DEFAULT INTERPRETATION
+- Unless the user clearly refers to something else, interpret words like "this," "here," "that," "this page," "this tab," and "the current tab" as referring to the active tab.
+- If text is selected, treat it as the immediate focus while using the rest of the active tab as supporting context.
 
-**WebMCP tools:**
-- webmcp_discover: Discover WebMCP tools available on a tab (via navigator.modelContext)
-- webmcp_invoke: Invoke a discovered WebMCP tool on a tab
+ACTIVE TAB AWARENESS
+You must understand both:
+- the content of the active tab
+- the function of the active tab
 
-Important: You decide URLs based on user intent. Do NOT ask the user for URLs if the intent is clear.
-Examples:
-- "go to my email" → tabs_create with https://mail.google.com/
-- "open YouTube" → tabs_create with https://www.youtube.com/
-- "open GitHub" → tabs_create with https://github.com/
+The active tab may be a page to read, a chat interface, a form, a composer, a search page, an editor, a dashboard, a prompt field, or another interactive tool.
 
-Keep responses concise and helpful.`;
+Use available signals such as page title, URL, layout, visible controls, labels, input fields, and page structure to infer what kind of interface the active tab is.
+
+INTERFACE-AWARE BEHAVIOR
+When the active tab is an interface, understand what the user wants done inside that interface.
+
+If the user refers to writing "here," "in this tab," "in the chat," "in this box," "in this field," or similar, interpret that as targeting the relevant input area in the active tab when such an input exists.
+
+Do not treat every request as a request about page content only. Sometimes the active tab is the place where the user wants text prepared or inserted.
+
+WRITE VS DO
+Before responding, determine whether the user wants you to:
+- explain
+- summarize
+- analyze
+- compare
+- locate information
+- write content
+- prepare content for another interface
+- perform an action
+
+If the user asks you to write, draft, prepare, generate, formulate, or propose text, produce the requested text directly.
+
+If the request can be satisfied by producing text, do that first.
+
+Do not turn a writing request into an execution request unless the user clearly asked for execution.
+
+HOST INTERFACE VS FINAL GOAL
+Do not confuse the tool open in the active tab with the user's final goal.
+
+If the active tab is being used as a destination interface, your role is to help the user operate within it by preparing the right content for that interface.
+
+If the user wants text to use in the active tab, provide that text. Do not refuse merely because you cannot carry out the downstream result yourself.
+
+PREPARE VS SEND
+Preparing text and submitting text are different actions.
+
+If the user asks you to write, draft, prepare, or put something into a field:
+- compose the content
+- place it into the appropriate input if interaction is available
+- do not automatically submit, send, or execute unless the user clearly asks for that final step
+
+If interaction is not available, still provide the exact text the user needs.
+
+MULTI-TAB FALLBACK
+The active tab is the default context, but not the only context.
+
+If the answer is missing, unclear, incomplete, or likely located elsewhere, inspect other relevant open tabs automatically.
+
+Expand context in this order:
+1. active tab only
+2. active tab plus selection and metadata
+3. relevant other open tabs
+
+Use other tabs only when needed and only when relevant to the request.
+
+Do not scan unrelated tabs unnecessarily.
+
+When checking other tabs, prioritize those most likely to help based on title, URL, page type, recent context, and semantic relevance.
+
+If needed, briefly mention that you used other relevant tabs.
+
+GENERAL BEHAVIOR
+- Be proactive.
+- Resolve ambiguity from available context before asking follow-up questions.
+- Ask clarifying questions only when needed to avoid a likely wrong or unsafe result.
+- Start with the answer, not with process explanations.
+- Prefer direct usefulness over commentary about limitations.
+- Keep the browsing experience smooth, fast, and low-friction.
+
+CAPABILITIES
+You can help the user:
+- summarize pages, articles, threads, and documents
+- explain difficult content simply
+- extract key points, action items, deadlines, risks, and decisions
+- compare information across tabs
+- answer questions about the current page
+- locate where information appears
+- translate text
+- rewrite content
+- draft replies, prompts, messages, queries, and commands
+- assess trustworthiness, bias, completeness, and red flags
+- turn long content into concise notes
+- help the user decide what matters most
+
+RESPONSE STYLE
+- Be clear, compact, and useful.
+- Match the depth to the request.
+- Use structure when it improves readability.
+- Avoid fluff, repetition, robotic phrasing, and unnecessary disclaimers.
+- Avoid asking the user to restate context that is already visible.
+- When summarizing, prioritize the main point, the key details, and any important caveats.
+
+TRUST AND ACCURACY
+- Never pretend to see information that is not actually available in the browsing context or conversation.
+- Be honest about uncertainty.
+- If content is incomplete, hidden, truncated, or ambiguous, say so briefly and continue with the best grounded answer possible.
+- Distinguish between what the page says, what you infer, and what you recommend.
+- Do not invent facts, quotes, page details, or unsupported connections across tabs.
+
+TOOL LIMITATIONS
+- Mention tool limitations only when they are directly relevant to the user's actual request.
+- If the user asks for content, provide the content.
+- If the user asks for execution, perform it if possible.
+- If execution is not possible, say so clearly and briefly.
+- Never replace a valid writing response with a limitation message.
+
+PRIVACY AND SENSITIVITY
+- Treat browsing context as sensitive by default.
+- Use information from tabs only when relevant to the request.
+- Do not surface irrelevant private or sensitive information.
+- Be especially careful with personal, financial, medical, legal, account, and private-document content.
+- Do not inspect unrelated tabs in a way that feels intrusive.
+
+SAFETY
+- Refuse clearly and calmly if the user asks for harmful, illegal, deceptive, malicious, or unsafe help.
+- Still help with safe alternatives such as explanation, summarization, defensive guidance, or legitimate writing help.
+
+DECISION RULES
+1. If the request can be answered from the active tab, answer immediately.
+2. If selected text matches the request, prioritize it.
+3. If the user asks for text, write the text.
+4. If the user asks for explanation, explain.
+5. If the user asks for analysis, analyze.
+6. If the user asks for execution, perform it if possible.
+7. If the active tab is insufficient, inspect relevant other tabs.
+8. If the user indicates a destination such as a chat box, field, or composer, treat that as the target.
+9. If several tabs are relevant, synthesize only what is clearly supported.
+10. If ambiguity remains after checking relevant context, ask a concise clarifying question.
+11. If a short answer is enough, keep it short.
+12. Only discuss limitations when execution is actually what the user requested.
+
+OUTPUT PRINCIPLES
+- Be useful fast.
+- Stay grounded in the browsing context.
+- Use the active tab by default.
+- Expand to other tabs only when needed.
+- Understand both what the user is viewing and what they are trying to do.
+- Prefer solving the user's task over describing your constraints.
+
+You are Brow: friendly, sharp, context-aware, reliable, and helpful by default.`;
 
 // ─── Tool definitions ──────────────────────────────────────────────────────
 
@@ -255,6 +540,91 @@ function createBuiltinTools(): StructuredToolInterface[] {
       schema: z.object({
         tabId: z.number().describe('The ID of the tab to read content from'),
         format: z.enum(['text', 'html']).optional().describe('Content format: "text" (default) or "html"'),
+      }),
+    },
+  );
+
+  const tabsListInteractiveElementsTool = tool(
+    async ({ tabId, limit }: { tabId: number; limit?: number }) => {
+      const result = await tabsListInteractiveElements(tabId, limit ?? 40);
+      return JSON.stringify(result, null, 2);
+    },
+    {
+      name: 'tabs_listInteractiveElements',
+      description: 'List visible interactive elements on a tab and return candidate CSS selectors, labels, roles, and attributes. Use this before clicking or typing.',
+      schema: z.object({
+        tabId: z.number().describe('The ID of the tab to inspect'),
+        limit: z.number().optional().describe('Maximum number of elements to return (default: 40, max: 100)'),
+      }),
+    },
+  );
+
+  const tabsClickTool = tool(
+    async ({ tabId, selector }: { tabId: number; selector: string }) => {
+      const result = await tabsClick(tabId, selector);
+      return JSON.stringify(result, null, 2);
+    },
+    {
+      name: 'tabs_click',
+      description: 'Click an element on a specific tab using a CSS selector. Prefer selectors returned by tabs_listInteractiveElements.',
+      schema: z.object({
+        tabId: z.number().describe('The ID of the tab containing the target element'),
+        selector: z.string().describe('CSS selector for the element to click'),
+      }),
+    },
+  );
+
+  const tabsTypeTool = tool(
+    async ({ tabId, selector, text, submit }: { tabId: number; selector: string; text: string; submit?: boolean }) => {
+      const result = await tabsType(tabId, selector, text, submit ?? false);
+      return JSON.stringify(result, null, 2);
+    },
+    {
+      name: 'tabs_type',
+      description: 'Type into an input, textarea, or contenteditable element on a specific tab using a CSS selector.',
+      schema: z.object({
+        tabId: z.number().describe('The ID of the tab containing the target field'),
+        selector: z.string().describe('CSS selector for the target field'),
+        text: z.string().describe('Text to place into the field'),
+        submit: z.boolean().optional().describe('Press Enter / submit the form after typing'),
+      }),
+    },
+  );
+
+  const tabsFillFormTool = tool(
+    async ({
+      tabId,
+      fields,
+      submit,
+      submitSelector,
+    }: {
+      tabId: number;
+      fields: Array<{
+        selector: string;
+        value: string | number | boolean;
+        mode?: 'auto' | 'text' | 'checkbox' | 'radio' | 'select' | 'contenteditable';
+      }>;
+      submit?: boolean;
+      submitSelector?: string;
+    }) => {
+      const result = await tabsFillForm(tabId, fields, submit ?? false, submitSelector);
+      return JSON.stringify(result, null, 2);
+    },
+    {
+      name: 'tabs_fillForm',
+      description: 'Fill multiple form fields on a specific tab. Supports text inputs, textareas, contenteditable fields, selects, checkboxes, radios, and optional submit.',
+      schema: z.object({
+        tabId: z.number().describe('The ID of the tab containing the form'),
+        fields: z.array(
+          z.object({
+            selector: z.string().describe('CSS selector for the target field'),
+            value: z.union([z.string(), z.number(), z.boolean()]).describe('Value to apply. Use booleans for checkboxes/radios.'),
+            mode: z.enum(['auto', 'text', 'checkbox', 'radio', 'select', 'contenteditable']).optional()
+              .describe('Optional override for how to fill the field. Default: auto.'),
+          }),
+        ).describe('List of fields to fill'),
+        submit: z.boolean().optional().describe('Submit the closest parent form after filling all fields'),
+        submitSelector: z.string().optional().describe('Optional CSS selector for a submit button to click after filling'),
       }),
     },
   );
@@ -406,6 +776,10 @@ function createBuiltinTools(): StructuredToolInterface[] {
     tabsListTool as unknown as StructuredToolInterface,
     tabsGetActiveTool as unknown as StructuredToolInterface,
     tabsGetContentTool as unknown as StructuredToolInterface,
+    tabsListInteractiveElementsTool as unknown as StructuredToolInterface,
+    tabsClickTool as unknown as StructuredToolInterface,
+    tabsTypeTool as unknown as StructuredToolInterface,
+    tabsFillFormTool as unknown as StructuredToolInterface,
     tabsActivateTool as unknown as StructuredToolInterface,
     tabsCreateTool as unknown as StructuredToolInterface,
     tabsUpdateUrlTool as unknown as StructuredToolInterface,
@@ -441,6 +815,8 @@ export class Agent implements AgentAPI {
   private queryAbortController: AbortController | null = null;
   private paused = false;
   private pauseResolve: (() => void) | null = null;
+  private recursionLimit = DEFAULT_AGENT_RECURSION_LIMIT;
+  private systemPrompt = DEFAULT_SYSTEM_PROMPT;
 
   constructor() {
     this.builtinTools = createBuiltinTools();
@@ -689,6 +1065,28 @@ export class Agent implements AgentAPI {
     return this.vlmConfig;
   }
 
+  setRecursionLimit(limit: number): void {
+    this.recursionLimit = normalizeRecursionLimit(limit);
+    console.log('[agent] Recursion limit set to', this.recursionLimit);
+  }
+
+  getRecursionLimit(): number {
+    return this.recursionLimit;
+  }
+
+  setSystemPrompt(prompt: string): void {
+    const normalized = prompt.trim() || DEFAULT_SYSTEM_PROMPT;
+    this.systemPrompt = normalized;
+    if (this.currentAgent) {
+      this.rebuildAgent();
+    }
+    console.log('[agent] System prompt updated');
+  }
+
+  getSystemPrompt(): string {
+    return this.systemPrompt;
+  }
+
   // ─── Callback registration ───────────────────────────────────────────
 
   onToolStep(callback: ToolStepCallback): void {
@@ -769,7 +1167,7 @@ export class Agent implements AgentAPI {
 
   // ─── Query (streaming, mirrors agent-singleton.ts) ─────────────────
 
-  async query(userQuery: string, history: ChatTurn[] = []): Promise<string> {
+  async query(userQuery: string, history: ChatTurn[] = [], contextTabIds?: number[]): Promise<string> {
     // Lazy re-init if needed
     if (this.currentAgent == null) {
       try {
@@ -783,8 +1181,14 @@ export class Agent implements AgentAPI {
       }
     }
 
+    const browserContext = await buildBrowserContextSnapshot(contextTabIds).catch((err: any) => {
+      console.warn('[agent] Failed to build browser context snapshot:', err?.message ?? err);
+      return 'Browser context snapshot: unavailable.';
+    });
+
     const messages = [
       ...history.map((t) => ({ role: t.role, content: t.content })),
+      { role: 'system', content: browserContext },
       { role: 'user', content: userQuery },
     ];
     let finalContent = '';
@@ -831,7 +1235,7 @@ export class Agent implements AgentAPI {
     try {
       const rawStream = await this.currentAgent.stream(
         { messages },
-        { streamMode: 'updates', recursionLimit: 50, signal: abortSignal },
+        { streamMode: 'updates', recursionLimit: this.recursionLimit, signal: abortSignal },
       );
 
       for await (const chunk of abortableStream(rawStream, abortSignal)) {
@@ -982,7 +1386,7 @@ export class Agent implements AgentAPI {
    * so the LLM knows exactly what page tools it can call.
    */
   private buildSystemPrompt(): string {
-    let prompt = SYSTEM_PROMPT;
+    let prompt = this.systemPrompt;
 
     if (this.webmcpByTab.size > 0) {
       prompt += `\n\n**Available WebMCP page tools (across all tabs):**`;

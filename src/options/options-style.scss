@@ -1,14 +1,16 @@
-$bg: #0e0e11;
-$surface: rgba(25, 25, 29, 0.88);
-$surface-high: rgba(37, 37, 42, 0.92);
-$text-primary: #fbf8fc;
-$text-secondary: #acaaae;
-$text-faint: rgba(172, 170, 174, 0.68);
-$accent: #e08dff;
-$accent-strong: #bc00fb;
-$accent-border: rgba(224, 141, 255, 0.24);
-$border: rgba(255, 255, 255, 0.08);
-$success: #52d69a;
+$bg: #0e0e0e;
+$surface: #131313;
+$surface-high: #1c1b1b;
+$text-primary: #e5e2e1;
+$text-secondary: #bac9cc;
+$text-faint: rgba(186, 201, 204, 0.5);
+$accent: #A855F7;
+$accent-strong: #7c3aed;
+$accent-border: rgba(168, 85, 247, 0.3);
+$border: #3b494c;
+$outline-variant: #3b494c;
+$shadow-purple: #4a1282;
+$success: #2ff801;
 
 * {
   margin: 0;
@@ -28,12 +30,13 @@ body {
 body {
   position: relative;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at top left, rgba(224, 141, 255, 0.16) 0, transparent 32%),
-    radial-gradient(circle at top right, rgba(0, 238, 252, 0.1) 0, transparent 24%),
-    linear-gradient(180deg, #131318 0%, $bg 56%, #09090c 100%);
+  background: $bg;
+  background-image:
+    linear-gradient(to right, rgba(168, 85, 247, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(168, 85, 247, 0.05) 1px, transparent 1px);
+  background-size: 20px 20px;
   color: $text-primary;
-  font: 14px/1.55 'Manrope', 'Segoe UI', system-ui, sans-serif;
+  font: 14px/1.55 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
   padding: 28px 16px 36px;
 }
 
@@ -46,21 +49,19 @@ body::after {
 }
 
 body::before {
-  background: repeating-linear-gradient(
-    0deg,
-    rgba(0, 0, 0, 0.045) 0,
-    rgba(0, 0, 0, 0.045) 1px,
-    transparent 1px,
-    transparent 2px
+  background: linear-gradient(
+    to bottom,
+    rgba(168, 85, 247, 0.03) 50%,
+    rgba(0, 0, 0, 0.15) 50%
   );
+  background-size: 100% 4px;
+  opacity: 0.8;
 }
 
 body::after {
-  background-image:
-    linear-gradient(rgba(224, 141, 255, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(224, 141, 255, 0.04) 1px, transparent 1px);
-  background-size: 32px 32px;
-  opacity: 0.7;
+  background-image: radial-gradient(#A855F7 0.5px, transparent 0.5px);
+  background-size: 4px 4px;
+  opacity: 0.08;
 }
 
 button,
@@ -88,22 +89,15 @@ select {
 .options-section {
   position: relative;
   overflow: hidden;
-  border: 1px solid $border;
-  border-radius: 28px;
-  background: linear-gradient(180deg, rgba(25, 25, 29, 0.9) 0%, rgba(14, 14, 17, 0.92) 100%);
-  box-shadow:
-    0 24px 60px rgba(0, 0, 0, 0.42),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(18px);
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  background: $surface;
+  box-shadow: 8px 8px 0 0 $shadow-purple;
 }
 
 .options-hero::before,
 .options-section::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.03), transparent 42%);
-  pointer-events: none;
+  display: none;
 }
 
 .options-hero {
@@ -120,11 +114,11 @@ select {
 
 .options-kicker {
   margin-bottom: 6px;
-  color: $text-faint;
+  color: $accent;
   font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
   font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.22em;
+  font-weight: 800;
+  letter-spacing: 0.25em;
   text-transform: uppercase;
 }
 
@@ -132,10 +126,10 @@ select {
   color: $accent;
   font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
   font-size: 28px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-weight: 900;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  text-shadow: 0 0 18px rgba(224, 141, 255, 0.22);
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
 }
 
 .options-summary {
@@ -148,15 +142,16 @@ select {
   flex-shrink: 0;
   min-height: 40px;
   padding: 10px 14px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid $accent-border;
+  border-radius: 0;
+  background: rgba(168, 85, 247, 0.1);
+  border: 2px solid $accent;
   color: $accent;
   font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  box-shadow: 4px 4px 0 0 $shadow-purple;
 }
 
 .options-section {
@@ -171,9 +166,10 @@ select {
   color: $accent;
   font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
   font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  font-weight: 800;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
 }
 
 .section-heading p {
@@ -206,24 +202,22 @@ select {
 .option-field select {
   width: 100%;
   padding: 12px 13px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 16px;
-  background: rgba(14, 14, 17, 0.82);
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  background: $bg;
   color: $text-primary;
   outline: none;
   transition:
-    border-color 0.18s ease,
-    box-shadow 0.18s ease,
-    background 0.18s ease;
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
 
   &::placeholder {
-    color: rgba(172, 170, 174, 0.56);
+    color: rgba(186, 201, 204, 0.4);
   }
 
   &:focus {
-    border-color: rgba(224, 141, 255, 0.35);
-    box-shadow: 0 0 0 3px rgba(224, 141, 255, 0.08);
-    background: rgba(18, 18, 23, 0.96);
+    border-color: $accent;
+    box-shadow: 4px 4px 0 0 $shadow-purple;
   }
 }
 
@@ -236,22 +230,22 @@ select {
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(14, 14, 17, 0.74);
+  border-radius: 0;
+  border: 2px solid $outline-variant;
+  background: $bg;
   cursor: pointer;
-  transition: border-color 0.18s ease, background 0.18s ease;
+  transition: border-color 0.12s ease, background 0.12s ease;
 
   &:hover {
-    border-color: rgba(224, 141, 255, 0.2);
-    background: rgba(224, 141, 255, 0.06);
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
   }
 }
 
 .option-toggle input[type='checkbox'] {
   width: 18px;
   height: 18px;
-  accent-color: $accent-strong;
+  accent-color: $accent;
 }
 
 .option-toggle span {
@@ -271,28 +265,24 @@ select {
   justify-content: center;
   min-height: 44px;
   padding: 0 20px;
-  border: none;
-  border-radius: 16px;
-  background: linear-gradient(180deg, rgba(224, 141, 255, 0.24) 0%, rgba(188, 0, 251, 0.2) 100%);
-  color: $accent;
+  border: 2px solid $accent;
+  border-radius: 0;
+  background: $accent;
+  color: $surface;
   cursor: pointer;
   font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  box-shadow: inset 0 0 0 1px rgba(224, 141, 255, 0.18);
+  box-shadow: 4px 4px 0 0 $shadow-purple;
   transition:
-    transform 0.18s ease,
-    filter 0.18s ease,
-    box-shadow 0.18s ease;
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
 
   &:hover {
-    transform: translateY(-1px);
-    filter: brightness(1.05);
-    box-shadow:
-      inset 0 0 0 1px rgba(224, 141, 255, 0.24),
-      0 0 18px rgba(224, 141, 255, 0.12);
+    transform: translate(2px, 2px);
+    box-shadow: none;
   }
 }
 

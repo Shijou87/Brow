@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Agent WebMCP",
+  "name": "Brow",
   "version": "1.0.0",
   "description": "LangGraph.js agent with MCP, MCP Apps, WebMCP tab tools, and dynamic WebMCP discovery",
   "permissions": [
@@ -36,7 +36,23 @@
     }
   ],
   "options_page": "options.html",
+  "icons": {
+    "16": "icons/extension-icon.png",
+    "48": "icons/extension-icon.png",
+    "128": "icons/extension-icon.png"
+  },
   "action": {
-    "default_title": "Open Agent WebMCP"
-  }
+    "default_title": "Brow",
+    "default_icon": {
+      "16": "icons/extension-icon.png",
+      "48": "icons/extension-icon.png",
+      "128": "icons/extension-icon.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/extension-icon.png", "icons/icon.png", "icons/openai.png", "icons/claude.png"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

@@ -2,9 +2,14 @@
 // Gemini-like sidebar chat UI. Modeled after radiology-copilot-view.ts.
 
 import type { WebMCPRegistryEntry } from '../shared/types';
-import type { ToolStepEvent, ToolManifestEntry } from './agent';
+import {
+  Agent,
+  DEFAULT_AGENT_RECURSION_LIMIT,
+  DEFAULT_SYSTEM_PROMPT,
+  type ToolStepEvent,
+  type ToolManifestEntry,
+} from './agent';
 import type { MCPServerEntry } from './mcp-client';
-import { Agent } from './agent';
 
 export interface SavedConversation {
   id: string;
@@ -15,9 +20,22 @@ export interface SavedConversation {
   chatHistory: Array<{ role: string; content: string }>;
 }
 
+export interface ContextTabOption {
+  tabId: number;
+  title: string;
+  url: string;
+  active?: boolean;
+}
+
 export interface ChatViewCallbacks {
-  onSendMessage: (message: string) => void;
-  onConfigApply: (config: { mode: 'direct' | 'lmaas'; fields: Record<string, string> }) => void;
+  onSendMessage: (message: string, contextTabIds: number[]) => void;
+  onStopGeneration: () => void;
+  onConfigApply: (config: {
+    mode: 'openai' | 'claude';
+    fields: Record<string, string>;
+    recursionLimit: number;
+    systemPrompt: string;
+  }) => void;
   onVLMConfigApply: (config: { baseUrl: string; apiKey: string; model: string }) => void;
   onRefreshWebMCP: () => void;
   onToolToggle: (toolName: string, enabled: boolean) => void;
@@ -41,22 +59,30 @@ export class ChatView {
   private chatBody!: HTMLElement;
   private messagesContainer!: HTMLElement;
   private inputContainer!: HTMLElement;
-  private messageInput!: HTMLInputElement;
+  private composerMainRow!: HTMLElement;
+  private messageInput!: HTMLTextAreaElement;
   private sendButton!: HTMLButtonElement;
+  private contextTabsContainer!: HTMLElement;
+  private contextAddButton!: HTMLButtonElement;
+  private contextPicker!: HTMLElement;
   private webmcpIndicator!: HTMLElement;
+  private newChatButton!: HTMLButtonElement;
   private bottomNav!: HTMLElement;
   private configPanel!: HTMLElement;
   private toolsPanel!: HTMLElement;
   private conversationsPanel!: HTMLElement;
   private mcpPanel!: HTMLElement;
+  private isInputEnabled = false;
+  private isAgentBusy = false;
 
   // Panel state
-  private configMode: 'direct' | 'lmaas' = 'direct';
+  private configMode: 'openai' | 'claude' = 'openai';
   private isConfigVisible = false;
   private isToolsVisible = false;
   private isConversationsVisible = false;
   private isMCPVisible = false;
   private activeSurface: SurfaceMode = 'chat';
+  private systemPromptPreviewMode: 'edit' | 'preview' = 'edit';
 
   // Current conversation
   private currentConversationId: string | null = null;
@@ -71,6 +97,17 @@ export class ChatView {
   private currentToolStepsContainer: HTMLElement | null = null;
   private toolStepsCollapsed = false;
 
+  // Composer context
+  private currentContextTab: ContextTabOption | null = null;
+  private includeCurrentContextTab = true;
+  private hasInitializedCurrentContext = false;
+  private extraContextTabs: ContextTabOption[] = [];
+  private contextPickerMode: 'button' | 'mention' | null = null;
+  private contextPickerItems: ContextTabOption[] = [];
+  private contextPickerHighlightIndex = 0;
+  private contextPickerQuery = '';
+  private mentionRange: { start: number; end: number } | null = null;
+
   constructor(container: HTMLElement, callbacks: ChatViewCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
@@ -80,13 +117,51 @@ export class ChatView {
   // ─── Public API ─────────────────────────────────────────────────────────
 
   public enableInput(): void {
-    this.sendButton.disabled = false;
-    this.messageInput.disabled = false;
+    this.isInputEnabled = true;
+    this.refreshComposerState();
   }
 
   public disableInput(): void {
-    this.sendButton.disabled = true;
-    this.messageInput.disabled = true;
+    this.isInputEnabled = false;
+    this.refreshComposerState();
+  }
+
+  public setAgentBusy(busy: boolean): void {
+    this.isAgentBusy = busy;
+    this.refreshComposerState();
+  }
+
+  public setCurrentContextTab(tab: ContextTabOption | null): void {
+    if (!this.hasInitializedCurrentContext && tab) {
+      this.includeCurrentContextTab = true;
+    }
+    this.currentContextTab = tab;
+    if (!tab && !this.hasInitializedCurrentContext) {
+      this.includeCurrentContextTab = false;
+    }
+    this.hasInitializedCurrentContext = true;
+    this.renderContextTabs();
+    void this.refreshContextPicker();
+  }
+
+  public removeContextTab(tabId: number): void {
+    if (this.currentContextTab?.tabId === tabId) {
+      this.currentContextTab = null;
+    }
+    this.extraContextTabs = this.extraContextTabs.filter((tab) => tab.tabId !== tabId);
+    this.renderContextTabs();
+    void this.refreshContextPicker();
+  }
+
+  public getSelectedContextTabIds(): number[] {
+    const ids: number[] = [];
+    if (this.includeCurrentContextTab && this.currentContextTab) {
+      ids.push(this.currentContextTab.tabId);
+    }
+    for (const tab of this.extraContextTabs) {
+      if (!ids.includes(tab.tabId)) ids.push(tab.tabId);
+    }
+    return ids;
   }
 
   public addUserMessage(message: string): void {
@@ -299,6 +374,7 @@ export class ChatView {
     header?.addEventListener('click', toggleFn);
     toggleBtn?.addEventListener('click', (e) => { e.stopPropagation(); toggleFn(); });
 
+    this.scrollToolStepsToBottom();
     this.scrollToBottom();
   }
 
@@ -388,20 +464,33 @@ export class ChatView {
     this.chatHeader.innerHTML = `
       <div class="header-brand">
         <div class="brand-copy">
-          <h3>BROW</h3>
+          <img src="${chrome.runtime.getURL('icons/extension-icon.png')}" alt="Agent WebMCP" class="brand-icon" />
+          <span class="brand-label">BROW</span>
         </div>
       </div>
       <div class="header-meta">
         <div class="webmcp-indicator"><span class="status-dot unavailable"></span> WebMCP: N/A</div>
         <span class="connection-status">Ready</span>
-        <button class="refresh-webmcp-btn" title="Refresh WebMCP discovery" aria-label="Refresh WebMCP discovery">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-        </button>
+        <div class="header-actions">
+          <button class="new-chat-btn" title="Start a new chat" aria-label="Start a new chat">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+              <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h11"></path>
+              <line x1="18" y1="3" x2="18" y2="9"></line>
+              <line x1="15" y1="6" x2="21" y2="6"></line>
+            </svg>
+            <span>New Chat</span>
+          </button>
+          <button class="refresh-webmcp-btn" title="Refresh WebMCP discovery" aria-label="Refresh WebMCP discovery">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          </button>
+        </div>
       </div>`;
     this.container.appendChild(this.chatHeader);
 
     this.webmcpIndicator = this.chatHeader.querySelector('.webmcp-indicator') as HTMLElement;
+    this.newChatButton = this.chatHeader.querySelector('.new-chat-btn') as HTMLButtonElement;
     const refreshBtn = this.chatHeader.querySelector('.refresh-webmcp-btn');
+    this.newChatButton.addEventListener('click', () => this.startNewConversation());
     refreshBtn?.addEventListener('click', () => this.callbacks.onRefreshWebMCP());
 
     // Chat body
@@ -414,18 +503,50 @@ export class ChatView {
     this.inputContainer = document.createElement('div');
     this.inputContainer.className = 'chat-input-container';
 
-    this.messageInput = document.createElement('input');
+    const contextBar = document.createElement('div');
+    contextBar.className = 'chat-context-bar';
+
+    this.contextTabsContainer = document.createElement('div');
+    this.contextTabsContainer.className = 'chat-context-tabs';
+
+    this.contextAddButton = document.createElement('button');
+    this.contextAddButton.className = 'context-add-button';
+    this.contextAddButton.type = 'button';
+    this.contextAddButton.title = 'Add a tab to context';
+    this.contextAddButton.setAttribute('aria-label', 'Add a tab to context');
+    this.contextAddButton.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+        <line x1="12" y1="5" x2="12" y2="19"></line>
+        <line x1="5" y1="12" x2="19" y2="12"></line>
+      </svg>`;
+
+    contextBar.appendChild(this.contextTabsContainer);
+    contextBar.appendChild(this.contextAddButton);
+
+    this.composerMainRow = document.createElement('div');
+    this.composerMainRow.className = 'chat-input-main';
+
+    this.messageInput = document.createElement('textarea');
     this.messageInput.id = 'chat-input';
     this.messageInput.placeholder = 'Ask the agent anything…';
     this.messageInput.disabled = true;
+    this.messageInput.rows = 1;
+    this.messageInput.spellcheck = true;
 
     this.sendButton = document.createElement('button');
     this.sendButton.id = 'send-button';
     this.sendButton.disabled = true;
-    this.sendButton.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
+    this.sendButton.innerHTML = this.getSendButtonMarkup();
 
-    this.inputContainer.appendChild(this.messageInput);
-    this.inputContainer.appendChild(this.sendButton);
+    this.composerMainRow.appendChild(this.messageInput);
+    this.composerMainRow.appendChild(this.sendButton);
+
+    this.contextPicker = document.createElement('div');
+    this.contextPicker.className = 'context-picker hidden';
+
+    this.inputContainer.appendChild(contextBar);
+    this.inputContainer.appendChild(this.contextPicker);
+    this.inputContainer.appendChild(this.composerMainRow);
 
     // Tools panel (hidden, sits between messages and input)
     this.toolsPanel = this.createToolsPanel();
@@ -488,28 +609,93 @@ export class ChatView {
     // Event listeners
     this.setupEventListeners();
     this.setActiveSurface('chat');
+    this.renderContextTabs();
+    this.autoResizeMessageInput();
+    this.refreshComposerState();
   }
 
   private setupEventListeners(): void {
     const send = () => {
+      if (this.isAgentBusy) {
+        this.callbacks.onStopGeneration();
+        return;
+      }
+
       const msg = this.messageInput.value.trim();
       if (msg) {
-        this.callbacks.onSendMessage(msg);
+        this.callbacks.onSendMessage(msg, this.getSelectedContextTabIds());
         this.messageInput.value = '';
+        this.autoResizeMessageInput();
+        this.closeContextPicker();
+        this.refreshComposerState();
       }
     };
 
     this.sendButton.addEventListener('click', send);
+    this.contextAddButton.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!this.isInputEnabled || this.isAgentBusy) return;
+      if (this.contextPickerMode === 'button') {
+        this.closeContextPicker();
+        return;
+      }
+      this.contextPickerMode = 'button';
+      this.contextPickerQuery = '';
+      this.contextPickerHighlightIndex = 0;
+      this.mentionRange = null;
+      await this.refreshContextPicker();
+    });
+
+    this.messageInput.addEventListener('input', () => {
+      this.autoResizeMessageInput();
+      this.syncMentionPickerFromInput();
+      this.refreshComposerState();
+    });
+    this.messageInput.addEventListener('click', () => this.syncMentionPickerFromInput());
+    this.messageInput.addEventListener('focus', () => this.syncMentionPickerFromInput());
 
     this.messageInput.addEventListener('keydown', (e) => {
       e.stopPropagation();
+      if (this.contextPickerMode && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        if (this.contextPickerItems.length === 0) return;
+        const direction = e.key === 'ArrowDown' ? 1 : -1;
+        const nextIndex =
+          (this.contextPickerHighlightIndex + direction + this.contextPickerItems.length) %
+          this.contextPickerItems.length;
+        this.contextPickerHighlightIndex = nextIndex;
+        this.updateContextPickerHighlight();
+        return;
+      }
+      if (this.contextPickerMode && ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab')) {
+        if (this.contextPickerItems.length > 0) {
+          e.preventDefault();
+          this.selectContextPickerItem(this.contextPickerItems[this.contextPickerHighlightIndex]);
+          return;
+        }
+      }
+      if (this.contextPickerMode && e.key === 'Escape') {
+        e.preventDefault();
+        this.closeContextPicker();
+        return;
+      }
+      if (this.isAgentBusy) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         send();
       }
     });
-    this.messageInput.addEventListener('keyup', (e) => e.stopPropagation());
+    this.messageInput.addEventListener('keyup', (e) => {
+      e.stopPropagation();
+      this.syncMentionPickerFromInput();
+    });
     this.messageInput.addEventListener('keypress', (e) => e.stopPropagation());
+
+    document.addEventListener('click', (e) => {
+      if (!this.inputContainer.contains(e.target as Node)) {
+        this.closeContextPicker();
+      }
+    });
 
     this.bottomNav.querySelectorAll<HTMLButtonElement>('.bottom-nav-btn[data-surface]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
@@ -535,6 +721,305 @@ export class ChatView {
     });
   }
 
+  private refreshComposerState(): void {
+    if (!this.messageInput || !this.sendButton) return;
+
+    this.messageInput.disabled = !this.isInputEnabled || this.isAgentBusy;
+    this.contextAddButton.disabled = !this.isInputEnabled || this.isAgentBusy;
+    this.contextTabsContainer
+      .querySelectorAll<HTMLButtonElement>('.context-tab-remove')
+      .forEach((button) => {
+        button.disabled = !this.isInputEnabled || this.isAgentBusy;
+      });
+
+    if (!this.isInputEnabled || this.isAgentBusy) {
+      this.closeContextPicker();
+    }
+
+    if (this.isAgentBusy) {
+      this.sendButton.disabled = false;
+      this.sendButton.classList.add('is-stop');
+      this.sendButton.innerHTML = this.getStopButtonMarkup();
+      this.sendButton.title = 'Stop generation';
+      this.sendButton.setAttribute('aria-label', 'Stop generation');
+      return;
+    }
+
+    this.sendButton.classList.remove('is-stop');
+    this.sendButton.innerHTML = this.getSendButtonMarkup();
+    this.sendButton.title = 'Send message';
+    this.sendButton.setAttribute('aria-label', 'Send message');
+    this.sendButton.disabled = !this.isInputEnabled || this.messageInput.value.trim().length === 0;
+  }
+
+  private getSendButtonMarkup(): string {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
+  }
+
+  private getStopButtonMarkup(): string {
+    return `<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="1"></rect></svg>`;
+  }
+
+  private autoResizeMessageInput(): void {
+    if (!this.messageInput) return;
+    this.messageInput.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(this.messageInput.scrollHeight, 24), 96);
+    this.messageInput.style.height = `${nextHeight}px`;
+  }
+
+  private renderContextTabs(): void {
+    if (!this.contextTabsContainer) return;
+    this.contextTabsContainer.innerHTML = '';
+
+    const renderedTabIds = new Set<number>();
+    if (this.includeCurrentContextTab && this.currentContextTab) {
+      renderedTabIds.add(this.currentContextTab.tabId);
+      this.contextTabsContainer.appendChild(this.createContextTabChip(this.currentContextTab, 'Now', true));
+    }
+
+    for (const tab of this.extraContextTabs) {
+      if (renderedTabIds.has(tab.tabId)) continue;
+      renderedTabIds.add(tab.tabId);
+      this.contextTabsContainer.appendChild(this.createContextTabChip(tab, 'Ctx', false));
+    }
+
+    if (renderedTabIds.size === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'chat-context-empty';
+      empty.textContent = 'No tab attached';
+      this.contextTabsContainer.appendChild(empty);
+    }
+
+    this.refreshComposerState();
+    this.scrollContextTabsToEnd();
+  }
+
+  private createContextTabChip(tab: ContextTabOption, label: string, isCurrent: boolean): HTMLElement {
+    const chip = document.createElement('div');
+    chip.className = `context-tab-chip${isCurrent ? ' current' : ''}`;
+    chip.title = `${tab.title || '(untitled tab)'}\n${tab.url || ''}`;
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'context-tab-kind';
+    labelEl.textContent = label;
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'context-tab-title';
+    titleEl.textContent = this.truncateText(tab.title || tab.url || `Tab ${tab.tabId}`, 52);
+
+    const removeButton = document.createElement('button');
+    removeButton.className = 'context-tab-remove';
+    removeButton.type = 'button';
+    removeButton.innerHTML = '&times;';
+    removeButton.title = `Remove ${tab.title || 'tab'} from context`;
+    removeButton.setAttribute('aria-label', `Remove ${tab.title || 'tab'} from context`);
+    removeButton.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (isCurrent) {
+        this.includeCurrentContextTab = false;
+      } else {
+        this.extraContextTabs = this.extraContextTabs.filter((entry) => entry.tabId !== tab.tabId);
+      }
+      this.renderContextTabs();
+      void this.refreshContextPicker();
+    });
+
+    chip.appendChild(labelEl);
+    chip.appendChild(titleEl);
+    chip.appendChild(removeButton);
+    return chip;
+  }
+
+  private truncateText(text: string, max: number): string {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (normalized.length <= max) return normalized;
+    return normalized.slice(0, max) + '…';
+  }
+
+  private async refreshContextPicker(): Promise<void> {
+    if (!this.contextPicker || !this.contextPickerMode || !this.isInputEnabled || this.isAgentBusy) {
+      this.closeContextPicker();
+      return;
+    }
+
+    const tabs = await this.getAvailableContextTabs(this.contextPickerQuery);
+    this.contextPickerItems = tabs;
+    this.contextPickerHighlightIndex = Math.min(this.contextPickerHighlightIndex, Math.max(tabs.length - 1, 0));
+    this.renderContextPickerList();
+  }
+
+  private renderContextPickerList(): void {
+    if (!this.contextPicker) return;
+    if (!this.contextPickerMode) {
+      this.closeContextPicker();
+      return;
+    }
+
+    const hint = this.contextPickerMode === 'mention'
+      ? 'Attach a tab with @'
+      : 'Add another tab to the message context';
+
+    if (this.contextPickerItems.length === 0) {
+      this.contextPicker.innerHTML = `
+        <div class="context-picker-header">${this.escapeHtml(hint)}</div>
+        <div class="context-picker-empty">No matching tabs</div>`;
+      this.contextPicker.classList.remove('hidden');
+      return;
+    }
+
+    const itemsHtml = this.contextPickerItems.map((tab, index) => {
+      const title = this.escapeHtml(tab.title || '(untitled tab)');
+      const url = this.escapeHtml(this.truncateText(tab.url || '', 90));
+      return `
+        <button class="context-picker-item${index === this.contextPickerHighlightIndex ? ' active' : ''}" type="button" data-tab-id="${tab.tabId}">
+          <span class="context-picker-item-title">${title}</span>
+          <span class="context-picker-item-url">${url}</span>
+        </button>`;
+    }).join('');
+
+    this.contextPicker.innerHTML = `
+      <div class="context-picker-header">${this.escapeHtml(hint)}</div>
+      <div class="context-picker-list">${itemsHtml}</div>`;
+
+    this.contextPicker.querySelectorAll<HTMLButtonElement>('.context-picker-item').forEach((button, index) => {
+      button.addEventListener('mouseenter', () => {
+        this.contextPickerHighlightIndex = index;
+        this.updateContextPickerHighlight();
+      });
+      button.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const selected = this.contextPickerItems[index];
+        if (selected) this.selectContextPickerItem(selected);
+      });
+      button.addEventListener('click', (e) => {
+        e.preventDefault();
+        const selected = this.contextPickerItems[index];
+        if (selected) this.selectContextPickerItem(selected);
+      });
+    });
+
+    this.contextPicker.classList.remove('hidden');
+    this.updateContextPickerHighlight();
+  }
+
+  private updateContextPickerHighlight(): void {
+    if (!this.contextPicker) return;
+    const items = this.contextPicker.querySelectorAll<HTMLButtonElement>('.context-picker-item');
+    items.forEach((button, index) => {
+      button.classList.toggle('active', index === this.contextPickerHighlightIndex);
+    });
+    const active = items[this.contextPickerHighlightIndex];
+    if (active) {
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  private scrollContextTabsToEnd(): void {
+    if (!this.contextTabsContainer) return;
+    requestAnimationFrame(() => {
+      this.contextTabsContainer.scrollLeft = this.contextTabsContainer.scrollWidth;
+    });
+  }
+
+  private async getAvailableContextTabs(query: string): Promise<ContextTabOption[]> {
+    const selectedIds = new Set(this.getSelectedContextTabIds());
+    const normalizedQuery = query.trim().toLowerCase();
+    const tabs = await chrome.tabs.query({});
+
+    return tabs
+      .filter((tab) => tab.id !== undefined)
+      .map((tab) => ({
+        tabId: tab.id!,
+        title: tab.title ?? '',
+        url: tab.url ?? '',
+        active: tab.active ?? false,
+      }))
+      .filter((tab) => !selectedIds.has(tab.tabId))
+      .filter((tab) => {
+        if (!normalizedQuery) return true;
+        const haystack = `${tab.title} ${tab.url}`.toLowerCase();
+        return haystack.includes(normalizedQuery);
+      })
+      .sort((a, b) => Number(Boolean(b.active)) - Number(Boolean(a.active)));
+  }
+
+  private selectContextPickerItem(tab: ContextTabOption): void {
+    if (this.contextPickerMode === 'mention') {
+      this.applyMentionSelection();
+    }
+
+    if (this.currentContextTab?.tabId === tab.tabId) {
+      this.includeCurrentContextTab = true;
+    } else if (!this.extraContextTabs.some((entry) => entry.tabId === tab.tabId)) {
+      this.extraContextTabs = [...this.extraContextTabs, tab];
+    }
+
+    this.renderContextTabs();
+    this.closeContextPicker();
+    this.autoResizeMessageInput();
+    this.messageInput.focus();
+  }
+
+  private applyMentionSelection(): void {
+    if (!this.mentionRange) return;
+    const { start, end } = this.mentionRange;
+    const value = this.messageInput.value;
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    let nextBefore = before;
+    let nextAfter = after;
+
+    if (/\s$/.test(nextBefore) && /^\s/.test(nextAfter)) {
+      nextAfter = nextAfter.replace(/^\s+/, ' ');
+    } else if (nextBefore.length > 0 && nextAfter.length > 0 && !/\s$/.test(nextBefore) && !/^\s/.test(nextAfter)) {
+      nextAfter = ` ${nextAfter}`;
+    }
+
+    this.messageInput.value = `${nextBefore}${nextAfter}`;
+    this.messageInput.setSelectionRange(nextBefore.length, nextBefore.length);
+  }
+
+  private syncMentionPickerFromInput(): void {
+    if (!this.isInputEnabled || this.isAgentBusy) {
+      this.closeContextPicker();
+      return;
+    }
+
+    const selectionStart = this.messageInput.selectionStart ?? this.messageInput.value.length;
+    const beforeCaret = this.messageInput.value.slice(0, selectionStart);
+    const match = beforeCaret.match(/(^|\s)@([^\s@]*)$/);
+    if (!match) {
+      if (this.contextPickerMode === 'mention') this.closeContextPicker();
+      return;
+    }
+
+    const query = match[2] ?? '';
+    const tokenStart = selectionStart - match[0].length + match[1].length;
+    this.contextPickerMode = 'mention';
+    this.contextPickerQuery = query;
+    this.contextPickerHighlightIndex = 0;
+    this.mentionRange = { start: tokenStart, end: selectionStart };
+    void this.refreshContextPicker();
+  }
+
+  private closeContextPicker(): void {
+    this.contextPickerMode = null;
+    this.contextPickerItems = [];
+    this.contextPickerQuery = '';
+    this.contextPickerHighlightIndex = 0;
+    this.mentionRange = null;
+    if (this.contextPicker) {
+      this.contextPicker.classList.add('hidden');
+      this.contextPicker.innerHTML = '';
+    }
+  }
+
+  private startNewConversation(): void {
+    this.callbacks.onConversationNew();
+    this.currentConversationId = null;
+    this.setActiveSurface('chat');
+  }
+
   // ─── Tools Panel ────────────────────────────────────────────────────────
 
   private setActiveSurface(surface: SurfaceMode): void {
@@ -543,6 +1028,10 @@ export class ChatView {
     this.isMCPVisible = surface === 'mcp';
     this.isConversationsVisible = surface === 'conversations';
     this.isConfigVisible = surface === 'config';
+
+    if (surface !== 'chat') {
+      this.closeContextPicker();
+    }
 
     this.chatBody.style.display = this.isConfigVisible ? 'none' : 'flex';
     this.configPanel.style.display = this.isConfigVisible ? 'flex' : 'none';
@@ -918,9 +1407,7 @@ export class ChatView {
     // New conversation button
     panel.querySelector('.conversations-new-btn')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.callbacks.onConversationNew();
-      this.currentConversationId = null;
-      this.setActiveSurface('chat');
+      this.startNewConversation();
     });
 
     return panel;
@@ -1112,15 +1599,21 @@ export class ChatView {
     panel.innerHTML = `
       <div class="config-panel-inner">
         <div class="config-mode-toggle">
-          <button class="config-mode-btn active" data-mode="direct">Direct</button>
-          <button class="config-mode-btn" data-mode="lmaas">LMaaS</button>
+          <button class="config-mode-btn active" data-mode="openai">
+            <img src="${chrome.runtime.getURL('icons/openai.png')}" class="provider-icon" alt="" />
+            <span>OpenAI</span>
+          </button>
+          <button class="config-mode-btn" data-mode="claude">
+            <img src="${chrome.runtime.getURL('icons/claude.png')}" class="provider-icon" alt="" />
+            <span>Claude</span>
+          </button>
         </div>
 
-        <div class="config-fields config-direct-fields">
+        <div class="config-fields config-openai-fields">
           <div class="config-field">
-            <label for="llm-config-endpoint">Endpoint</label>
+            <label for="llm-config-endpoint">Base URL</label>
             <div class="config-endpoint-row">
-              <input type="text" id="llm-config-endpoint" placeholder="http://host:port/v1" autocomplete="off" />
+              <input type="text" id="llm-config-endpoint" placeholder="http://localhost:11434/v1" autocomplete="off" />
               <button class="config-refresh-btn" id="llm-config-refresh" title="Fetch models">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14">
                   <polyline points="23 4 23 10 17 10"></polyline>
@@ -1130,31 +1623,47 @@ export class ChatView {
             </div>
           </div>
           <div class="config-field">
-            <label for="llm-config-api-key">API Key / Token</label>
-            <input type="password" id="llm-config-api-key" placeholder="sk-… or Bearer …" autocomplete="off" />
+            <label for="llm-config-api-key">API Key</label>
+            <input type="password" id="llm-config-api-key" placeholder="sk-… or leave blank" autocomplete="off" />
           </div>
           <div class="config-field" id="llm-config-model-field">
-            <label>Model Name</label>
-            <input type="text" id="llm-config-model" placeholder="Model name" autocomplete="off" />
+            <label>Model</label>
+            <input type="text" id="llm-config-model" placeholder="gpt-4o" autocomplete="off" />
           </div>
         </div>
 
-        <div class="config-fields config-lmaas-fields" style="display: none;">
+        <div class="config-fields config-claude-fields" style="display: none;">
           <div class="config-field">
-            <label for="llm-config-client-id">Client ID</label>
-            <input type="text" id="llm-config-client-id" placeholder="Client ID" autocomplete="off" />
+            <label for="claude-config-endpoint">API Base URL</label>
+            <input type="text" id="claude-config-endpoint" placeholder="https://api.anthropic.com/v1" autocomplete="off" />
           </div>
           <div class="config-field">
-            <label for="llm-config-client-secret">Client Secret</label>
-            <input type="password" id="llm-config-client-secret" placeholder="Client Secret" autocomplete="off" />
+            <label for="claude-config-api-key">Anthropic API Key</label>
+            <input type="password" id="claude-config-api-key" placeholder="sk-ant-…" autocomplete="off" />
           </div>
           <div class="config-field">
-            <label for="llm-config-audience">Audience</label>
-            <input type="text" id="llm-config-audience" placeholder="Audience" autocomplete="off" />
+            <label for="claude-config-model">Model</label>
+            <input type="text" id="claude-config-model" placeholder="claude-opus-4-5" autocomplete="off" />
           </div>
+        </div>
+
+        <hr class="config-divider" />
+        <h3 class="config-section-title">Agent Runtime</h3>
+        <div class="config-fields config-agent-fields">
           <div class="config-field">
-            <label for="llm-config-deployment">Deployment Name</label>
-            <input type="text" id="llm-config-deployment" placeholder="gpt-4.1-2025-04-14" autocomplete="off" />
+            <label for="llm-config-recursion-limit">Recursion Limit</label>
+            <input type="number" id="llm-config-recursion-limit" min="1" step="1" placeholder="100" autocomplete="off" />
+          </div>
+          <div class="config-field config-system-prompt-field">
+            <div class="config-field-header">
+              <label for="llm-config-system-prompt">System Prompt</label>
+              <div class="config-editor-toggle" role="tablist" aria-label="System prompt view">
+                <button type="button" class="config-editor-btn active" data-view="edit">Edit</button>
+                <button type="button" class="config-editor-btn" data-view="preview">Preview</button>
+              </div>
+            </div>
+            <textarea id="llm-config-system-prompt" class="config-system-prompt-input" spellcheck="false"></textarea>
+            <div id="llm-config-system-prompt-preview" class="config-system-prompt-preview" style="display: none;"></div>
           </div>
         </div>
 
@@ -1184,14 +1693,25 @@ export class ChatView {
     modeBtns.forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const mode = (btn as HTMLElement).dataset.mode as 'direct' | 'lmaas';
+        const mode = (btn as HTMLElement).dataset.mode as 'openai' | 'claude';
         this.configMode = mode;
         modeBtns.forEach((b) => b.classList.remove('active'));
         btn.classList.add('active');
-        const df = panel.querySelector('.config-direct-fields') as HTMLElement;
-        const lf = panel.querySelector('.config-lmaas-fields') as HTMLElement;
-        if (df) df.style.display = mode === 'direct' ? '' : 'none';
-        if (lf) lf.style.display = mode === 'lmaas' ? '' : 'none';
+        const of = panel.querySelector('.config-openai-fields') as HTMLElement;
+        const cf = panel.querySelector('.config-claude-fields') as HTMLElement;
+        if (of) of.style.display = mode === 'openai' ? '' : 'none';
+        if (cf) cf.style.display = mode === 'claude' ? '' : 'none';
+      });
+    });
+
+    const systemPromptInput = panel.querySelector('#llm-config-system-prompt') as HTMLTextAreaElement | null;
+    systemPromptInput?.addEventListener('input', () => this.refreshSystemPromptPreview());
+
+    panel.querySelectorAll('.config-editor-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const view = (btn as HTMLElement).dataset.view as 'edit' | 'preview';
+        this.setSystemPromptPreviewMode(view);
       });
     });
 
@@ -1212,20 +1732,21 @@ export class ChatView {
     panel.addEventListener('keyup', (e) => e.stopPropagation());
     panel.addEventListener('keypress', (e) => e.stopPropagation());
 
+    this.setSystemPromptPreviewMode('edit', panel);
+
     return panel;
   }
 
   private populateConfigFields(): void {
-    const defaultDirect = {
-      baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4008/v1',
-      apiKey: 'test',
-      model: 'Qwen/Qwen3-Coder-Next-FP8',
+    const defaultOpenAI = {
+      baseUrl: 'http://localhost:11434/v1',
+      apiKey: '',
+      model: 'gpt-4o',
     };
-    const defaultLmaas = {
-      clientId: 'YgfOyfUMHU2oQxWQPKiuG4gifPAa',
-      clientSecret: 'teflpHu0UUtimxR1jS9lW4xI6jsa',
-      audience: '0_b2dJB20TBhxzLIHCMzSG4RiQYa',
-      deployment: 'integ-gpt-4.1-2025-04-14',
+    const defaultClaude = {
+      baseUrl: 'https://api.anthropic.com/v1',
+      apiKey: '',
+      model: 'claude-opus-4-5',
     };
     const defaultVlm = {
       baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
@@ -1235,31 +1756,37 @@ export class ChatView {
 
     chrome.storage.local.get('agent-webmcp-config', (result) => {
       const saved = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
-      const direct = { ...defaultDirect, ...(saved.direct ?? {}) };
-      const lmaas = { ...defaultLmaas, ...(saved.lmaas ?? {}) };
+      const openai = { ...defaultOpenAI, ...(saved.openai ?? saved.direct ?? {}) };
+      const claude = { ...defaultClaude, ...(saved.claude ?? {}) };
       const vlm = { ...defaultVlm, ...(saved.vlm ?? {}) };
 
-      this.setInput('llm-config-endpoint', direct.baseUrl);
-      this.setInput('llm-config-api-key', direct.apiKey);
-      this.setInput('llm-config-model', direct.model);
-      this.setInput('llm-config-client-id', lmaas.clientId);
-      this.setInput('llm-config-client-secret', lmaas.clientSecret);
-      this.setInput('llm-config-audience', lmaas.audience);
-      this.setInput('llm-config-deployment', lmaas.deployment);
+      this.setInput('llm-config-endpoint', openai.baseUrl);
+      this.setInput('llm-config-api-key', openai.apiKey);
+      this.setInput('llm-config-model', openai.model);
+      this.setInput('claude-config-endpoint', claude.baseUrl);
+      this.setInput('claude-config-api-key', claude.apiKey);
+      this.setInput('claude-config-model', claude.model);
+      this.setInput(
+        'llm-config-recursion-limit',
+        String(Number(saved.runtime?.recursionLimit) || DEFAULT_AGENT_RECURSION_LIMIT),
+      );
+      this.setInput('llm-config-system-prompt', saved.runtime?.systemPrompt || DEFAULT_SYSTEM_PROMPT);
       this.setInput('vlm-config-endpoint', vlm.baseUrl);
       this.setInput('vlm-config-api-key', vlm.apiKey);
       this.setInput('vlm-config-model', vlm.model);
+      this.refreshSystemPromptPreview();
+      this.setSystemPromptPreviewMode(this.systemPromptPreviewMode);
 
       if (saved.activeMode) {
-        this.configMode = saved.activeMode;
+        this.configMode = saved.activeMode as 'openai' | 'claude';
         const btns = this.configPanel.querySelectorAll('.config-mode-btn');
         btns.forEach((b) => {
           b.classList.toggle('active', (b as HTMLElement).dataset.mode === this.configMode);
         });
-        const df = this.configPanel.querySelector('.config-direct-fields') as HTMLElement;
-        const lf = this.configPanel.querySelector('.config-lmaas-fields') as HTMLElement;
-        if (df) df.style.display = this.configMode === 'direct' ? '' : 'none';
-        if (lf) lf.style.display = this.configMode === 'lmaas' ? '' : 'none';
+        const of = this.configPanel.querySelector('.config-openai-fields') as HTMLElement;
+        const cf = this.configPanel.querySelector('.config-claude-fields') as HTMLElement;
+        if (of) of.style.display = this.configMode === 'openai' ? '' : 'none';
+        if (cf) cf.style.display = this.configMode === 'claude' ? '' : 'none';
       }
     });
   }
@@ -1267,8 +1794,19 @@ export class ChatView {
   private applyConfig(): void {
     const statusEl = this.configPanel.querySelector('.config-status') as HTMLElement;
     const fields: Record<string, string> = {};
+    const recursionLimitRaw = this.getInput('llm-config-recursion-limit');
+    const recursionLimit = Number(recursionLimitRaw || DEFAULT_AGENT_RECURSION_LIMIT);
+    const systemPrompt = this.getInput('llm-config-system-prompt') || DEFAULT_SYSTEM_PROMPT;
 
-    if (this.configMode === 'direct') {
+    if (!Number.isFinite(recursionLimit) || recursionLimit < 1 || !Number.isInteger(recursionLimit)) {
+      if (statusEl) {
+        statusEl.textContent = 'Recursion limit must be a positive integer.';
+        statusEl.className = 'config-status error';
+      }
+      return;
+    }
+
+    if (this.configMode === 'openai') {
       fields.baseUrl = this.getInput('llm-config-endpoint');
       fields.apiKey = this.getInput('llm-config-api-key');
       const select = this.configPanel.querySelector('#llm-config-model-select') as HTMLSelectElement;
@@ -1276,20 +1814,19 @@ export class ChatView {
 
       if (!fields.baseUrl || !fields.model) {
         if (statusEl) {
-          statusEl.textContent = 'Endpoint and model are required.';
+          statusEl.textContent = 'Base URL and model are required.';
           statusEl.className = 'config-status error';
         }
         return;
       }
     } else {
-      fields.clientId = this.getInput('llm-config-client-id');
-      fields.clientSecret = this.getInput('llm-config-client-secret');
-      fields.audience = this.getInput('llm-config-audience');
-      fields.deployment = this.getInput('llm-config-deployment');
+      fields.baseUrl = this.getInput('claude-config-endpoint') || 'https://api.anthropic.com/v1';
+      fields.apiKey = this.getInput('claude-config-api-key');
+      fields.model = this.getInput('claude-config-model');
 
-      if (!fields.clientId || !fields.clientSecret || !fields.deployment) {
+      if (!fields.apiKey || !fields.model) {
         if (statusEl) {
-          statusEl.textContent = 'Client ID, secret, and deployment are required.';
+          statusEl.textContent = 'Anthropic API key and model are required.';
           statusEl.className = 'config-status error';
         }
         return;
@@ -1299,12 +1836,17 @@ export class ChatView {
     // Save to chrome.storage.local
     chrome.storage.local.get('agent-webmcp-config', (result) => {
       const existing = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
-      if (this.configMode === 'direct') {
-        existing.direct = fields;
+      if (this.configMode === 'openai') {
+        existing.openai = fields;
       } else {
-        existing.lmaas = fields;
+        existing.claude = { ...fields };
       }
       existing.activeMode = this.configMode;
+      existing.runtime = {
+        ...(existing.runtime ?? {}),
+        recursionLimit: Math.floor(recursionLimit),
+        systemPrompt,
+      };
 
       // Always save VLM config alongside LLM config
       existing.vlm = {
@@ -1316,7 +1858,12 @@ export class ChatView {
       chrome.storage.local.set({ 'agent-webmcp-config': existing });
     });
 
-    this.callbacks.onConfigApply({ mode: this.configMode, fields });
+    this.callbacks.onConfigApply({
+      mode: this.configMode,
+      fields,
+      recursionLimit: Math.floor(recursionLimit),
+      systemPrompt,
+    });
 
     // Apply VLM config
     const vlmBaseUrl = this.getInput('vlm-config-endpoint');
@@ -1330,7 +1877,7 @@ export class ChatView {
     }
 
     if (statusEl) {
-      statusEl.textContent = `Applied! Using ${this.configMode === 'direct' ? 'Direct' : 'LMaaS'} mode.`;
+      statusEl.textContent = `Applied! Using ${this.configMode === 'openai' ? 'OpenAI Compatible' : 'Claude'} mode.`;
       statusEl.className = 'config-status success';
     }
     setTimeout(() => {
@@ -1404,13 +1951,100 @@ export class ChatView {
   // ─── Helpers ────────────────────────────────────────────────────────────
 
   private setInput(id: string, value: string): void {
-    const el = this.configPanel.querySelector(`#${id}`) as HTMLInputElement;
+    const el = this.configPanel.querySelector(`#${id}`) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null;
     if (el) el.value = value;
   }
 
   private getInput(id: string): string {
-    const el = this.configPanel.querySelector(`#${id}`) as HTMLInputElement;
+    const el = this.configPanel.querySelector(`#${id}`) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null;
     return el?.value?.trim() ?? '';
+  }
+
+  private setSystemPromptPreviewMode(
+    mode: 'edit' | 'preview',
+    root: ParentNode = this.configPanel,
+  ): void {
+    this.systemPromptPreviewMode = mode;
+    root.querySelectorAll<HTMLElement>('.config-editor-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.view === mode);
+    });
+
+    const input = root.querySelector('#llm-config-system-prompt') as HTMLTextAreaElement | null;
+    const preview = root.querySelector('#llm-config-system-prompt-preview') as HTMLElement | null;
+    if (!input || !preview) return;
+
+    this.refreshSystemPromptPreview(root);
+    input.style.display = mode === 'edit' ? '' : 'none';
+    preview.style.display = mode === 'preview' ? '' : 'block';
+  }
+
+  private refreshSystemPromptPreview(root: ParentNode = this.configPanel): void {
+    const input = root.querySelector('#llm-config-system-prompt') as HTMLTextAreaElement | null;
+    const preview = root.querySelector('#llm-config-system-prompt-preview') as HTMLElement | null;
+    if (!input || !preview) return;
+    preview.innerHTML = this.renderMarkdownPreview(input.value.trim() || DEFAULT_SYSTEM_PROMPT);
+  }
+
+  private renderMarkdownPreview(markdown: string): string {
+    const lines = markdown.split(/\r?\n/);
+    const html: string[] = [];
+    let listType: 'ul' | 'ol' | null = null;
+
+    const closeList = () => {
+      if (!listType) return;
+      html.push(`</${listType}>`);
+      listType = null;
+    };
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        closeList();
+        continue;
+      }
+
+      const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+      if (orderedMatch) {
+        if (listType !== 'ol') {
+          closeList();
+          html.push('<ol>');
+          listType = 'ol';
+        }
+        html.push(`<li>${this.renderMarkdownPreviewInline(orderedMatch[1])}</li>`);
+        continue;
+      }
+
+      const unorderedMatch = trimmed.match(/^-\s+(.*)$/);
+      if (unorderedMatch) {
+        if (listType !== 'ul') {
+          closeList();
+          html.push('<ul>');
+          listType = 'ul';
+        }
+        html.push(`<li>${this.renderMarkdownPreviewInline(unorderedMatch[1])}</li>`);
+        continue;
+      }
+
+      closeList();
+
+      if (/^[A-Z][A-Z0-9 /&-]{2,}$/.test(trimmed) && trimmed.length <= 48) {
+        html.push(`<h4>${this.escapeHtml(trimmed)}</h4>`);
+        continue;
+      }
+
+      html.push(`<p>${this.renderMarkdownPreviewInline(trimmed)}</p>`);
+    }
+
+    closeList();
+    return html.join('');
+  }
+
+  private renderMarkdownPreviewInline(text: string): string {
+    return this.escapeHtml(text)
+      .replace(/(https?:\/\/[^\s),]+)/gi, '<a href="$1" target="_blank">$1</a>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/`(.*?)`/g, '<code>$1</code>');
   }
 
   private startStreamingWords(): void {
@@ -1450,6 +2084,15 @@ export class ChatView {
   private scrollToBottom(): void {
     requestAnimationFrame(() => {
       this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+    });
+  }
+
+  private scrollToolStepsToBottom(): void {
+    requestAnimationFrame(() => {
+      const timeline = this.currentToolStepsContainer?.querySelector('.tool-steps-timeline');
+      if (timeline instanceof HTMLElement) {
+        timeline.scrollTop = timeline.scrollHeight;
+      }
     });
   }
 

@@ -1,26 +1,30 @@
-$bg: #0e0e11;
+// ─── Pixel Brutalist Purple Theme ─────────────────────────────────────
+$bg: #0e0e0e;
 $bg-deep: #000000;
-$surface-low: rgba(19, 19, 22, 0.88);
-$surface: rgba(25, 25, 29, 0.88);
-$surface-high: rgba(37, 37, 42, 0.92);
-$surface-bright: rgba(44, 44, 48, 0.94);
-$text-primary: #fbf8fc;
-$text-secondary: #acaaae;
-$text-faint: rgba(172, 170, 174, 0.68);
-$accent: #e08dff;
-$accent-strong: #bc00fb;
-$accent-soft: rgba(224, 141, 255, 0.18);
-$accent-border: rgba(224, 141, 255, 0.26);
-$cyan: #8ff5ff;
-$cyan-bright: #00eefc;
-$success: #52d69a;
+$surface-low: #131313;
+$surface: #131313;
+$surface-high: #1c1b1b;
+$surface-bright: #2a2a2a;
+$text-primary: #e5e2e1;
+$text-secondary: #bac9cc;
+$text-faint: rgba(186, 201, 204, 0.5);
+$accent: #A855F7;
+$accent-strong: #7c3aed;
+$accent-soft: rgba(168, 85, 247, 0.15);
+$accent-border: rgba(168, 85, 247, 0.3);
+$secondary: #2ff801;
+$secondary-dim: #2ae500;
+$success: #2ff801;
 $warning: #ffbe5c;
 $error: #ff6e84;
-$border: rgba(255, 255, 255, 0.08);
-$border-strong: rgba(255, 255, 255, 0.14);
-$panel-shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
-$inner-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-$pixel-font: 'VT323', 'Courier New', 'Lucida Console', Monaco, monospace;
+$border: #3b494c;
+$border-strong: #849396;
+$outline-variant: #3b494c;
+$shadow-purple: #4a1282;
+$panel-shadow: 4px 4px 0 0 $shadow-purple;
+$panel-shadow-lg: 8px 8px 0 0 $shadow-purple;
+$inner-highlight: none;
+$pixel-font: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
 
 * {
   margin: 0;
@@ -41,12 +45,13 @@ body {
   min-height: 100vh;
   overflow: hidden;
   position: relative;
-  background:
-    radial-gradient(circle at top left, rgba(224, 141, 255, 0.16) 0, transparent 34%),
-    radial-gradient(circle at top right, rgba(0, 238, 252, 0.1) 0, transparent 24%),
-    linear-gradient(180deg, #131318 0%, $bg 52%, #09090c 100%);
+  background: $bg;
+  background-image:
+    linear-gradient(to right, rgba(168, 85, 247, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(168, 85, 247, 0.05) 1px, transparent 1px);
+  background-size: 20px 20px;
   color: $text-primary;
-  font: 13px/1.55 'Manrope', 'Segoe UI', system-ui, sans-serif;
+  font: 13px/1.55 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
 }
 
 body::before,
@@ -58,22 +63,19 @@ body::after {
 }
 
 body::before {
-  background: repeating-linear-gradient(
-    0deg,
-    rgba(0, 0, 0, 0.045) 0,
-    rgba(0, 0, 0, 0.045) 1px,
-    transparent 1px,
-    transparent 2px
+  background: linear-gradient(
+    to bottom,
+    rgba(168, 85, 247, 0.03) 50%,
+    rgba(0, 0, 0, 0.15) 50%
   );
+  background-size: 100% 4px;
   opacity: 0.8;
 }
 
 body::after {
-  background-image:
-    linear-gradient(rgba(224, 141, 255, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(224, 141, 255, 0.04) 1px, transparent 1px);
-  background-size: 32px 32px;
-  opacity: 0.75;
+  background-image: radial-gradient(#A855F7 0.5px, transparent 0.5px);
+  background-size: 4px 4px;
+  opacity: 0.08;
 }
 
 button,
@@ -109,23 +111,14 @@ a {
 .llm-config-panel {
   position: relative;
   overflow: hidden;
-
-  &::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(135deg, rgba(255, 255, 255, 0.03), transparent 42%);
-    pointer-events: none;
-  }
 }
 
 .chat-header,
 .chat-body,
 .llm-config-panel {
   flex-shrink: 0;
-  border: 1px solid $border;
-  box-shadow: $panel-shadow, $inner-highlight;
-  backdrop-filter: blur(18px);
+  border: 2px solid $outline-variant;
+  box-shadow: $panel-shadow;
 }
 
 .chat-header {
@@ -134,8 +127,9 @@ a {
   justify-content: space-between;
   gap: 8px 12px;
   padding: 10px 12px;
-  border-radius: 26px;
-  background: linear-gradient(180deg, rgba(25, 25, 29, 0.9) 0%, rgba(18, 18, 23, 0.88) 100%);
+  border-radius: 0;
+  background: $surface-low;
+  border-bottom: 4px solid $accent;
 }
 
 .header-brand {
@@ -147,17 +141,40 @@ a {
 
 .brand-copy {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.brand-icon {
+  display: block;
+  width: auto;
+  height: 34px;
+  max-width: 72px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.7));
+}
+
+.brand-label {
+  color: $accent;
+  font-family: $pixel-font;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
 }
 
 .chat-header h3 {
   color: $accent;
-  font-family: $pixel-font;
-  font-size: 22px;
-  font-weight: 400;
+  font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   line-height: 1;
-  text-shadow: 0 0 18px rgba(224, 141, 255, 0.22);
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
 }
 
 .header-meta {
@@ -169,6 +186,14 @@ a {
   min-width: 0;
 }
 
+.header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
 .connection-status,
 .webmcp-indicator {
   display: inline-flex;
@@ -177,16 +202,16 @@ a {
   max-width: 100%;
   min-height: 30px;
   padding: 5px 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid $accent-border;
+  border-radius: 0;
+  background: rgba(168, 85, 247, 0.08);
+  border: 2px solid $accent;
   color: $accent;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: $pixel-font;
   font-size: 8px;
-  font-weight: 400;
+  font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -197,7 +222,7 @@ a {
   height: 7px;
   border-radius: 50%;
   background: $accent;
-  box-shadow: 0 0 10px rgba(224, 141, 255, 0.75);
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.75);
   flex-shrink: 0;
 }
 
@@ -208,8 +233,8 @@ a {
 .webmcp-indicator {
   min-width: 0;
   color: $text-secondary;
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(10, 10, 14, 0.42);
+  border-color: $outline-variant;
+  background: $bg;
   flex-shrink: 0;
 }
 
@@ -226,7 +251,7 @@ a {
 
   &.available {
     background: $success;
-    box-shadow: 0 0 12px rgba(82, 214, 154, 0.55);
+    box-shadow: 0 0 10px rgba(47, 248, 1, 0.6);
   }
 
   &.unavailable {
@@ -234,38 +259,62 @@ a {
   }
 }
 
+.new-chat-btn,
 .refresh-webmcp-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 10px;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
   color: $text-secondary;
   cursor: pointer;
   transition:
-    color 0.18s ease,
-    border-color 0.18s ease,
-    background 0.18s ease;
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease;
 
   &:hover {
     color: $accent;
-    border-color: $accent-border;
-    background: rgba(224, 141, 255, 0.08);
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.1);
   }
+}
+
+.new-chat-btn {
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-color: $accent-border;
+  background: rgba(168, 85, 247, 0.08);
+  color: $accent;
+  font-family: $pixel-font;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+
+  &:hover {
+    background: $accent;
+    color: $surface-low;
+  }
+}
+
+.refresh-webmcp-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
 }
 
 .chat-body,
 .llm-config-panel {
   flex: 1;
   min-height: 0;
-  border: 1px solid $border;
-  border-radius: 28px;
-  box-shadow: $panel-shadow, $inner-highlight;
-  backdrop-filter: blur(20px);
-  background: linear-gradient(180deg, rgba(25, 25, 29, 0.88) 0%, rgba(14, 14, 17, 0.92) 100%);
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  box-shadow: $panel-shadow;
+  background: $surface-low;
 }
 
 .chat-body {
@@ -274,25 +323,27 @@ a {
 }
 
 .chat-messages,
+.tool-steps-timeline,
 .tools-panel,
 .mcp-panel,
 .conversations-panel,
 .llm-config-panel {
   scrollbar-width: thin;
-  scrollbar-color: rgba(224, 141, 255, 0.3) transparent;
+  scrollbar-color: $accent $bg;
 
   &::-webkit-scrollbar {
-    width: 5px;
-    height: 5px;
+    width: 8px;
+    height: 8px;
   }
 
   &::-webkit-scrollbar-track {
-    background: transparent;
+    background: $bg;
+    border-left: 2px solid $outline-variant;
   }
 
   &::-webkit-scrollbar-thumb {
-    background: rgba(224, 141, 255, 0.24);
-    border-radius: 999px;
+    background: $accent;
+    border: 2px solid $bg;
   }
 }
 
@@ -314,9 +365,9 @@ a {
   gap: 6px;
   max-width: min(88%, 720px);
   padding: 14px 16px 12px;
-  border-radius: 20px;
-  border: 1px solid $border;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  border-radius: 0;
+  border: 2px solid $outline-variant;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.3);
   overflow-wrap: anywhere;
 
   .message-content {
@@ -333,10 +384,10 @@ a {
       display: inline-block;
       margin: 0 2px;
       padding: 1px 6px;
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      color: $cyan;
+      border-radius: 0;
+      background: $bg;
+      border: 1px solid $outline-variant;
+      color: $secondary;
       font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
       font-size: 12px;
     }
@@ -354,21 +405,23 @@ a {
 
 .user-message {
   align-self: flex-end;
-  background: linear-gradient(180deg, rgba(224, 141, 255, 0.16) 0%, rgba(188, 0, 251, 0.1) 100%);
-  border-color: rgba(224, 141, 255, 0.34);
-  border-top-right-radius: 6px;
+  background: $surface-high;
+  border-color: $accent;
+  border-left: 4px solid $accent;
+  border-top-right-radius: 0;
 
   .message-time {
     text-align: right;
-    color: rgba(224, 141, 255, 0.72);
+    color: rgba(168, 85, 247, 0.72);
   }
 }
 
 .assistant-message {
   align-self: flex-start;
-  background: rgba(28, 28, 33, 0.94);
-  border-color: rgba(255, 255, 255, 0.06);
-  border-top-left-radius: 6px;
+  background: $surface-high;
+  border-color: $outline-variant;
+  border-left: 4px solid $outline-variant;
+  border-top-left-radius: 0;
 
   .message-time {
     text-align: left;
@@ -379,9 +432,9 @@ a {
   align-self: center;
   max-width: min(92%, 680px);
   padding: 10px 16px;
-  border-radius: 16px;
-  background: rgba(28, 28, 33, 0.86);
-  border-color: rgba(255, 255, 255, 0.05);
+  border-radius: 0;
+  background: $surface-high;
+  border-color: $outline-variant;
 
   .message-content {
     color: $text-secondary;
@@ -402,8 +455,8 @@ a {
       width: 7px;
       height: 7px;
       border-radius: 999px;
-      background: rgba(224, 141, 255, 0.7);
-      box-shadow: 0 0 12px rgba(224, 141, 255, 0.25);
+      background: rgba(168, 85, 247, 0.7);
+      box-shadow: 0 0 8px rgba(168, 85, 247, 0.35);
       animation: typingBounce 1.4s ease-in-out infinite;
 
       &:nth-child(2) {
@@ -450,34 +503,241 @@ a {
 
 .chat-input-container {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   margin: 0 18px 18px;
-  padding: 10px 12px 10px 18px;
-  border-radius: 999px;
-  border: 1px solid $border-strong;
-  background: rgba(28, 28, 33, 0.9);
-  box-shadow:
-    0 18px 42px rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 8px 10px;
+  border-radius: 0;
+  border: 2px solid $accent;
+  background: $surface-low;
+  box-shadow: 4px 4px 0 0 $shadow-purple;
+}
+
+.chat-context-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-context-tabs {
+  display: flex;
+  flex: 1;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.chat-context-empty {
+  color: $text-secondary;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.context-tab-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 150px;
+  padding: 3px 6px;
+  border: 1px solid $outline-variant;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.04);
+  flex: 0 0 auto;
+}
+
+.context-tab-chip.current {
+  border-color: rgba(168, 85, 247, 0.55);
+  background: rgba(168, 85, 247, 0.12);
+}
+
+.context-tab-kind {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border: 1px solid rgba(168, 85, 247, 0.45);
+  color: $accent;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.context-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  color: $text-primary;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-tab-remove,
+.context-add-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 0;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease,
+    opacity 0.12s ease;
+}
+
+.context-tab-remove {
+  width: 16px;
+  height: 16px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: $text-secondary;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+
+  &:hover:not(:disabled) {
+    background: rgba(255, 110, 132, 0.12);
+    border-color: rgba(255, 110, 132, 0.32);
+    color: $error;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.35;
+  }
+}
+
+.context-add-button {
+  width: 24px;
+  height: 24px;
+  border: 1px solid $accent;
+  background: rgba(168, 85, 247, 0.12);
+  color: $accent;
+  cursor: pointer;
+
+  &:hover:not(:disabled) {
+    background: rgba(168, 85, 247, 0.2);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.35;
+  }
+}
+
+.chat-input-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 #chat-input {
   flex: 1;
   min-width: 0;
+  min-height: 22px;
+  max-height: 96px;
+  padding: 0;
   background: transparent;
   border: none;
   outline: none;
   color: $text-primary;
   font-size: 14px;
+  line-height: 1.45;
+  resize: none;
+  overflow-y: auto;
 
   &::placeholder {
-    color: rgba(172, 170, 174, 0.62);
+    color: rgba(186, 201, 204, 0.5);
   }
 
   &:disabled {
     opacity: 0.45;
   }
+}
+
+.context-picker {
+  display: flex;
+  flex-direction: column;
+  max-height: 180px;
+  overflow: hidden;
+  border: 1px solid rgba(168, 85, 247, 0.55);
+  border-radius: 0;
+  background: rgba(9, 10, 18, 0.98);
+  box-shadow: 4px 4px 0 0 rgba(60, 17, 96, 0.55);
+}
+
+.context-picker.hidden {
+  display: none;
+}
+
+.context-picker-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid $outline-variant;
+  color: $text-secondary;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.context-picker-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.context-picker-empty {
+  padding: 10px;
+  color: $text-secondary;
+  font-size: 12px;
+}
+
+.context-picker-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  &:hover,
+  &.active {
+    background: rgba(168, 85, 247, 0.14);
+  }
+}
+
+.context-picker-item-title {
+  color: $text-primary;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.context-picker-item-url {
+  color: $text-secondary;
+  font-size: 10px;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 .bottom-nav {
@@ -486,13 +746,11 @@ a {
   justify-content: space-around;
   gap: 8px;
   padding: 8px 12px 14px;
-  border: 1px solid $border;
-  border-radius: 24px 24px 20px 20px;
-  background: linear-gradient(180deg, rgba(18, 18, 23, 0.94) 0%, rgba(10, 10, 14, 0.98) 100%);
-  box-shadow:
-    0 -8px 26px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(20px);
+  border: 2px solid $outline-variant;
+  border-top: 4px solid $accent;
+  border-radius: 0;
+  background: $surface-low;
+  box-shadow: 0 -4px 0 0 $shadow-purple;
   flex-shrink: 0;
 }
 
@@ -502,30 +760,32 @@ a {
   justify-content: center;
   width: 46px;
   height: 46px;
-  border: none;
-  border-radius: 16px;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
   background: transparent;
   color: $text-secondary;
   cursor: pointer;
   transition:
-    color 0.18s ease,
-    background 0.18s ease,
-    box-shadow 0.18s ease,
-    transform 0.18s ease;
+    color 0.12s ease,
+    background 0.12s ease,
+    border-color 0.12s ease,
+    transform 0.12s ease;
 
   &:hover {
     color: $accent;
-    background: rgba(255, 255, 255, 0.04);
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
   }
 
   &:active {
-    transform: scale(0.96);
+    transform: translate(2px, 2px);
   }
 
   &.active {
-    color: $accent;
-    background: rgba(224, 141, 255, 0.12);
-    box-shadow: 0 0 16px rgba(224, 141, 255, 0.14);
+    color: $surface-low;
+    background: $accent;
+    border-color: $accent;
+    box-shadow: 4px 4px 0 0 $shadow-purple;
   }
 
   svg {
@@ -534,11 +794,10 @@ a {
 }
 
 .chat-home-btn.active {
-  color: #320041;
-  background: linear-gradient(180deg, $accent 0%, #f3a8ff 100%);
-  box-shadow:
-    0 0 18px rgba(224, 141, 255, 0.34),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  color: $surface-low;
+  background: $accent;
+  border-color: $accent;
+  box-shadow: 4px 4px 0 0 $shadow-purple;
 }
 
 #send-button {
@@ -547,20 +806,26 @@ a {
   justify-content: center;
   width: 42px;
   height: 42px;
-  background: linear-gradient(180deg, $accent 0%, #f5a9ff 100%);
-  border: none;
-  border-radius: 14px;
-  color: #3c004f;
+  background: $accent;
+  border: 2px solid $accent;
+  border-radius: 0;
+  color: $surface-low;
   cursor: pointer;
-  box-shadow: 0 0 18px rgba(224, 141, 255, 0.38);
+  box-shadow: 4px 4px 0 0 $shadow-purple;
   transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease,
-    opacity 0.18s ease;
+    transform 0.12s ease,
+    box-shadow 0.12s ease,
+    opacity 0.12s ease;
 
   &:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow: 0 0 24px rgba(224, 141, 255, 0.46);
+    transform: translate(2px, 2px);
+    box-shadow: none;
+  }
+
+  &.is-stop {
+    background: $error;
+    border-color: $error;
+    box-shadow: 4px 4px 0 0 rgba(120, 14, 36, 0.85);
   }
 
   &:disabled {
@@ -575,10 +840,10 @@ a {
   align-self: stretch;
   flex-shrink: 0;
   margin: 4px 0;
-  border: 1px solid rgba(224, 141, 255, 0.16);
-  border-radius: 20px;
-  background: rgba(19, 19, 22, 0.92);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  border: 2px solid rgba(168, 85, 247, 0.3);
+  border-radius: 0;
+  background: $surface-low;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.3);
   overflow: hidden;
 
   .tool-steps-header {
@@ -634,12 +899,14 @@ a {
   }
 
   .tool-steps-body {
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
     max-height: 520px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    border-top: 1px solid $outline-variant;
     transition:
-      max-height 0.28s ease,
-      opacity 0.2s ease;
+      max-height 0.2s ease,
+      opacity 0.15s ease;
     opacity: 1;
 
     &.collapsed {
@@ -651,7 +918,10 @@ a {
 
   .tool-steps-timeline {
     position: relative;
+    max-height: 420px;
+    overflow-y: auto;
     padding: 8px 16px 0;
+    overscroll-behavior: contain;
   }
 
   .tool-step-item {
@@ -668,11 +938,11 @@ a {
       top: 30px;
       bottom: 0;
       width: 2px;
-      background: rgba(255, 255, 255, 0.08);
+      background: $outline-variant;
     }
 
     &.completed:not(:last-of-type)::before {
-      background: rgba(82, 214, 154, 0.75);
+      background: $secondary;
     }
   }
 
@@ -708,7 +978,7 @@ a {
   }
 
   .tool-step-description {
-    color: $cyan;
+    color: $secondary;
     font-size: 12px;
   }
 
@@ -734,6 +1004,7 @@ a {
 .llm-config-panel {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   overflow-y: auto;
   padding: 18px;
 }
@@ -745,15 +1016,18 @@ a {
   position: relative;
   min-height: 100%;
   padding: 20px 18px 18px;
-  border-radius: 22px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  background: linear-gradient(180deg, rgba(28, 28, 33, 0.88) 0%, rgba(16, 16, 20, 0.9) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  border-radius: 0;
+  border: 2px solid $outline-variant;
+  background: $surface-high;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.2);
 }
 
 .config-panel-inner {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  min-height: auto;
+  flex: 1 0 auto;
   gap: 14px;
 }
 
@@ -761,15 +1035,19 @@ a {
   display: flex;
   gap: 4px;
   padding: 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 0;
+  background: $bg;
+  border: 2px solid $outline-variant;
 
   .config-mode-btn {
     flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
     padding: 8px 0;
-    border: none;
-    border-radius: 999px;
+    border: 2px solid transparent;
+    border-radius: 0;
     background: transparent;
     color: $text-secondary;
     cursor: pointer;
@@ -779,21 +1057,29 @@ a {
     letter-spacing: 0.08em;
     text-transform: uppercase;
     transition:
-      background 0.18s ease,
-      color 0.18s ease,
-      box-shadow 0.18s ease;
+      background 0.12s ease,
+      color 0.12s ease,
+      border-color 0.12s ease;
 
     &.active {
-      background: linear-gradient(180deg, rgba(224, 141, 255, 0.22) 0%, rgba(188, 0, 251, 0.16) 100%);
+      background: rgba(168, 85, 247, 0.2);
       color: $accent;
-      box-shadow: inset 0 0 0 1px rgba(224, 141, 255, 0.18);
+      border-color: $accent;
     }
 
     &:hover:not(.active) {
       color: $text-primary;
-      background: rgba(255, 255, 255, 0.03);
+      background: rgba(168, 85, 247, 0.06);
     }
   }
+}
+
+.provider-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex-shrink: 0;
+  image-rendering: auto;
 }
 
 .config-field {
@@ -811,37 +1097,142 @@ a {
   }
 
   input,
-  select {
+  select,
+  textarea {
     width: 100%;
     padding: 11px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 14px;
-    background: rgba(14, 14, 17, 0.82);
+    border: 2px solid $outline-variant;
+    border-radius: 0;
+    background: $bg;
     color: $text-primary;
     outline: none;
     transition:
-      border-color 0.18s ease,
-      box-shadow 0.18s ease,
-      background 0.18s ease;
+      border-color 0.12s ease,
+      box-shadow 0.12s ease;
 
     &::placeholder {
-      color: rgba(172, 170, 174, 0.56);
+      color: rgba(186, 201, 204, 0.4);
     }
 
     &:focus {
-      border-color: rgba(224, 141, 255, 0.35);
-      box-shadow: 0 0 0 3px rgba(224, 141, 255, 0.08);
-      background: rgba(18, 18, 23, 0.96);
+      border-color: $accent;
+      box-shadow: 4px 4px 0 0 $shadow-purple;
     }
+  }
+}
+
+.config-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.config-editor-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 2px solid $outline-variant;
+  background: $bg;
+}
+
+.config-editor-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 74px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 2px solid transparent;
+  background: transparent;
+  color: $text-secondary;
+  cursor: pointer;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+
+  &.active {
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.18);
+    color: $accent;
+  }
+
+  &:hover:not(.active) {
+    color: $text-primary;
+    background: rgba(168, 85, 247, 0.06);
+  }
+}
+
+.config-system-prompt-input,
+.config-system-prompt-preview {
+  min-height: 420px;
+}
+
+.config-system-prompt-input {
+  resize: vertical;
+  line-height: 1.55;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.config-system-prompt-preview {
+  overflow-y: auto;
+  padding: 14px 16px;
+  border: 2px solid $outline-variant;
+  background: $bg;
+  color: $text-primary;
+  line-height: 1.6;
+
+  h4 {
+    margin: 0 0 10px;
+    color: $accent;
+    font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  p {
+    margin: 0 0 10px;
+  }
+
+  ul,
+  ol {
+    margin: 0 0 12px 18px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  code {
+    display: inline-block;
+    padding: 1px 6px;
+    background: $surface-high;
+    border: 1px solid $outline-variant;
+    color: $secondary;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 12px;
+  }
+
+  a {
+    color: $accent;
   }
 }
 
 .config-endpoint-row {
   display: flex;
+  align-items: stretch;
   gap: 8px;
+  flex-wrap: nowrap;
 
   input {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 0;
   }
 }
 
@@ -851,20 +1242,19 @@ a {
   justify-content: center;
   width: 42px;
   flex-shrink: 0;
-  background: rgba(14, 14, 17, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 14px;
+  background: $bg;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
   color: $text-secondary;
   cursor: pointer;
   transition:
-    color 0.18s ease,
-    border-color 0.18s ease,
-    background 0.18s ease;
+    color 0.12s ease,
+    border-color 0.12s ease;
 
   &:hover {
     color: $accent;
-    border-color: rgba(224, 141, 255, 0.28);
-    background: rgba(224, 141, 255, 0.06);
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
   }
 
   &.spinning svg {
@@ -874,7 +1264,7 @@ a {
 
 .config-divider {
   border: 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 2px solid $outline-variant;
   margin: 4px 0 0;
 }
 
@@ -882,9 +1272,10 @@ a {
   color: $accent;
   font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
   font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  font-weight: 800;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
 }
 
 .config-apply-btn,
@@ -896,28 +1287,24 @@ a {
   gap: 6px;
   min-height: 42px;
   padding: 10px 16px;
-  border: none;
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(224, 141, 255, 0.24) 0%, rgba(188, 0, 251, 0.2) 100%);
-  color: $accent;
+  border: 2px solid $accent;
+  border-radius: 0;
+  background: $accent;
+  color: $surface-low;
   cursor: pointer;
   font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  box-shadow: inset 0 0 0 1px rgba(224, 141, 255, 0.18);
+  box-shadow: 4px 4px 0 0 $shadow-purple;
   transition:
-    transform 0.18s ease,
-    filter 0.18s ease,
-    box-shadow 0.18s ease;
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
 
   &:hover:not(:disabled) {
-    transform: translateY(-1px);
-    filter: brightness(1.05);
-    box-shadow:
-      inset 0 0 0 1px rgba(224, 141, 255, 0.24),
-      0 0 18px rgba(224, 141, 255, 0.12);
+    transform: translate(2px, 2px);
+    box-shadow: none;
   }
 
   &:disabled {
@@ -954,11 +1341,11 @@ a {
 .mcp-app-container {
   margin: 8px 0;
   flex-shrink: 0;
-  border-radius: 18px;
-  border: 1px solid $border;
+  border-radius: 0;
+  border: 2px solid $outline-variant;
   overflow: hidden;
-  background: rgba(14, 14, 17, 0.88);
-  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.24);
+  background: $surface-high;
+  box-shadow: $panel-shadow;
 
   .mcp-app-iframe {
     width: 100%;
@@ -1007,10 +1394,10 @@ a {
 .tools-group,
 .mcp-server-item,
 .conversation-item {
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 18px;
-  background: rgba(14, 14, 17, 0.74);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  background: $bg;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.2);
 }
 
 .tools-group {
@@ -1042,32 +1429,37 @@ a {
   margin-left: auto;
   min-height: 28px;
   padding: 4px 10px;
-  border: none;
-  border-radius: 999px;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
   cursor: pointer;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  transition: filter 0.18s ease;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
 
   &.all-on {
-    background: rgba(82, 214, 154, 0.15);
-    color: $success;
+    background: $success;
+    color: $surface-low;
+    border-color: $success;
+    box-shadow: 3px 3px 0 0 #095300;
   }
 
   &.all-off {
-    background: rgba(255, 255, 255, 0.08);
+    background: $surface-bright;
     color: $text-secondary;
   }
 
   &.partial {
-    background: rgba(224, 141, 255, 0.16);
-    color: $accent;
+    background: $accent;
+    color: $surface-low;
+    border-color: $accent;
+    box-shadow: 3px 3px 0 0 $shadow-purple;
   }
 
   &:hover {
-    filter: brightness(1.1);
+    transform: translate(1px, 1px);
+    box-shadow: none !important;
   }
 }
 
@@ -1082,12 +1474,14 @@ a {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.02);
-  transition: background 0.18s ease, border-color 0.18s ease;
+  border-radius: 0;
+  background: $bg;
+  border: 1px solid $outline-variant;
+  transition: background 0.12s ease, border-color 0.12s ease;
 
   &:hover {
-    background: rgba(224, 141, 255, 0.06);
+    background: rgba(168, 85, 247, 0.08);
+    border-color: $accent;
   }
 }
 
@@ -1104,8 +1498,8 @@ a {
     opacity: 0;
 
     &:checked + .tools-toggle-slider {
-      background: linear-gradient(90deg, rgba(224, 141, 255, 0.74) 0%, rgba(143, 245, 255, 0.74) 100%);
-      box-shadow: 0 0 12px rgba(224, 141, 255, 0.2);
+      background: $accent;
+      box-shadow: 2px 2px 0 0 $shadow-purple;
 
       &::before {
         transform: translateX(16px);
@@ -1117,10 +1511,11 @@ a {
 .tools-toggle-slider {
   position: absolute;
   inset: 0;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: 0;
+  background: $outline-variant;
+  border: 1px solid $border-strong;
   cursor: pointer;
-  transition: background 0.18s ease, box-shadow 0.18s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
 
   &::before {
     content: '';
@@ -1129,9 +1524,9 @@ a {
     bottom: 3px;
     width: 16px;
     height: 16px;
-    border-radius: 50%;
-    background: #fff;
-    transition: transform 0.18s ease;
+    border-radius: 0;
+    background: $text-secondary;
+    transition: transform 0.12s ease;
   }
 }
 
@@ -1178,8 +1573,8 @@ a {
   gap: 8px;
   min-height: 220px;
   padding: 28px 20px;
-  border: 1px dashed rgba(224, 141, 255, 0.18);
-  border-radius: 20px;
+  border: 2px dashed rgba(168, 85, 247, 0.35);
+  border-radius: 0;
   color: $text-secondary;
   text-align: center;
 
@@ -1205,20 +1600,19 @@ a {
   padding: 14px;
   cursor: pointer;
   transition:
-    border-color 0.18s ease,
-    background 0.18s ease,
-    transform 0.18s ease;
+    border-color 0.12s ease,
+    background 0.12s ease;
 
   &:hover {
-    border-color: rgba(224, 141, 255, 0.2);
-    background: rgba(224, 141, 255, 0.06);
-    transform: translateY(-1px);
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
+    transform: none;
   }
 
   &.active {
-    border-color: rgba(224, 141, 255, 0.28);
-    background: rgba(224, 141, 255, 0.1);
-    box-shadow: inset 0 0 0 1px rgba(224, 141, 255, 0.08);
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.12);
+    box-shadow: 4px 4px 0 0 $shadow-purple;
   }
 }
 
@@ -1253,15 +1647,16 @@ a {
   justify-content: center;
   width: 32px;
   height: 32px;
-  border: none;
-  border-radius: 10px;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
   background: transparent;
   color: $text-secondary;
   cursor: pointer;
   transition:
-    background 0.18s ease,
-    color 0.18s ease,
-    opacity 0.18s ease;
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease,
+    opacity 0.12s ease;
 }
 
 .conversation-delete-btn {
@@ -1283,9 +1678,9 @@ a {
   flex-direction: column;
   gap: 8px;
   padding: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 18px;
-  background: rgba(14, 14, 17, 0.74);
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  background: $bg;
 }
 
 .mcp-add-row {
@@ -1295,19 +1690,19 @@ a {
     flex: 1;
     width: 100%;
     padding: 11px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 14px;
-    background: rgba(8, 8, 12, 0.82);
+    border: 2px solid $outline-variant;
+    border-radius: 0;
+    background: $bg;
     color: $text-primary;
     outline: none;
 
     &::placeholder {
-      color: rgba(172, 170, 174, 0.56);
+      color: rgba(186, 201, 204, 0.4);
     }
 
     &:focus {
-      border-color: rgba(224, 141, 255, 0.35);
-      box-shadow: 0 0 0 3px rgba(224, 141, 255, 0.08);
+      border-color: $accent;
+      box-shadow: 4px 4px 0 0 $shadow-purple;
     }
   }
 }
@@ -1374,7 +1769,8 @@ a {
 }
 
 .mcp-reconnect-btn:hover {
-  background: rgba(224, 141, 255, 0.1);
+  background: rgba(168, 85, 247, 0.1);
+  border-color: $accent;
   color: $accent;
 }
 
@@ -1399,8 +1795,9 @@ a {
   align-items: center;
   min-height: 24px;
   padding: 0 10px;
-  border-radius: 999px;
-  background: rgba(224, 141, 255, 0.12);
+  border-radius: 0;
+  border: 1px solid $accent;
+  background: rgba(168, 85, 247, 0.1);
   color: $accent;
   font-size: 10px;
   font-weight: 700;
@@ -1444,6 +1841,14 @@ a {
     gap: 4px;
   }
 
+  .new-chat-btn {
+    padding: 0 8px;
+
+    span {
+      display: none;
+    }
+  }
+
   .chat-messages {
     padding: 18px 14px 12px;
   }
@@ -1458,6 +1863,18 @@ a {
     margin: 0 12px 12px;
   }
 
+  .context-tab-chip {
+    max-width: 132px;
+  }
+
+  .context-tab-title {
+    max-width: 84px;
+  }
+
+  .context-add-button {
+    margin-left: auto;
+  }
+
   .bottom-nav {
     padding: 8px 10px 12px;
     gap: 6px;
@@ -1466,7 +1883,7 @@ a {
   .bottom-nav-btn {
     width: 44px;
     height: 44px;
-    border-radius: 14px;
+    border-radius: 0;
   }
 
   .tools-panel,
@@ -1487,11 +1904,14 @@ a {
     max-width: 92%;
   }
 
-  .config-endpoint-row,
   .conversations-header-row,
   .mcp-server-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .config-endpoint-row {
+    gap: 8px;
   }
 
   .mcp-server-actions {
