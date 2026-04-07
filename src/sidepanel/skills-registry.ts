@@ -1,4 +1,4 @@
-export const SKILL_REGISTRY_STORAGE_KEY = 'agent-webmcp-skills';
+export { SKILL_REGISTRY_STORAGE_KEY } from '../shared/storage';
 
 export interface SkillRegistryEntry {
   id: string;

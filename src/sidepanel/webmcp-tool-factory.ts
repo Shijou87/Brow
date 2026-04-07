@@ -8,94 +8,11 @@
 
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
-import { z, type ZodTypeAny } from 'zod';
+import { z } from 'zod';
 
 import type { WebMCPToolDescriptor } from '../shared/types';
+import { jsonSchemaToZod } from '../shared/json-schema';
 import { webmcpInvoke } from './tab-tools';
-
-// ─── JSON Schema → Zod ────────────────────────────────────────────────────
-
-/**
- * Convert a single JSON Schema property definition to a Zod type.
- * Handles: string (+ enum), number, integer, boolean, array, object.
- * Falls back to z.unknown() for anything unrecognised.
- */
-function jsonSchemaPropertyToZod(prop: Record<string, unknown>): ZodTypeAny {
-  const type = prop.type as string | undefined;
-
-  switch (type) {
-    case 'string': {
-      let s: ZodTypeAny = z.string();
-      if (Array.isArray(prop.enum)) {
-        const values = prop.enum as [string, ...string[]];
-        s = z.enum(values);
-      }
-      return s;
-    }
-
-    case 'number':
-    case 'integer':
-      return z.number();
-
-    case 'boolean':
-      return z.boolean();
-
-    case 'array': {
-      const items = prop.items as Record<string, unknown> | undefined;
-      if (items) {
-        return z.array(jsonSchemaPropertyToZod(items));
-      }
-      return z.array(z.unknown());
-    }
-
-    case 'object': {
-      const nested = prop.properties as Record<string, Record<string, unknown>> | undefined;
-      if (nested) {
-        return jsonSchemaToZod(prop as Record<string, unknown>);
-      }
-      return z.record(z.unknown());
-    }
-
-    default:
-      return z.unknown();
-  }
-}
-
-/**
- * Convert a JSON Schema object (with `properties` and `required`) to a Zod
- * object schema.  Missing / empty properties → z.object({}) (no args).
- */
-function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodObject<any> {
-  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
-  if (!properties || Object.keys(properties).length === 0) {
-    return z.object({});
-  }
-
-  const requiredFields = new Set<string>(
-    Array.isArray(schema.required) ? (schema.required as string[]) : [],
-  );
-
-  const shape: Record<string, ZodTypeAny> = {};
-
-  for (const [key, propSchema] of Object.entries(properties)) {
-    let zodType = jsonSchemaPropertyToZod(propSchema);
-
-    // Attach description if present
-    const desc = propSchema.description as string | undefined;
-    if (desc) {
-      zodType = zodType.describe(desc);
-    }
-
-    // Make optional if not required
-    if (!requiredFields.has(key)) {
-      zodType = zodType.optional();
-    }
-
-    shape[key] = zodType;
-  }
-
-  return z.object(shape);
-}
 
 // ─── Factory ───────────────────────────────────────────────────────────────
 

@@ -8,8 +8,6 @@ import type { ContextTabOption, SavedConversation } from './chat-view';
 import {
   getAgentApi,
   configureAndRebuild,
-  DEFAULT_AGENT_RECURSION_LIMIT,
-  DEFAULT_SYSTEM_PROMPT,
   type AgentAPI,
   type ChatTurn,
   type ToolStepEvent,
@@ -19,6 +17,18 @@ import {
   normalizeSkillRegistry,
   type SkillRegistryEntry,
 } from './skills-registry';
+import {
+  DEFAULT_AGENT_RECURSION_LIMIT,
+  DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_VLM_CONFIG,
+} from '../shared/config';
+import {
+  DISABLED_TOOLS_STORAGE_KEY,
+  getStorageValue,
+  loadDisabledTools,
+  loadSidepanelConfig,
+  saveDisabledTools,
+} from '../shared/storage';
 import type { WebMCPRegistryEntry, DirectLLMConfig } from '../shared/types';
 import { logInfo } from '../shared/logger';
 
@@ -50,7 +60,7 @@ const view = new ChatView(app, {
 });
 
 // Restore saved config on startup
-restoreSavedConfig();
+void restoreSavedConfig();
 
 // Enable input
 view.enableInput();
@@ -76,12 +86,10 @@ agent.restoreMCPServers().then(() => {
 }).catch(() => {});
 
 // Restore disabled tools from storage
-chrome.storage.local.get('agent-webmcp-disabled-tools', (result) => {
-  if (Object.prototype.hasOwnProperty.call(result, 'agent-webmcp-disabled-tools')) {
-    const saved = (result['agent-webmcp-disabled-tools'] as string[] | undefined) ?? [];
-    agent.setDisabledTools(saved);
-    logInfo('sidepanel', `Restored ${saved.length} disabled tools from storage`);
-  }
+void loadDisabledTools().then((saved) => {
+  if (saved.length === 0) return;
+  agent.setDisabledTools(saved);
+  logInfo('sidepanel', `Restored ${saved.length} disabled tools from storage`);
 });
 
 agent.onStreamText((text: string) => {
@@ -202,46 +210,27 @@ const DEFAULT_CONFIG = {
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
 };
 
-function restoreSavedConfig(): void {
-  chrome.storage.local.get('agent-webmcp-config', (result) => {
-    const saved = result['agent-webmcp-config'] as Record<string, any> | undefined;
-    if (saved) {
-      const mode: 'openai' | 'claude' = saved.activeMode ?? 'openai';
-      const fields = mode === 'openai' ? (saved.openai ?? saved.direct) : saved.claude;
-      const recursionLimit = Number(saved.runtime?.recursionLimit) || DEFAULT_AGENT_RECURSION_LIMIT;
-      const systemPrompt = saved.runtime?.systemPrompt || DEFAULT_SYSTEM_PROMPT;
-      if (fields) {
-        handleConfigApply({ mode, fields, recursionLimit, systemPrompt });
-      } else {
-        handleConfigApply(DEFAULT_CONFIG);
-      }
-
-      // Restore VLM config
-      if (saved.vlm && saved.vlm.baseUrl && saved.vlm.model) {
-        handleVLMConfigApply(saved.vlm);
-      } else {
-        // Apply VLM defaults
-        handleVLMConfigApply({
-          baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
-          apiKey: '',
-          model: 'Qwen3-VL-30B-A3B-Thinking',
-        });
-      }
-      return;
-    }
-    // No saved config — auto-apply defaults
+async function restoreSavedConfig(): Promise<void> {
+  const saved = await loadSidepanelConfig().catch(() => null);
+  if (!saved) {
     handleConfigApply(DEFAULT_CONFIG);
-    handleVLMConfigApply({
-      baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
-      apiKey: '',
-      model: 'Qwen3-VL-30B-A3B-Thinking',
-    });
+    handleVLMConfigApply(DEFAULT_VLM_CONFIG);
+    return;
+  }
+
+  const fields = saved.activeMode === 'openai' ? saved.openai : saved.claude;
+  handleConfigApply({
+    mode: saved.activeMode,
+    fields,
+    recursionLimit: saved.runtime.recursionLimit,
+    systemPrompt: saved.runtime.systemPrompt,
   });
+  handleVLMConfigApply(saved.vlm ?? DEFAULT_VLM_CONFIG);
 }
 
 function restoreSavedSkills(): void {
-  chrome.storage.local.get(SKILL_REGISTRY_STORAGE_KEY, (result) => {
-    const skills = normalizeSkillRegistry(result[SKILL_REGISTRY_STORAGE_KEY]);
+  void getStorageValue<unknown>(SKILL_REGISTRY_STORAGE_KEY).then((value) => {
+    const skills = normalizeSkillRegistry(value);
     agent.setSkillRegistry(skills);
   });
 }
@@ -288,7 +277,7 @@ async function handleRefreshWebMCP(): Promise<void> {
 
 function persistDisabledTools(): void {
   const disabled = Array.from(agent.getDisabledTools());
-  chrome.storage.local.set({ 'agent-webmcp-disabled-tools': disabled });
+  void saveDisabledTools(disabled);
 }
 
 function handleToolToggle(toolName: string, enabled: boolean): void {

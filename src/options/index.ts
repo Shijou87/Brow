@@ -4,8 +4,7 @@
 import './options-style.scss';
 
 import type { ExtensionSettings } from '../shared/types';
-
-const STORAGE_KEY = 'agent-webmcp-settings';
+import { loadExtensionSettings, saveExtensionSettings } from '../shared/storage';
 
 // ─── Build UI ──────────────────────────────────────────────────────────────
 
@@ -79,9 +78,7 @@ app.innerHTML = `
 // ─── Load settings ─────────────────────────────────────────────────────────
 
 async function loadSettings(): Promise<void> {
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  const settings = result[STORAGE_KEY] as ExtensionSettings | undefined;
-  if (!settings) return;
+  const settings = await loadExtensionSettings();
 
   const setVal = (id: string, v: string) => {
     const el = document.getElementById(id) as HTMLInputElement;
@@ -123,7 +120,7 @@ async function saveSettings(): Promise<void> {
     debugLogging: getChecked('debug-logging'),
   };
 
-  await chrome.storage.local.set({ [STORAGE_KEY]: settings });
+  await saveExtensionSettings(settings);
 
   const status = document.getElementById('save-status')!;
   status.textContent = 'Saved!';

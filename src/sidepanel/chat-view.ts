@@ -3,39 +3,40 @@
 
 import type { WebMCPRegistryEntry } from '../shared/types';
 import {
-  Agent,
-  DEFAULT_AGENT_RECURSION_LIMIT,
-  DEFAULT_SYSTEM_PROMPT,
   type ToolStepEvent,
   type ToolManifestEntry,
 } from './agent';
+import { getCategoryLabel } from './agent-runtime/tooling';
+import {
+  DEFAULT_AGENT_RECURSION_LIMIT,
+  DEFAULT_CLAUDE_FIELDS,
+  DEFAULT_OPENAI_FIELDS,
+  DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_VLM_CONFIG,
+} from '../shared/config';
+import {
+  loadConfigEditorState,
+  loadPromptEditorState,
+  saveConfigEditorState,
+  saveSkillRegistryEntries,
+  saveSystemPrompt,
+} from './chat-view/config-store';
+import {
+  loadSavedConversations,
+  removeSavedConversation,
+  upsertSavedConversation,
+} from './chat-view/conversation-store';
+import type { ContextTabOption, SavedConversation } from './chat-view/types';
 import type { MCPServerEntry } from './mcp-client';
 import {
   formatSkillTagsInput,
-  normalizeSkillRegistry,
   parseSkillTagsInput,
   parseSkillMarkdownImport,
   slugifySkillName,
-  SKILL_REGISTRY_STORAGE_KEY,
   type SkillDraft,
   type SkillRegistryEntry,
 } from './skills-registry';
-
-export interface SavedConversation {
-  id: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string; time: string }>;
-  chatHistory: Array<{ role: string; content: string }>;
-}
-
-export interface ContextTabOption {
-  tabId: number;
-  title: string;
-  url: string;
-  active?: boolean;
-}
+export type { SavedConversation, ContextTabOption } from './chat-view/types';
 
 export interface ChatViewCallbacks {
   onSendMessage: (message: string, contextTabIds: number[]) => void;
@@ -1157,7 +1158,7 @@ export class ChatView {
       const enabledCount = tools.filter(t => t.enabled).length;
       const allOn = enabledCount === tools.length;
       const allOff = enabledCount === 0;
-      const groupLabel = Agent.getCategoryLabel(category);
+      const groupLabel = getCategoryLabel(category);
 
       const groupEl = document.createElement('div');
       groupEl.className = `tools-group${category === 'browser_automation' ? ' dangerous' : ''}`;
@@ -1473,8 +1474,7 @@ export class ChatView {
 
   /** Refresh the conversations list from storage */
   public refreshConversationsPanel(): void {
-    chrome.storage.local.get('agent-webmcp-conversations', (result) => {
-      const conversations: SavedConversation[] = result['agent-webmcp-conversations'] ?? [];
+    void loadSavedConversations().then((conversations) => {
       const container = this.conversationsPanel.querySelector('.conversations-list-container')!;
       container.innerHTML = '';
 
@@ -1566,18 +1566,8 @@ export class ChatView {
       chatHistory: [...chatHistory],
     };
 
-    chrome.storage.local.get('agent-webmcp-conversations', (result) => {
-      const conversations: SavedConversation[] = result['agent-webmcp-conversations'] ?? [];
-      const existingIdx = conversations.findIndex(c => c.id === convo.id);
-      if (existingIdx >= 0) {
-        convo.createdAt = conversations[existingIdx].createdAt;
-        conversations[existingIdx] = convo;
-      } else {
-        conversations.push(convo);
-      }
-      this.currentConversationId = convo.id;
-      chrome.storage.local.set({ 'agent-webmcp-conversations': conversations });
-    });
+    this.currentConversationId = convo.id;
+    void upsertSavedConversation(convo);
   }
 
   /** Load a conversation into the chat view */
@@ -1611,14 +1601,10 @@ export class ChatView {
 
   /** Delete a conversation from storage */
   public deleteConversation(id: string): void {
-    chrome.storage.local.get('agent-webmcp-conversations', (result) => {
-      const conversations: SavedConversation[] = result['agent-webmcp-conversations'] ?? [];
-      const filtered = conversations.filter(c => c.id !== id);
-      chrome.storage.local.set({ 'agent-webmcp-conversations': filtered });
-      if (this.currentConversationId === id) {
-        this.currentConversationId = null;
-      }
-    });
+    void removeSavedConversation(id);
+    if (this.currentConversationId === id) {
+      this.currentConversationId = null;
+    }
   }
 
   /** Set current conversation id */
@@ -1968,10 +1954,9 @@ export class ChatView {
   }
 
   private populatePromptFields(): void {
-    chrome.storage.local.get(['agent-webmcp-config', SKILL_REGISTRY_STORAGE_KEY], (result) => {
-      const saved = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
-      this.skillRegistry = normalizeSkillRegistry(result[SKILL_REGISTRY_STORAGE_KEY]);
-      this.setPromptInput('llm-config-system-prompt', saved.runtime?.systemPrompt || DEFAULT_SYSTEM_PROMPT);
+    void loadPromptEditorState().then(({ systemPrompt, skills }) => {
+      this.skillRegistry = skills;
+      this.setPromptInput('llm-config-system-prompt', systemPrompt || DEFAULT_SYSTEM_PROMPT);
       this.refreshSystemPromptPreview(this.promptPanel);
       this.setSystemPromptPreviewMode(this.systemPromptPreviewMode, this.promptPanel);
       this.isSkillEditorOpen = false;
@@ -1983,15 +1968,7 @@ export class ChatView {
 
   private applyPrompt(): void {
     const systemPrompt = this.getPromptInput('llm-config-system-prompt') || DEFAULT_SYSTEM_PROMPT;
-
-    chrome.storage.local.get('agent-webmcp-config', (result) => {
-      const existing = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
-      existing.runtime = {
-        ...(existing.runtime ?? {}),
-        systemPrompt,
-      };
-      chrome.storage.local.set({ 'agent-webmcp-config': existing });
-    });
+    void saveSystemPrompt(systemPrompt);
 
     this.callbacks.onSystemPromptApply(systemPrompt);
 
@@ -2291,13 +2268,14 @@ export class ChatView {
   }
 
   private persistSkillRegistry(message?: string): void {
-    this.skillRegistry = normalizeSkillRegistry(this.skillRegistry);
-    chrome.storage.local.set({ [SKILL_REGISTRY_STORAGE_KEY]: this.skillRegistry });
-    this.callbacks.onSkillRegistryApply(this.skillRegistry);
-    this.renderSkillRegistry();
-    if (message) {
-      this.setPromptStatus(message, 'success');
-    }
+    void saveSkillRegistryEntries(this.skillRegistry).then((skills) => {
+      this.skillRegistry = skills;
+      this.callbacks.onSkillRegistryApply(this.skillRegistry);
+      this.renderSkillRegistry();
+      if (message) {
+        this.setPromptStatus(message, 'success');
+      }
+    });
   }
 
   private setPromptStatus(message: string, tone: '' | 'success' | 'error' = ''): void {
@@ -2308,27 +2286,10 @@ export class ChatView {
   }
 
   private populateConfigFields(): void {
-    const defaultOpenAI = {
-      baseUrl: 'http://localhost:11434/v1',
-      apiKey: '',
-      model: 'gpt-4o',
-    };
-    const defaultClaude = {
-      baseUrl: 'https://api.anthropic.com/v1',
-      apiKey: '',
-      model: 'claude-opus-4-5',
-    };
-    const defaultVlm = {
-      baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
-      apiKey: '',
-      model: 'Qwen3-VL-30B-A3B-Thinking',
-    };
-
-    chrome.storage.local.get('agent-webmcp-config', (result) => {
-      const saved = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
-      const openai = { ...defaultOpenAI, ...(saved.openai ?? saved.direct ?? {}) };
-      const claude = { ...defaultClaude, ...(saved.claude ?? {}) };
-      const vlm = { ...defaultVlm, ...(saved.vlm ?? {}) };
+    void loadConfigEditorState().then((saved) => {
+      const openai = { ...DEFAULT_OPENAI_FIELDS, ...saved.openai };
+      const claude = { ...DEFAULT_CLAUDE_FIELDS, ...saved.claude };
+      const vlm = { ...DEFAULT_VLM_CONFIG, ...saved.vlm };
 
       this.setInput('llm-config-endpoint', openai.baseUrl);
       this.setInput('llm-config-api-key', openai.apiKey);
@@ -2338,23 +2299,21 @@ export class ChatView {
       this.setInput('claude-config-model', claude.model);
       this.setInput(
         'llm-config-recursion-limit',
-        String(Number(saved.runtime?.recursionLimit) || DEFAULT_AGENT_RECURSION_LIMIT),
+        String(Number(saved.runtime.recursionLimit) || DEFAULT_AGENT_RECURSION_LIMIT),
       );
       this.setInput('vlm-config-endpoint', vlm.baseUrl);
       this.setInput('vlm-config-api-key', vlm.apiKey);
       this.setInput('vlm-config-model', vlm.model);
 
-      if (saved.activeMode) {
-        this.configMode = saved.activeMode as 'openai' | 'claude';
-        const btns = this.configPanel.querySelectorAll('.config-mode-btn');
-        btns.forEach((b) => {
-          b.classList.toggle('active', (b as HTMLElement).dataset.mode === this.configMode);
-        });
-        const of = this.configPanel.querySelector('.config-openai-fields') as HTMLElement;
-        const cf = this.configPanel.querySelector('.config-claude-fields') as HTMLElement;
-        if (of) of.style.display = this.configMode === 'openai' ? '' : 'none';
-        if (cf) cf.style.display = this.configMode === 'claude' ? '' : 'none';
-      }
+      this.configMode = saved.activeMode;
+      const btns = this.configPanel.querySelectorAll('.config-mode-btn');
+      btns.forEach((b) => {
+        b.classList.toggle('active', (b as HTMLElement).dataset.mode === this.configMode);
+      });
+      const of = this.configPanel.querySelector('.config-openai-fields') as HTMLElement;
+      const cf = this.configPanel.querySelector('.config-claude-fields') as HTMLElement;
+      if (of) of.style.display = this.configMode === 'openai' ? '' : 'none';
+      if (cf) cf.style.display = this.configMode === 'claude' ? '' : 'none';
     });
   }
 
@@ -2399,28 +2358,15 @@ export class ChatView {
       }
     }
 
-    // Save to chrome.storage.local
-    chrome.storage.local.get('agent-webmcp-config', (result) => {
-      const existing = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
-      if (this.configMode === 'openai') {
-        existing.openai = fields;
-      } else {
-        existing.claude = { ...fields };
-      }
-      existing.activeMode = this.configMode;
-      existing.runtime = {
-        ...(existing.runtime ?? {}),
-        recursionLimit: Math.floor(recursionLimit),
-      };
-
-      // Always save VLM config alongside LLM config
-      existing.vlm = {
+    void saveConfigEditorState({
+      mode: this.configMode,
+      fields,
+      recursionLimit: Math.floor(recursionLimit),
+      vlm: {
         baseUrl: this.getInput('vlm-config-endpoint'),
         apiKey: this.getInput('vlm-config-api-key'),
         model: this.getInput('vlm-config-model'),
-      };
-
-      chrome.storage.local.set({ 'agent-webmcp-config': existing });
+      },
     });
 
     this.callbacks.onConfigApply({

@@ -3,6 +3,7 @@
 
 import { ChatOpenAI } from '@langchain/openai';
 import type { DirectLLMConfig } from '../shared/types';
+import { DEFAULT_CLAUDE_FIELDS, DEFAULT_OPENAI_FIELDS } from '../shared/config';
 
 export type ChatOpenAIInstance = InstanceType<typeof ChatOpenAI>;
 export type LLMConfigUnion = DirectLLMConfig;
@@ -11,16 +12,12 @@ export type LLMConfigUnion = DirectLLMConfig;
 
 export const DEFAULT_OPENAI_CONFIG: DirectLLMConfig = {
   provider: 'direct',
-  baseUrl: 'http://localhost:11434/v1',
-  apiKey: 'not-needed',
-  model: 'gpt-4o',
+  ...DEFAULT_OPENAI_FIELDS,
 };
 
 export const DEFAULT_CLAUDE_CONFIG: DirectLLMConfig = {
   provider: 'direct',
-  baseUrl: 'https://api.anthropic.com/v1',
-  apiKey: '',
-  model: 'claude-opus-4-5',
+  ...DEFAULT_CLAUDE_FIELDS,
 };
 
 // Backwards-compat alias used by index.ts

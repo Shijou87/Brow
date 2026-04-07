@@ -24,45 +24,6 @@ export interface WebMCPRegistryEntry {
   tools: WebMCPToolDescriptor[];
 }
 
-// ─── Messages (between background ↔ content-script ↔ sidepanel) ────────────
-
-export type MessageType =
-  | 'WEBMCP_DISCOVER'
-  | 'WEBMCP_DISCOVER_RESULT'
-  | 'WEBMCP_INVOKE'
-  | 'WEBMCP_INVOKE_RESULT'
-  | 'WEBMCP_REGISTRY_UPDATE'
-  | 'TAB_EVENT';
-
-export interface ExtensionMessage {
-  type: MessageType;
-  payload?: unknown;
-}
-
-export interface WebMCPDiscoverMessage extends ExtensionMessage {
-  type: 'WEBMCP_DISCOVER';
-}
-
-export interface WebMCPDiscoverResultMessage extends ExtensionMessage {
-  type: 'WEBMCP_DISCOVER_RESULT';
-  payload: WebMCPDiscoveryResult;
-}
-
-export interface WebMCPInvokeMessage extends ExtensionMessage {
-  type: 'WEBMCP_INVOKE';
-  payload: { toolName: string; args: Record<string, unknown> };
-}
-
-export interface WebMCPInvokeResultMessage extends ExtensionMessage {
-  type: 'WEBMCP_INVOKE_RESULT';
-  payload: { ok: boolean; result?: unknown; error?: string };
-}
-
-export interface WebMCPRegistryUpdateMessage extends ExtensionMessage {
-  type: 'WEBMCP_REGISTRY_UPDATE';
-  payload: { tabId: number; entry: WebMCPRegistryEntry };
-}
-
 // ─── MCP Config ─────────────────────────────────────────────────────────────
 
 export interface MCPConfig {
@@ -100,27 +61,6 @@ export interface ExtensionSettings {
   enableMCPApps: boolean;
   debugLogging: boolean;
 }
-
-export const DEFAULT_SETTINGS: ExtensionSettings = {
-  llm: {
-    provider: 'direct',
-    baseUrl: 'http://localhost:11434/v1',
-    apiKey: '',
-    model: 'qwen2.5',
-  },
-  vlm: {
-    baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
-    apiKey: '',
-    model: 'Qwen3-VL-30B-A3B-Thinking',
-  },
-  mcp: {
-    endpoint: '',
-    transport: 'sse',
-  },
-  enableWebMCP: true,
-  enableMCPApps: true,
-  debugLogging: true,
-};
 
 // ─── Chat ───────────────────────────────────────────────────────────────────
 
