@@ -23,6 +23,7 @@ import {
   tabsActivate,
   tabsCreate,
   tabsUpdateUrl,
+  httpFetch,
   tabCaptureScreenshot,
   vlmQuery,
   bookmarksGetAll,
@@ -51,6 +52,10 @@ import {
   type MCPServerEntry,
   type MCPToolDescriptor,
 } from './mcp-client';
+import {
+  type SkillRegistryEntry,
+  normalizeSkillRegistry,
+} from './skills-registry';
 import type { WebMCPToolDescriptor, VLMConfig as SharedVLMConfig } from '../shared/types';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -113,6 +118,8 @@ export interface AgentAPI {
   getRecursionLimit: () => number;
   setSystemPrompt: (prompt: string) => void;
   getSystemPrompt: () => string;
+  setSkillRegistry: (skills: SkillRegistryEntry[]) => void;
+  getSkillRegistry: () => SkillRegistryEntry[];
 }
 
 type ReactAgent = {
@@ -140,13 +147,34 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   tabs_activate: 'Activating tab',
   tabs_create: 'Creating tab',
   tabs_updateUrl: 'Navigating tab',
+  http_fetch: 'Fetching URL',
   bookmarks_getAll: 'Getting all bookmarks',
   bookmarks_search: 'Searching bookmarks',
   history_search: 'Searching history',
   tab_screenshot_vlm: 'Capturing & querying VLM',
   webmcp_discover: 'Discovering WebMCP tools',
   webmcp_invoke: 'Invoking WebMCP tool',
+  skills_load: 'Loading skill details',
 };
+
+const AUTOMATION_TOOL_NAMES = new Set([
+  'tabs_click',
+  'tabs_type',
+  'tabs_fillForm',
+  'tabs_activate',
+  'tabs_create',
+  'tabs_updateUrl',
+  'http_fetch',
+  'webmcp_invoke',
+]);
+
+const DEFAULT_DISABLED_TOOL_NAMES = new Set(AUTOMATION_TOOL_NAMES);
+
+function getBuiltinToolCategory(toolName: string): string {
+  if (toolName.startsWith('skills_')) return 'skills';
+  if (AUTOMATION_TOOL_NAMES.has(toolName)) return 'browser_automation';
+  return 'browser_read';
+}
 
 // Dynamic labels for WebMCP tools get built at runtime
 function getToolDisplayLabel(toolName: string): string {
@@ -186,6 +214,7 @@ function getToolCompletionDescription(toolName: string, result?: string): string
     tabs_activate: 'Tab activated',
     tabs_create: 'Tab created',
     tabs_updateUrl: 'Tab navigated',
+    http_fetch: 'HTTP request complete',
     bookmarks_getAll: 'Retrieved bookmarks',
     bookmarks_search: 'Bookmarks search complete',
     history_search: 'History search complete',
@@ -683,6 +712,44 @@ function createBuiltinTools(): StructuredToolInterface[] {
     },
   );
 
+  const httpFetchTool = tool(
+    async ({
+      url,
+      method,
+      headers,
+      body,
+      timeoutMs,
+      maxChars,
+    }: {
+      url: string;
+      method?: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
+      headers?: Record<string, string>;
+      body?: string;
+      timeoutMs?: number;
+      maxChars?: number;
+    }) => {
+      const result = await httpFetch(url, { method, headers, body, timeoutMs, maxChars });
+      return JSON.stringify(result, null, 2);
+    },
+    {
+      name: 'http_fetch',
+      description: 'Make a curl-like HTTP request to a URL. Supports GET, HEAD, POST, PUT, PATCH, DELETE, and OPTIONS with optional headers and raw string body. Returns status, headers, and a truncated response body when text is available.',
+      schema: z.object({
+        url: z.string().describe('The http:// or https:// URL to request'),
+        method: z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']).optional()
+          .describe('HTTP method to use. Default: GET'),
+        headers: z.record(z.string()).optional()
+          .describe('Optional request headers as key/value pairs'),
+        body: z.string().optional()
+          .describe('Optional raw request body. Typically used with POST, PUT, or PATCH'),
+        timeoutMs: z.number().optional()
+          .describe('Request timeout in milliseconds. Default: 15000, max: 60000'),
+        maxChars: z.number().optional()
+          .describe('Maximum number of response body characters to return. Default: 20000, max: 50000'),
+      }),
+    },
+  );
+
   const bookmarksSearchTool = tool(
     async ({ query }: { query: string }) => {
       const results = await bookmarksSearch(query);
@@ -772,6 +839,29 @@ function createBuiltinTools(): StructuredToolInterface[] {
     },
   );
 
+  const skillsLoadTool = tool(
+    async ({ identifier }: { identifier: string }) => {
+      const skill = singletonAgent?.findSkill(identifier) ?? null;
+      if (!skill) {
+        return JSON.stringify({
+          ok: false,
+          error: `Skill "${identifier}" not found`,
+        }, null, 2);
+      }
+      return JSON.stringify({
+        ok: true,
+        skill,
+      }, null, 2);
+    },
+    {
+      name: 'skills_load',
+      description: 'Load the full details of a configured reusable skill by slug or display name. Use this when a skill listed in the system prompt looks relevant.',
+      schema: z.object({
+        identifier: z.string().describe('The skill slug or display name to load'),
+      }),
+    },
+  );
+
   return [
     tabsListTool as unknown as StructuredToolInterface,
     tabsGetActiveTool as unknown as StructuredToolInterface,
@@ -783,12 +873,14 @@ function createBuiltinTools(): StructuredToolInterface[] {
     tabsActivateTool as unknown as StructuredToolInterface,
     tabsCreateTool as unknown as StructuredToolInterface,
     tabsUpdateUrlTool as unknown as StructuredToolInterface,
+    httpFetchTool as unknown as StructuredToolInterface,
     bookmarksGetAllTool as unknown as StructuredToolInterface,
     bookmarksSearchTool as unknown as StructuredToolInterface,
     historySearchTool as unknown as StructuredToolInterface,
     tabScreenshotVlmTool as unknown as StructuredToolInterface,
     webmcpDiscoverTool as unknown as StructuredToolInterface,
     webmcpInvokeTool as unknown as StructuredToolInterface,
+    skillsLoadTool as unknown as StructuredToolInterface,
   ];
 }
 
@@ -807,7 +899,7 @@ export class Agent implements AgentAPI {
   /** Remote MCP servers: id → entry */
   private mcpServers = new Map<string, MCPServerEntry & { langchainTools: StructuredToolInterface[] }>();
   /** Disabled tool names — these are excluded from the agent graph */
-  private disabledTools = new Set<string>();
+  private disabledTools = new Set<string>(DEFAULT_DISABLED_TOOL_NAMES);
   /** VLM configuration for the screenshot analysis tool */
   private vlmConfig: VLMConfig | null = null;
   private toolStepCallbacks: ToolStepCallback[] = [];
@@ -817,6 +909,7 @@ export class Agent implements AgentAPI {
   private pauseResolve: (() => void) | null = null;
   private recursionLimit = DEFAULT_AGENT_RECURSION_LIMIT;
   private systemPrompt = DEFAULT_SYSTEM_PROMPT;
+  private skillRegistry: SkillRegistryEntry[] = [];
 
   constructor() {
     this.builtinTools = createBuiltinTools();
@@ -864,10 +957,7 @@ export class Agent implements AgentAPI {
     // Builtin tab tools
     for (const t of this.builtinTools) {
       const name = (t as any).name as string;
-      let category = 'tab_management';
-      if (name.startsWith('webmcp_discover') || name.startsWith('webmcp_invoke')) {
-        category = 'webmcp_meta';
-      }
+      const category = getBuiltinToolCategory(name);
       manifest.push({
         name,
         description: (t as any).description ?? '',
@@ -911,8 +1001,9 @@ export class Agent implements AgentAPI {
 
   /** Get category display labels */
   static getCategoryLabel(category: string): string {
-    if (category === 'tab_management') return 'Tab Management';
-    if (category === 'webmcp_meta') return 'WebMCP Discovery';
+    if (category === 'browser_read') return 'Read Only';
+    if (category === 'browser_automation') return 'Automation';
+    if (category === 'skills') return 'Skills';
     const tabMatch = category.match(/^webmcp_tab_(\d+)$/);
     if (tabMatch) return `WebMCP · Tab ${tabMatch[1]}`;
     const mcpMatch = category.match(/^mcp_server_(.+)$/);
@@ -1085,6 +1176,26 @@ export class Agent implements AgentAPI {
 
   getSystemPrompt(): string {
     return this.systemPrompt;
+  }
+
+  setSkillRegistry(skills: SkillRegistryEntry[]): void {
+    this.skillRegistry = normalizeSkillRegistry(skills);
+    if (this.currentAgent) {
+      this.rebuildAgent();
+    }
+    console.log('[agent] Skill registry updated:', this.skillRegistry.length, 'skills');
+  }
+
+  getSkillRegistry(): SkillRegistryEntry[] {
+    return [...this.skillRegistry];
+  }
+
+  findSkill(identifier: string): SkillRegistryEntry | null {
+    const normalized = identifier.trim().toLowerCase();
+    if (!normalized) return null;
+    return this.skillRegistry.find((skill) =>
+      skill.slug.toLowerCase() === normalized || skill.name.toLowerCase() === normalized,
+    ) ?? null;
   }
 
   // ─── Callback registration ───────────────────────────────────────────
@@ -1387,6 +1498,19 @@ export class Agent implements AgentAPI {
    */
   private buildSystemPrompt(): string {
     let prompt = this.systemPrompt;
+
+    const activeSkills = this.skillRegistry.filter((skill) => skill.enabled);
+    if (activeSkills.length > 0) {
+      prompt += `\n\n**Active reusable skills:**`;
+      prompt += this.disabledTools.has('skills_load')
+        ? `\nThese are user-configured SKILL.md-style helpers currently summarized at a high level.`
+        : `\nThese are user-configured SKILL.md-style helpers. If one seems relevant, call skills_load with its slug or name to inspect the full details before relying on it.`;
+      for (const skill of activeSkills) {
+        const tags = skill.tags.length > 0 ? ` — tags: ${skill.tags.join(', ')}` : '';
+        const description = skill.description || 'No description provided.';
+        prompt += `\n- ${skill.name} (slug: ${skill.slug}) — ${description}${tags}`;
+      }
+    }
 
     if (this.webmcpByTab.size > 0) {
       prompt += `\n\n**Available WebMCP page tools (across all tabs):**`;

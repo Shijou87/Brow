@@ -1031,6 +1031,308 @@ a {
   gap: 14px;
 }
 
+.prompt-panel-note,
+.skills-registry-subtitle,
+.skills-empty-state,
+.skill-card-meta {
+  color: $text-secondary;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.skills-registry-header,
+.skill-editor-header,
+.skill-editor-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skills-registry-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skills-registry-count {
+  color: $accent;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.skills-import-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skills-import-url-row {
+  display: flex;
+  gap: 8px;
+
+  input {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.skills-import-url-btn {
+  flex-shrink: 0;
+}
+
+.skills-dropzone {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+  padding: 12px 14px;
+  border: 2px dashed $outline-variant;
+  background: rgba(255, 255, 255, 0.02);
+  color: $text-secondary;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+
+  &:hover,
+  &.is-dragover {
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
+    color: $text-primary;
+  }
+
+  code {
+    display: inline-block;
+    margin: 0 2px;
+    padding: 1px 6px;
+    border: 1px solid $outline-variant;
+    background: $surface-high;
+    color: $accent;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 11px;
+  }
+}
+
+.skills-file-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.skills-registry-list {
+  display: grid;
+  gap: 12px;
+}
+
+.skill-editor-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.skills-empty-state {
+  padding: 16px;
+  border: 2px dashed $outline-variant;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 2px solid $outline-variant;
+  background: $bg;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.18);
+}
+
+.skill-card.enabled {
+  border-color: rgba(168, 85, 247, 0.45);
+}
+
+.skill-card.is-editing {
+  border-color: $accent;
+  box-shadow: 4px 4px 0 0 rgba(168, 85, 247, 0.16);
+}
+
+.skill-card.disabled {
+  opacity: 0.72;
+}
+
+.skill-card-header,
+.skill-card-title-group,
+.skill-card-footer,
+.skill-card-actions,
+.skill-card-tags {
+  display: flex;
+  gap: 8px;
+}
+
+.skill-card-header {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.skill-card-footer {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skill-card-title-group {
+  flex-direction: column;
+  min-width: 0;
+}
+
+.skill-card-title {
+  color: $accent;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.skill-card-slug {
+  color: $text-secondary;
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.skill-card-description {
+  color: $text-primary;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.skill-card-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.skill-card-tags {
+  flex-wrap: wrap;
+}
+
+.skill-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  background: rgba(168, 85, 247, 0.08);
+  color: $accent;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.skills-new-btn,
+.skills-import-url-btn,
+.skill-toggle-btn,
+.skill-edit-btn,
+.skill-remove-btn,
+.skill-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  background: $bg;
+  color: $text-secondary;
+  cursor: pointer;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+
+  &:hover {
+    border-color: $accent;
+    color: $accent;
+    background: rgba(168, 85, 247, 0.08);
+  }
+}
+
+.skill-remove-btn {
+  align-self: flex-end;
+  min-width: 34px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.skill-toggle-btn.is-enabled {
+  border-color: $accent;
+  color: $accent;
+  background: rgba(168, 85, 247, 0.12);
+}
+
+.skill-card-inline-editor {
+  margin-top: -4px;
+}
+
+.skill-editor-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 2px solid $accent;
+  background: rgba(9, 10, 18, 0.98);
+  box-shadow: 4px 4px 0 0 $shadow-purple;
+}
+
+.skill-editor-title {
+  margin: 0;
+  color: $accent;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.skill-editor-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.skill-content-input,
+.skill-content-preview {
+  min-height: 260px;
+}
+
+.skill-content-input {
+  resize: vertical;
+  line-height: 1.55;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.skill-editor-actions {
+  align-items: center;
+}
+
+.skill-editor-actions .config-apply-btn {
+  width: auto;
+  margin-top: 0;
+}
+
 .config-mode-toggle {
   display: flex;
   gap: 4px;
@@ -1381,6 +1683,15 @@ a {
   font-size: 12px;
 }
 
+.tools-group-warning {
+  padding: 10px 12px;
+  border: 2px solid rgba(255, 110, 132, 0.4);
+  background: rgba(255, 110, 132, 0.08);
+  color: #ffb7c4;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .tools-groups-container,
 .conversations-list-container,
 .mcp-servers-list {
@@ -1404,10 +1715,18 @@ a {
   padding: 14px;
 }
 
+.tools-group.dangerous {
+  border-color: rgba(255, 110, 132, 0.45);
+}
+
 .tools-group-header {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tools-group-warning {
   margin-bottom: 12px;
 }
 
@@ -1916,5 +2235,23 @@ a {
 
   .mcp-server-actions {
     justify-content: flex-end;
+  }
+
+  .skills-registry-header,
+  .skill-editor-header,
+  .skill-editor-actions,
+  .skill-card-header,
+  .skill-card-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .skills-import-url-row {
+    flex-direction: column;
+  }
+
+  .skill-card-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 }

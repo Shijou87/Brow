@@ -10,6 +10,16 @@ import {
   type ToolManifestEntry,
 } from './agent';
 import type { MCPServerEntry } from './mcp-client';
+import {
+  formatSkillTagsInput,
+  normalizeSkillRegistry,
+  parseSkillTagsInput,
+  parseSkillMarkdownImport,
+  slugifySkillName,
+  SKILL_REGISTRY_STORAGE_KEY,
+  type SkillDraft,
+  type SkillRegistryEntry,
+} from './skills-registry';
 
 export interface SavedConversation {
   id: string;
@@ -34,8 +44,10 @@ export interface ChatViewCallbacks {
     mode: 'openai' | 'claude';
     fields: Record<string, string>;
     recursionLimit: number;
-    systemPrompt: string;
+    systemPrompt?: string;
   }) => void;
+  onSystemPromptApply: (prompt: string) => void;
+  onSkillRegistryApply: (skills: SkillRegistryEntry[]) => void;
   onVLMConfigApply: (config: { baseUrl: string; apiKey: string; model: string }) => void;
   onRefreshWebMCP: () => void;
   onToolToggle: (toolName: string, enabled: boolean) => void;
@@ -48,7 +60,7 @@ export interface ChatViewCallbacks {
   onMCPServerReconnect: (id: string) => Promise<MCPServerEntry>;
 }
 
-type SurfaceMode = 'chat' | 'tools' | 'mcp' | 'conversations' | 'config';
+type SurfaceMode = 'chat' | 'tools' | 'mcp' | 'conversations' | 'prompt' | 'config';
 
 export class ChatView {
   private container: HTMLElement;
@@ -69,6 +81,7 @@ export class ChatView {
   private newChatButton!: HTMLButtonElement;
   private bottomNav!: HTMLElement;
   private configPanel!: HTMLElement;
+  private promptPanel!: HTMLElement;
   private toolsPanel!: HTMLElement;
   private conversationsPanel!: HTMLElement;
   private mcpPanel!: HTMLElement;
@@ -81,8 +94,10 @@ export class ChatView {
   private isToolsVisible = false;
   private isConversationsVisible = false;
   private isMCPVisible = false;
+  private isPromptVisible = false;
   private activeSurface: SurfaceMode = 'chat';
   private systemPromptPreviewMode: 'edit' | 'preview' = 'edit';
+  private skillContentPreviewMode: 'edit' | 'preview' = 'edit';
 
   // Current conversation
   private currentConversationId: string | null = null;
@@ -108,6 +123,12 @@ export class ChatView {
   private contextPickerQuery = '';
   private mentionRange: { start: number; end: number } | null = null;
 
+  // Prompt skills registry
+  private skillRegistry: SkillRegistryEntry[] = [];
+  private editingSkillId: string | null = null;
+  private isSkillEditorOpen = false;
+  private skillEditorSlugDirty = false;
+
   constructor(container: HTMLElement, callbacks: ChatViewCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
@@ -132,10 +153,20 @@ export class ChatView {
   }
 
   public setCurrentContextTab(tab: ContextTabOption | null): void {
+    const previousTabId = this.currentContextTab?.tabId ?? null;
+    const nextTabId = tab?.tabId ?? null;
     if (!this.hasInitializedCurrentContext && tab) {
       this.includeCurrentContextTab = true;
     }
+    if (this.hasInitializedCurrentContext && nextTabId !== null && nextTabId !== previousTabId) {
+      // Removing NOW only hides the current active tab. When Chrome switches to a new
+      // active tab, that new tab becomes the NOW context again.
+      this.includeCurrentContextTab = true;
+    }
     this.currentContextTab = tab;
+    if (nextTabId !== null) {
+      this.extraContextTabs = this.extraContextTabs.filter((entry) => entry.tabId !== nextTabId);
+    }
     if (!tab && !this.hasInitializedCurrentContext) {
       this.includeCurrentContextTab = false;
     }
@@ -567,6 +598,8 @@ export class ChatView {
     // Config panel (hidden)
     this.configPanel = this.createConfigPanel();
     this.container.appendChild(this.configPanel);
+    this.promptPanel = this.createPromptPanel();
+    this.container.appendChild(this.promptPanel);
 
     // Bottom nav
     this.bottomNav = document.createElement('nav');
@@ -596,6 +629,12 @@ export class ChatView {
           <line x1="7" y1="12" x2="17" y2="12"></line>
           <line x1="7" y1="17" x2="13" y2="17"></line>
           <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+        </svg>
+      </button>
+      <button class="bottom-nav-btn prompt-toggle-btn" data-surface="prompt" title="Prompt" aria-label="Prompt">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"></path>
         </svg>
       </button>
       <button class="bottom-nav-btn config-toggle-btn" data-surface="config" title="Configure LLM" aria-label="Configure LLM">
@@ -711,6 +750,9 @@ export class ChatView {
           case 'conversations':
             this.toggleConversationsPanel();
             break;
+          case 'prompt':
+            this.togglePromptPanel();
+            break;
           case 'config':
             this.toggleConfigPanel();
             break;
@@ -780,7 +822,10 @@ export class ChatView {
     for (const tab of this.extraContextTabs) {
       if (renderedTabIds.has(tab.tabId)) continue;
       renderedTabIds.add(tab.tabId);
-      this.contextTabsContainer.appendChild(this.createContextTabChip(tab, 'Ctx', false));
+      const isPrimaryFallback = !this.includeCurrentContextTab && renderedTabIds.size === 1;
+      this.contextTabsContainer.appendChild(
+        this.createContextTabChip(tab, isPrimaryFallback ? 'Now' : 'Ctx', isPrimaryFallback),
+      );
     }
 
     if (renderedTabIds.size === 0) {
@@ -950,8 +995,12 @@ export class ChatView {
 
     if (this.currentContextTab?.tabId === tab.tabId) {
       this.includeCurrentContextTab = true;
-    } else if (!this.extraContextTabs.some((entry) => entry.tabId === tab.tabId)) {
-      this.extraContextTabs = [...this.extraContextTabs, tab];
+      this.extraContextTabs = this.extraContextTabs.filter((entry) => entry.tabId !== tab.tabId);
+    } else {
+      const withoutSelected = this.extraContextTabs.filter((entry) => entry.tabId !== tab.tabId);
+      this.extraContextTabs = this.includeCurrentContextTab
+        ? [...withoutSelected, tab]
+        : [tab, ...withoutSelected];
     }
 
     this.renderContextTabs();
@@ -1027,14 +1076,17 @@ export class ChatView {
     this.isToolsVisible = surface === 'tools';
     this.isMCPVisible = surface === 'mcp';
     this.isConversationsVisible = surface === 'conversations';
+    this.isPromptVisible = surface === 'prompt';
     this.isConfigVisible = surface === 'config';
 
     if (surface !== 'chat') {
       this.closeContextPicker();
     }
 
-    this.chatBody.style.display = this.isConfigVisible ? 'none' : 'flex';
+    const overlayPanelVisible = this.isConfigVisible || this.isPromptVisible;
+    this.chatBody.style.display = overlayPanelVisible ? 'none' : 'flex';
     this.configPanel.style.display = this.isConfigVisible ? 'flex' : 'none';
+    this.promptPanel.style.display = this.isPromptVisible ? 'flex' : 'none';
     this.toolsPanel.style.display = this.isToolsVisible ? 'flex' : 'none';
     this.mcpPanel.style.display = this.isMCPVisible ? 'flex' : 'none';
     this.conversationsPanel.style.display = this.isConversationsVisible ? 'flex' : 'none';
@@ -1053,6 +1105,8 @@ export class ChatView {
       this.refreshMCPPanel();
     } else if (surface === 'conversations') {
       this.refreshConversationsPanel();
+    } else if (surface === 'prompt') {
+      this.populatePromptFields();
     } else if (surface === 'config') {
       this.populateConfigFields();
     }
@@ -1106,7 +1160,10 @@ export class ChatView {
       const groupLabel = Agent.getCategoryLabel(category);
 
       const groupEl = document.createElement('div');
-      groupEl.className = 'tools-group';
+      groupEl.className = `tools-group${category === 'browser_automation' ? ' dangerous' : ''}`;
+      const warningHtml = category === 'browser_automation'
+        ? `<div class="tools-group-warning">These tools can modify pages, navigate tabs, or execute actions. Enable them only when you want Brow to automate the browser.</div>`
+        : '';
 
       groupEl.innerHTML = `
         <div class="tools-group-header">
@@ -1118,6 +1175,7 @@ export class ChatView {
             ${allOn ? 'All on' : allOff ? 'All off' : `${enabledCount} on`}
           </button>
         </div>
+        ${warningHtml}
         <div class="tools-group-items">
           ${tools.map(t => `
             <div class="tools-item">
@@ -1648,22 +1706,11 @@ export class ChatView {
         </div>
 
         <hr class="config-divider" />
-        <h3 class="config-section-title">Agent Runtime</h3>
+        <h3 class="config-section-title">Runtime</h3>
         <div class="config-fields config-agent-fields">
           <div class="config-field">
             <label for="llm-config-recursion-limit">Recursion Limit</label>
             <input type="number" id="llm-config-recursion-limit" min="1" step="1" placeholder="100" autocomplete="off" />
-          </div>
-          <div class="config-field config-system-prompt-field">
-            <div class="config-field-header">
-              <label for="llm-config-system-prompt">System Prompt</label>
-              <div class="config-editor-toggle" role="tablist" aria-label="System prompt view">
-                <button type="button" class="config-editor-btn active" data-view="edit">Edit</button>
-                <button type="button" class="config-editor-btn" data-view="preview">Preview</button>
-              </div>
-            </div>
-            <textarea id="llm-config-system-prompt" class="config-system-prompt-input" spellcheck="false"></textarea>
-            <div id="llm-config-system-prompt-preview" class="config-system-prompt-preview" style="display: none;"></div>
           </div>
         </div>
 
@@ -1704,17 +1751,6 @@ export class ChatView {
       });
     });
 
-    const systemPromptInput = panel.querySelector('#llm-config-system-prompt') as HTMLTextAreaElement | null;
-    systemPromptInput?.addEventListener('input', () => this.refreshSystemPromptPreview());
-
-    panel.querySelectorAll('.config-editor-btn').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const view = (btn as HTMLElement).dataset.view as 'edit' | 'preview';
-        this.setSystemPromptPreviewMode(view);
-      });
-    });
-
     // Apply
     panel.querySelector('.config-apply-btn')?.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1732,9 +1768,543 @@ export class ChatView {
     panel.addEventListener('keyup', (e) => e.stopPropagation());
     panel.addEventListener('keypress', (e) => e.stopPropagation());
 
-    this.setSystemPromptPreviewMode('edit', panel);
-
     return panel;
+  }
+
+  private togglePromptPanel(): void {
+    this.setActiveSurface(this.activeSurface === 'prompt' ? 'chat' : 'prompt');
+  }
+
+  private createPromptPanel(): HTMLElement {
+    const panel = document.createElement('div');
+    panel.className = 'llm-config-panel prompt-panel';
+    panel.style.display = 'none';
+
+    panel.innerHTML = `
+      <div class="config-panel-inner prompt-panel-inner">
+        <p class="prompt-panel-note">Active skills inject their name and description at runtime. The agent can inspect full skill details later with the <code>skills_load</code> tool.</p>
+        <div class="skills-registry-header">
+          <div class="skills-registry-heading">
+            <h3 class="config-section-title">Skills Registry</h3>
+            <p class="skills-registry-subtitle">Reusable SKILL.md-style helpers. Enable a skill to inject its name and description into the agent prompt.</p>
+          </div>
+          <button class="skills-new-btn" type="button">New Skill</button>
+        </div>
+        <div class="skills-import-toolbar">
+          <div class="skills-import-url-row">
+            <input type="text" class="skills-import-url" placeholder="https://example.com/SKILL.md" autocomplete="off" />
+            <button class="skills-import-url-btn" type="button">Load URL</button>
+          </div>
+          <div class="skills-dropzone" tabindex="0" role="button" aria-label="Drop markdown file here or click to browse">
+            <span>Drop <code>.md</code> file here or click to browse</span>
+            <input type="file" class="skills-file-input" accept=".md,text/markdown" />
+        </div>
+        </div>
+        <div class="skills-registry-count">0 skill(s)</div>
+        <div class="skill-editor-dock">
+          <div class="skill-editor-panel" style="display: none;">
+            <div class="skill-editor-header">
+              <h4 class="skill-editor-title">New Skill</h4>
+              <div class="config-editor-toggle" role="tablist" aria-label="Skill content view">
+                <button type="button" class="config-editor-btn active" data-skill-view="edit">Edit</button>
+                <button type="button" class="config-editor-btn" data-skill-view="preview">Preview</button>
+              </div>
+            </div>
+            <div class="config-fields skill-editor-fields">
+              <div class="config-field">
+                <label for="skill-display-name">Display Name</label>
+                <input type="text" id="skill-display-name" placeholder="My Custom Skill" autocomplete="off" />
+              </div>
+              <div class="config-field">
+                <label for="skill-slug">Slug</label>
+                <input type="text" id="skill-slug" placeholder="my-custom-skill" autocomplete="off" />
+              </div>
+              <div class="config-field">
+                <label for="skill-description">Description</label>
+                <input type="text" id="skill-description" placeholder="Short description for card display" autocomplete="off" />
+              </div>
+              <div class="config-field">
+                <label for="skill-tags">Tags</label>
+                <input type="text" id="skill-tags" placeholder="debugging, testing, performance" autocomplete="off" />
+              </div>
+              <div class="config-field">
+                <label for="skill-content">Skill Content (Markdown)</label>
+                <textarea id="skill-content" class="skill-content-input" spellcheck="false" placeholder="# My Skill&#10;&#10;Paste or type the full SKILL.md content here..."></textarea>
+                <div id="skill-content-preview" class="config-system-prompt-preview skill-content-preview" style="display: none;"></div>
+              </div>
+            </div>
+            <div class="skill-editor-actions">
+              <button class="config-apply-btn skill-save-btn" type="button">Save Skill</button>
+              <button class="skill-cancel-btn" type="button">Cancel</button>
+            </div>
+          </div>
+        </div>
+        <div class="skills-registry-list"></div>
+        <div class="config-fields config-prompt-fields">
+          <h3 class="config-section-title">System Prompt</h3>
+          <div class="config-field config-system-prompt-field">
+            <div class="config-field-header">
+              <label for="llm-config-system-prompt">Prompt</label>
+              <div class="config-editor-toggle" role="tablist" aria-label="System prompt view">
+                <button type="button" class="config-editor-btn active" data-view="edit">Edit</button>
+                <button type="button" class="config-editor-btn" data-view="preview">Preview</button>
+              </div>
+            </div>
+            <textarea id="llm-config-system-prompt" class="config-system-prompt-input" spellcheck="false"></textarea>
+            <div id="llm-config-system-prompt-preview" class="config-system-prompt-preview" style="display: none;"></div>
+          </div>
+        </div>
+        <button class="config-apply-btn prompt-apply-btn">Apply Prompt</button>
+        <div class="config-status prompt-status"></div>
+      </div>`;
+
+    const systemPromptInput = panel.querySelector('#llm-config-system-prompt') as HTMLTextAreaElement | null;
+    systemPromptInput?.addEventListener('input', () => this.refreshSystemPromptPreview(panel));
+
+    panel.querySelectorAll('.config-editor-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const view = (btn as HTMLElement).dataset.view as 'edit' | 'preview';
+        this.setSystemPromptPreviewMode(view, panel);
+      });
+    });
+
+    panel.querySelector('.prompt-apply-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.applyPrompt();
+    });
+
+    panel.querySelector('.skills-new-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.openSkillEditor();
+    });
+
+    const importUrlInput = panel.querySelector('.skills-import-url') as HTMLInputElement | null;
+    const importFileInput = panel.querySelector('.skills-file-input') as HTMLInputElement | null;
+    const dropzone = panel.querySelector('.skills-dropzone') as HTMLElement | null;
+
+    panel.querySelector('.skills-import-url-btn')?.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await this.importSkillFromUrl();
+    });
+    importUrlInput?.addEventListener('keydown', async (e) => {
+      if ((e as KeyboardEvent).key === 'Enter') {
+        e.preventDefault();
+        await this.importSkillFromUrl();
+      }
+    });
+
+    importFileInput?.addEventListener('change', async () => {
+      const file = importFileInput.files?.[0];
+      if (!file) return;
+      await this.importSkillFromFile(file);
+      importFileInput.value = '';
+    });
+
+    dropzone?.addEventListener('click', () => importFileInput?.click());
+    dropzone?.addEventListener('keydown', (e) => {
+      const key = (e as KeyboardEvent).key;
+      if (key === 'Enter' || key === ' ') {
+        e.preventDefault();
+        importFileInput?.click();
+      }
+    });
+    dropzone?.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.classList.add('is-dragover');
+    });
+    dropzone?.addEventListener('dragleave', (e) => {
+      if (!dropzone.contains(e.relatedTarget as Node | null)) {
+        dropzone.classList.remove('is-dragover');
+      }
+    });
+    dropzone?.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('is-dragover');
+      const file = e.dataTransfer?.files?.[0];
+      if (!file) return;
+      await this.importSkillFromFile(file);
+    });
+
+    panel.querySelectorAll('.config-editor-btn[data-skill-view]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const view = (btn as HTMLElement).dataset.skillView as 'edit' | 'preview';
+        this.setSkillContentPreviewMode(view);
+      });
+    });
+
+    const skillNameInput = panel.querySelector('#skill-display-name') as HTMLInputElement | null;
+    const skillSlugInput = panel.querySelector('#skill-slug') as HTMLInputElement | null;
+    const skillContentInput = panel.querySelector('#skill-content') as HTMLTextAreaElement | null;
+
+    skillNameInput?.addEventListener('input', () => {
+      if (!this.skillEditorSlugDirty && skillSlugInput) {
+        skillSlugInput.value = slugifySkillName(skillNameInput.value);
+      }
+    });
+    skillSlugInput?.addEventListener('input', () => {
+      this.skillEditorSlugDirty = true;
+      skillSlugInput.value = slugifySkillName(skillSlugInput.value);
+    });
+    skillContentInput?.addEventListener('input', () => this.refreshSkillContentPreview());
+
+    panel.querySelector('.skill-save-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.saveSkillFromEditor();
+    });
+    panel.querySelector('.skill-cancel-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.closeSkillEditor();
+    });
+
+    panel.addEventListener('keydown', (e) => e.stopPropagation());
+    panel.addEventListener('keyup', (e) => e.stopPropagation());
+    panel.addEventListener('keypress', (e) => e.stopPropagation());
+
+    this.setSystemPromptPreviewMode('edit', panel);
+    this.setSkillContentPreviewMode('edit', panel);
+    return panel;
+  }
+
+  private populatePromptFields(): void {
+    chrome.storage.local.get(['agent-webmcp-config', SKILL_REGISTRY_STORAGE_KEY], (result) => {
+      const saved = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
+      this.skillRegistry = normalizeSkillRegistry(result[SKILL_REGISTRY_STORAGE_KEY]);
+      this.setPromptInput('llm-config-system-prompt', saved.runtime?.systemPrompt || DEFAULT_SYSTEM_PROMPT);
+      this.refreshSystemPromptPreview(this.promptPanel);
+      this.setSystemPromptPreviewMode(this.systemPromptPreviewMode, this.promptPanel);
+      this.isSkillEditorOpen = false;
+      this.editingSkillId = null;
+      this.renderSkillRegistry();
+      this.closeSkillEditor(false);
+    });
+  }
+
+  private applyPrompt(): void {
+    const systemPrompt = this.getPromptInput('llm-config-system-prompt') || DEFAULT_SYSTEM_PROMPT;
+
+    chrome.storage.local.get('agent-webmcp-config', (result) => {
+      const existing = (result['agent-webmcp-config'] as Record<string, any>) ?? {};
+      existing.runtime = {
+        ...(existing.runtime ?? {}),
+        systemPrompt,
+      };
+      chrome.storage.local.set({ 'agent-webmcp-config': existing });
+    });
+
+    this.callbacks.onSystemPromptApply(systemPrompt);
+
+    this.setPromptStatus('Prompt applied.', 'success');
+    setTimeout(() => {
+      this.togglePromptPanel();
+      this.setPromptStatus('');
+    }, 900);
+  }
+
+  private renderSkillRegistry(): void {
+    const list = this.promptPanel.querySelector('.skills-registry-list') as HTMLElement | null;
+    const count = this.promptPanel.querySelector('.skills-registry-count') as HTMLElement | null;
+    const dock = this.promptPanel.querySelector('.skill-editor-dock') as HTMLElement | null;
+    const editorPanel = this.promptPanel.querySelector('.skill-editor-panel') as HTMLElement | null;
+    if (!list || !count || !dock || !editorPanel) return;
+
+    count.textContent = `${this.skillRegistry.length} skill${this.skillRegistry.length !== 1 ? 's' : ''}`;
+    list.innerHTML = '';
+    let editorPlaced = false;
+
+    if (!this.isSkillEditorOpen || !this.editingSkillId) {
+      dock.appendChild(editorPanel);
+      editorPlaced = true;
+    }
+    editorPanel.style.display = this.isSkillEditorOpen ? 'flex' : 'none';
+
+    if (this.skillRegistry.length === 0) {
+      if (!editorPlaced) {
+        dock.appendChild(editorPanel);
+      }
+      const empty = document.createElement('div');
+      empty.className = 'skills-empty-state';
+      empty.textContent = 'No skills yet. Create one to make reusable guidance available to Brow.';
+      list.appendChild(empty);
+      return;
+    }
+
+    for (const skill of this.skillRegistry) {
+      const card = document.createElement('div');
+      const isEditing = this.isSkillEditorOpen && this.editingSkillId === skill.id;
+      card.className = `skill-card${skill.enabled ? ' enabled' : ' disabled'}${isEditing ? ' is-editing' : ''}`;
+      const tags = skill.tags.length > 0
+        ? `<div class="skill-card-tags">${skill.tags.map((tag) => `<span class="skill-tag">${this.escapeHtml(tag)}</span>`).join('')}</div>`
+        : '';
+
+      card.innerHTML = `
+        <div class="skill-card-header">
+          <div class="skill-card-title-group">
+            <div class="skill-card-title">${this.escapeHtml(skill.name)}</div>
+            <div class="skill-card-slug">${this.escapeHtml(skill.slug)}</div>
+          </div>
+          <button class="skill-remove-btn" type="button" aria-label="Remove skill" title="Remove skill">×</button>
+        </div>
+        <div class="skill-card-description">${this.escapeHtml(skill.description || 'No description provided.')}</div>
+        ${tags}
+        <div class="skill-card-footer">
+          <div class="skill-card-meta">Updated ${this.formatRelativeTime(new Date(skill.updatedAt))}</div>
+          <div class="skill-card-actions">
+            <button class="skill-toggle-btn${skill.enabled ? ' is-enabled' : ''}" type="button">${skill.enabled ? 'Active' : 'Inactive'}</button>
+            <button class="skill-edit-btn" type="button">${isEditing ? 'Close' : 'Edit'}</button>
+          </div>
+        </div>`;
+
+      card.querySelector('.skill-toggle-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.skillRegistry = this.skillRegistry.map((entry) =>
+          entry.id === skill.id ? { ...entry, enabled: !entry.enabled, updatedAt: Date.now() } : entry,
+        );
+        this.persistSkillRegistry(skill.enabled ? 'Skill disabled.' : 'Skill enabled.');
+      });
+
+      card.querySelector('.skill-edit-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (isEditing) {
+          this.closeSkillEditor();
+          return;
+        }
+        this.openSkillEditor(skill);
+      });
+
+      card.querySelector('.skill-remove-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.removeSkill(skill.id);
+      });
+
+      list.appendChild(card);
+
+      if (isEditing) {
+        const inlineEditor = document.createElement('div');
+        inlineEditor.className = 'skill-card-inline-editor';
+        inlineEditor.appendChild(editorPanel);
+        editorPlaced = true;
+        list.appendChild(inlineEditor);
+      }
+    }
+
+    if (!editorPlaced) {
+      dock.appendChild(editorPanel);
+    }
+  }
+
+  private async importSkillFromUrl(): Promise<void> {
+    const urlInput = this.promptPanel.querySelector('.skills-import-url') as HTMLInputElement | null;
+    const importButton = this.promptPanel.querySelector('.skills-import-url-btn') as HTMLButtonElement | null;
+    const rawUrl = urlInput?.value.trim() ?? '';
+    if (!rawUrl) {
+      this.setPromptStatus('Enter a skill URL first.', 'error');
+      return;
+    }
+
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      this.setPromptStatus('Skill URL is not valid.', 'error');
+      return;
+    }
+
+    if (importButton) importButton.disabled = true;
+    this.setPromptStatus('Loading skill from URL…');
+
+    try {
+      const response = await fetch(url.toString());
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const markdown = await response.text();
+      const sourceName = url.pathname.split('/').pop() || url.hostname;
+      this.prefillSkillEditorFromMarkdown(markdown, sourceName);
+      this.setPromptStatus('Skill imported from URL. Review and save it.', 'success');
+    } catch (err: any) {
+      this.setPromptStatus(`Could not load skill from URL: ${err.message ?? err}`, 'error');
+    } finally {
+      if (importButton) importButton.disabled = false;
+    }
+  }
+
+  private async importSkillFromFile(file: File): Promise<void> {
+    const fileName = file.name || 'skill.md';
+    if (!/\.md$/i.test(fileName) && file.type && file.type !== 'text/markdown' && file.type !== 'text/plain') {
+      this.setPromptStatus('Only markdown skill files are supported.', 'error');
+      return;
+    }
+
+    try {
+      const markdown = await file.text();
+      this.prefillSkillEditorFromMarkdown(markdown, fileName);
+      this.setPromptStatus(`Imported ${fileName}. Review and save it.`, 'success');
+    } catch (err: any) {
+      this.setPromptStatus(`Could not read ${fileName}: ${err.message ?? err}`, 'error');
+    }
+  }
+
+  private prefillSkillEditorFromMarkdown(markdown: string, sourceName?: string): void {
+    const draft = parseSkillMarkdownImport(markdown, sourceName);
+    this.openSkillEditor(undefined, draft);
+  }
+
+  private openSkillEditor(skill?: SkillRegistryEntry, draft?: SkillDraft): void {
+    const panel = this.promptPanel.querySelector('.skill-editor-panel') as HTMLElement | null;
+    const title = this.promptPanel.querySelector('.skill-editor-title') as HTMLElement | null;
+    const nameInput = this.promptPanel.querySelector('#skill-display-name') as HTMLInputElement | null;
+    const slugInput = this.promptPanel.querySelector('#skill-slug') as HTMLInputElement | null;
+    const descriptionInput = this.promptPanel.querySelector('#skill-description') as HTMLInputElement | null;
+    const tagsInput = this.promptPanel.querySelector('#skill-tags') as HTMLInputElement | null;
+    const contentInput = this.promptPanel.querySelector('#skill-content') as HTMLTextAreaElement | null;
+    const saveButton = this.promptPanel.querySelector('.skill-save-btn') as HTMLButtonElement | null;
+    if (!panel || !title || !nameInput || !slugInput || !descriptionInput || !tagsInput || !contentInput || !saveButton) return;
+
+    this.isSkillEditorOpen = true;
+    this.editingSkillId = skill?.id ?? null;
+    this.skillEditorSlugDirty = Boolean(skill);
+    title.textContent = skill ? 'Edit Skill' : 'New Skill';
+    saveButton.textContent = skill ? 'Update Skill' : 'Create Skill';
+    nameInput.value = skill?.name ?? draft?.name ?? '';
+    slugInput.value = skill?.slug ?? draft?.slug ?? '';
+    descriptionInput.value = skill?.description ?? draft?.description ?? '';
+    tagsInput.value = skill ? formatSkillTagsInput(skill.tags) : formatSkillTagsInput(draft?.tags ?? []);
+    contentInput.value = skill?.content ?? draft?.content ?? '';
+    panel.style.display = 'flex';
+    this.setSkillContentPreviewMode('edit');
+    this.refreshSkillContentPreview();
+    this.renderSkillRegistry();
+    window.setTimeout(() => nameInput.focus(), 0);
+  }
+
+  private closeSkillEditor(rerender = true): void {
+    const panel = this.promptPanel.querySelector('.skill-editor-panel') as HTMLElement | null;
+    const dock = this.promptPanel.querySelector('.skill-editor-dock') as HTMLElement | null;
+    if (panel && dock) {
+      dock.appendChild(panel);
+    }
+    if (panel) panel.style.display = 'none';
+    this.isSkillEditorOpen = false;
+    this.editingSkillId = null;
+    this.skillEditorSlugDirty = false;
+    this.setSkillContentPreviewMode('edit');
+    if (rerender) {
+      this.renderSkillRegistry();
+    }
+  }
+
+  private removeSkill(skillId: string): void {
+    const removedSkill = this.skillRegistry.find((skill) => skill.id === skillId);
+    if (!removedSkill) return;
+
+    this.skillRegistry = this.skillRegistry.filter((skill) => skill.id !== skillId);
+    if (this.editingSkillId === skillId) {
+      this.closeSkillEditor(false);
+    }
+    this.persistSkillRegistry(`Skill "${removedSkill.name}" removed.`);
+  }
+
+  private saveSkillFromEditor(): void {
+    const nameInput = this.promptPanel.querySelector('#skill-display-name') as HTMLInputElement | null;
+    const slugInput = this.promptPanel.querySelector('#skill-slug') as HTMLInputElement | null;
+    const descriptionInput = this.promptPanel.querySelector('#skill-description') as HTMLInputElement | null;
+    const tagsInput = this.promptPanel.querySelector('#skill-tags') as HTMLInputElement | null;
+    const contentInput = this.promptPanel.querySelector('#skill-content') as HTMLTextAreaElement | null;
+    if (!nameInput || !slugInput || !descriptionInput || !tagsInput || !contentInput) return;
+
+    const name = nameInput.value.trim();
+    const slug = slugifySkillName(slugInput.value || name);
+    const description = descriptionInput.value.trim();
+    const content = contentInput.value.trim();
+    const tags = parseSkillTagsInput(tagsInput.value);
+
+    if (!name || !description || !content) {
+      this.setPromptStatus('Name, description, and content are required for a skill.', 'error');
+      return;
+    }
+
+    const duplicate = this.skillRegistry.find((skill) =>
+      skill.slug === slug && skill.id !== this.editingSkillId,
+    );
+    if (duplicate) {
+      this.setPromptStatus(`Slug "${slug}" is already used by another skill.`, 'error');
+      return;
+    }
+
+    const now = Date.now();
+    const existing = this.skillRegistry.find((skill) => skill.id === this.editingSkillId);
+    const nextSkill: SkillRegistryEntry = existing
+      ? {
+        ...existing,
+        name,
+        slug,
+        description,
+        tags,
+        content,
+        updatedAt: now,
+      }
+      : {
+        id: this.generateId(),
+        name,
+        slug,
+        description,
+        tags,
+        content,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+    this.skillRegistry = [
+      nextSkill,
+      ...this.skillRegistry.filter((skill) => skill.id !== nextSkill.id),
+    ];
+    this.persistSkillRegistry(existing ? 'Skill updated.' : 'Skill created.');
+    this.closeSkillEditor();
+  }
+
+  private setSkillContentPreviewMode(
+    mode: 'edit' | 'preview',
+    root: ParentNode = this.promptPanel,
+  ): void {
+    this.skillContentPreviewMode = mode;
+    root.querySelectorAll<HTMLElement>('.config-editor-btn[data-skill-view]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.skillView === mode);
+    });
+
+    const input = root.querySelector('#skill-content') as HTMLTextAreaElement | null;
+    const preview = root.querySelector('#skill-content-preview') as HTMLElement | null;
+    if (!input || !preview) return;
+
+    this.refreshSkillContentPreview(root);
+    input.style.display = mode === 'edit' ? '' : 'none';
+    preview.style.display = mode === 'preview' ? '' : 'none';
+  }
+
+  private refreshSkillContentPreview(root: ParentNode = this.promptPanel): void {
+    const input = root.querySelector('#skill-content') as HTMLTextAreaElement | null;
+    const preview = root.querySelector('#skill-content-preview') as HTMLElement | null;
+    if (!input || !preview) return;
+    preview.innerHTML = this.renderMarkdownPreview(input.value.trim() || '# Skill');
+  }
+
+  private persistSkillRegistry(message?: string): void {
+    this.skillRegistry = normalizeSkillRegistry(this.skillRegistry);
+    chrome.storage.local.set({ [SKILL_REGISTRY_STORAGE_KEY]: this.skillRegistry });
+    this.callbacks.onSkillRegistryApply(this.skillRegistry);
+    this.renderSkillRegistry();
+    if (message) {
+      this.setPromptStatus(message, 'success');
+    }
+  }
+
+  private setPromptStatus(message: string, tone: '' | 'success' | 'error' = ''): void {
+    const statusEl = this.promptPanel.querySelector('.prompt-status') as HTMLElement | null;
+    if (!statusEl) return;
+    statusEl.textContent = message;
+    statusEl.className = `config-status prompt-status${tone ? ` ${tone}` : ''}`;
   }
 
   private populateConfigFields(): void {
@@ -1770,12 +2340,9 @@ export class ChatView {
         'llm-config-recursion-limit',
         String(Number(saved.runtime?.recursionLimit) || DEFAULT_AGENT_RECURSION_LIMIT),
       );
-      this.setInput('llm-config-system-prompt', saved.runtime?.systemPrompt || DEFAULT_SYSTEM_PROMPT);
       this.setInput('vlm-config-endpoint', vlm.baseUrl);
       this.setInput('vlm-config-api-key', vlm.apiKey);
       this.setInput('vlm-config-model', vlm.model);
-      this.refreshSystemPromptPreview();
-      this.setSystemPromptPreviewMode(this.systemPromptPreviewMode);
 
       if (saved.activeMode) {
         this.configMode = saved.activeMode as 'openai' | 'claude';
@@ -1796,7 +2363,6 @@ export class ChatView {
     const fields: Record<string, string> = {};
     const recursionLimitRaw = this.getInput('llm-config-recursion-limit');
     const recursionLimit = Number(recursionLimitRaw || DEFAULT_AGENT_RECURSION_LIMIT);
-    const systemPrompt = this.getInput('llm-config-system-prompt') || DEFAULT_SYSTEM_PROMPT;
 
     if (!Number.isFinite(recursionLimit) || recursionLimit < 1 || !Number.isInteger(recursionLimit)) {
       if (statusEl) {
@@ -1845,7 +2411,6 @@ export class ChatView {
       existing.runtime = {
         ...(existing.runtime ?? {}),
         recursionLimit: Math.floor(recursionLimit),
-        systemPrompt,
       };
 
       // Always save VLM config alongside LLM config
@@ -1862,7 +2427,6 @@ export class ChatView {
       mode: this.configMode,
       fields,
       recursionLimit: Math.floor(recursionLimit),
-      systemPrompt,
     });
 
     // Apply VLM config
@@ -1957,6 +2521,16 @@ export class ChatView {
 
   private getInput(id: string): string {
     const el = this.configPanel.querySelector(`#${id}`) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null;
+    return el?.value?.trim() ?? '';
+  }
+
+  private setPromptInput(id: string, value: string): void {
+    const el = this.promptPanel.querySelector(`#${id}`) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null;
+    if (el) el.value = value;
+  }
+
+  private getPromptInput(id: string): string {
+    const el = this.promptPanel.querySelector(`#${id}`) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null;
     return el?.value?.trim() ?? '';
   }
 

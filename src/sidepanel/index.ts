@@ -14,6 +14,11 @@ import {
   type ChatTurn,
   type ToolStepEvent,
 } from './agent';
+import {
+  SKILL_REGISTRY_STORAGE_KEY,
+  normalizeSkillRegistry,
+  type SkillRegistryEntry,
+} from './skills-registry';
 import type { WebMCPRegistryEntry, DirectLLMConfig } from '../shared/types';
 import { logInfo } from '../shared/logger';
 
@@ -30,6 +35,8 @@ const view = new ChatView(app, {
   onSendMessage: handleSendMessage,
   onStopGeneration: handleStopGeneration,
   onConfigApply: handleConfigApply,
+  onSystemPromptApply: handleSystemPromptApply,
+  onSkillRegistryApply: handleSkillRegistryApply,
   onVLMConfigApply: handleVLMConfigApply,
   onRefreshWebMCP: handleRefreshWebMCP,
   onToolToggle: handleToolToggle,
@@ -52,6 +59,8 @@ view.enableInput();
 const agent = getAgentApi();
 const chatHistory: ChatTurn[] = [];
 
+restoreSavedSkills();
+
 agent.onToolStep((steps: ToolStepEvent[]) => view.updateToolSteps(steps));
 
 // Provide tool manifest to ChatView
@@ -68,8 +77,8 @@ agent.restoreMCPServers().then(() => {
 
 // Restore disabled tools from storage
 chrome.storage.local.get('agent-webmcp-disabled-tools', (result) => {
-  const saved = result['agent-webmcp-disabled-tools'] as string[] | undefined;
-  if (saved && saved.length > 0) {
+  if (Object.prototype.hasOwnProperty.call(result, 'agent-webmcp-disabled-tools')) {
+    const saved = (result['agent-webmcp-disabled-tools'] as string[] | undefined) ?? [];
     agent.setDisabledTools(saved);
     logInfo('sidepanel', `Restored ${saved.length} disabled tools from storage`);
   }
@@ -162,7 +171,9 @@ function handleConfigApply(config: {
   configureAndRebuild(llmConfig);
   const agentApi = getAgentApi();
   agentApi.setRecursionLimit(config.recursionLimit ?? DEFAULT_AGENT_RECURSION_LIMIT);
-  agentApi.setSystemPrompt(config.systemPrompt ?? DEFAULT_SYSTEM_PROMPT);
+  if (config.systemPrompt !== undefined) {
+    agentApi.setSystemPrompt(config.systemPrompt || DEFAULT_SYSTEM_PROMPT);
+  }
   const label = config.mode === 'openai' ? `OpenAI: ${llmConfig.model}` : `Claude: ${llmConfig.model}`;
   view.updateConnectionStatus(label);
 }
@@ -170,6 +181,14 @@ function handleConfigApply(config: {
 function handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: string }): void {
   agent.setVLMConfig(config);
   console.log('[sidepanel] VLM config applied:', config.model, '@', config.baseUrl);
+}
+
+function handleSystemPromptApply(prompt: string): void {
+  agent.setSystemPrompt(prompt || DEFAULT_SYSTEM_PROMPT);
+}
+
+function handleSkillRegistryApply(skills: SkillRegistryEntry[]): void {
+  agent.setSkillRegistry(skills);
 }
 
 const DEFAULT_CONFIG = {
@@ -217,6 +236,13 @@ function restoreSavedConfig(): void {
       apiKey: '',
       model: 'Qwen3-VL-30B-A3B-Thinking',
     });
+  });
+}
+
+function restoreSavedSkills(): void {
+  chrome.storage.local.get(SKILL_REGISTRY_STORAGE_KEY, (result) => {
+    const skills = normalizeSkillRegistry(result[SKILL_REGISTRY_STORAGE_KEY]);
+    agent.setSkillRegistry(skills);
   });
 }
 
