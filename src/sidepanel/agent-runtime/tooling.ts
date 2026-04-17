@@ -29,15 +29,34 @@ export interface MCPToolState {
 
 const TOOL_DISPLAY_LABELS: Record<string, string> = {
   tabs_list: 'Listing tabs',
+  list_tabs: 'Listing tabs',
   tabs_getActive: 'Getting active tab',
+  get_active_tab: 'Getting active tab',
   tabs_getContent: 'Reading tab content',
+  get_content: 'Reading tab content',
   tabs_listInteractiveElements: 'Inspecting page elements',
+  list_interactive_elements: 'Inspecting page elements',
+  tabs_highlight: 'Highlighting page element',
+  highlight: 'Highlighting page element',
+  highlight_element: 'Highlighting page element',
+  tabs_hover: 'Hovering page element',
+  hover: 'Hovering page element',
+  hover_element: 'Hovering page element',
   tabs_click: 'Clicking page element',
+  click: 'Clicking page element',
+  click_element: 'Clicking page element',
   tabs_type: 'Typing into page element',
+  type: 'Typing into page element',
+  type_text: 'Typing into page element',
   tabs_fillForm: 'Filling form',
+  fill_form: 'Filling form',
+  fill_form_fields: 'Filling form',
   tabs_activate: 'Activating tab',
+  activate_tab: 'Activating tab',
   tabs_create: 'Creating tab',
+  create_tab: 'Creating tab',
   tabs_updateUrl: 'Navigating tab',
+  navigate: 'Navigating tab',
   http_fetch: 'Fetching URL',
   bookmarks_getAll: 'Getting all bookmarks',
   bookmarks_search: 'Searching bookmarks',
@@ -49,6 +68,8 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
 };
 
 const AUTOMATION_TOOL_NAMES = new Set([
+  'tabs_highlight',
+  'tabs_hover',
   'tabs_click',
   'tabs_type',
   'tabs_fillForm',
@@ -60,6 +81,10 @@ const AUTOMATION_TOOL_NAMES = new Set([
 ]);
 
 export const DEFAULT_DISABLED_TOOL_NAMES = new Set(AUTOMATION_TOOL_NAMES);
+
+export function isAutomationToolName(toolName: string): boolean {
+  return AUTOMATION_TOOL_NAMES.has(toolName);
+}
 
 export function getBuiltinToolCategory(toolName: string): string {
   if (toolName.startsWith('skills_')) return 'skills';
@@ -99,14 +124,32 @@ export function getToolCompletionDescription(toolName: string, result?: string):
   const defaults: Record<string, string> = {
     tabs_list: 'Retrieved tab list',
     tabs_getActive: 'Got active tab',
+    get_active_tab: 'Got active tab',
     tabs_getContent: 'Read tab content',
+    get_content: 'Read tab content',
     tabs_listInteractiveElements: 'Inspected interactive elements',
+    list_interactive_elements: 'Inspected interactive elements',
+    tabs_highlight: 'Element highlighted',
+    highlight: 'Element highlighted',
+    highlight_element: 'Element highlighted',
+    tabs_hover: 'Element hovered',
+    hover: 'Element hovered',
+    hover_element: 'Element hovered',
     tabs_click: 'Element clicked',
+    click: 'Element clicked',
+    click_element: 'Element clicked',
     tabs_type: 'Typed into element',
+    type: 'Typed into element',
+    type_text: 'Typed into element',
     tabs_fillForm: 'Form filled',
+    fill_form: 'Form filled',
+    fill_form_fields: 'Form filled',
     tabs_activate: 'Tab activated',
+    activate_tab: 'Tab activated',
     tabs_create: 'Tab created',
+    create_tab: 'Tab created',
     tabs_updateUrl: 'Tab navigated',
+    navigate: 'Tab navigated',
     http_fetch: 'HTTP request complete',
     bookmarks_getAll: 'Retrieved bookmarks',
     bookmarks_search: 'Bookmarks search complete',
@@ -162,6 +205,7 @@ export function buildToolManifest(
   const manifest: ToolManifestEntry[] = [];
 
   for (const tool of builtinTools) {
+    if ((tool as any).__hidden) continue;
     const name = (tool as any).name as string;
     manifest.push({
       name,

@@ -75,7 +75,7 @@ export interface ChatMessage {
 export interface ToolStepInfo {
   label: string;
   description?: string;
-  status: 'running' | 'completed' | 'error';
+  status: 'running' | 'awaiting_approval' | 'completed' | 'error';
   durationMs?: number;
 }
 

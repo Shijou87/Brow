@@ -9,6 +9,8 @@ export {
 } from './tab-tools/tabs';
 
 export {
+  tabsHighlight,
+  tabsHover,
   tabsClick,
   tabsFillForm,
   tabsListInteractiveElements,

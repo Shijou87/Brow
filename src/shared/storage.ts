@@ -214,8 +214,9 @@ export async function saveExtensionSettings(settings: Partial<ExtensionSettings>
   return nextSettings;
 }
 
-export async function loadDisabledTools(): Promise<string[]> {
+export async function loadDisabledTools(): Promise<string[] | null> {
   const saved = await getStorageValue<unknown>(DISABLED_TOOLS_STORAGE_KEY);
+  if (saved === undefined) return null;
   return Array.isArray(saved) ? saved.filter((value): value is string => typeof value === 'string') : [];
 }
 

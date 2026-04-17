@@ -9,6 +9,8 @@ import {
   tabsFillForm,
   tabsGetActive,
   tabsGetContent,
+  tabsHighlight,
+  tabsHover,
   tabsList,
   tabsListInteractiveElements,
   tabsType,
@@ -28,6 +30,25 @@ import type { SkillRegistryEntry } from '../skills-registry';
 interface BuiltinToolDependencies {
   getVLMConfig: () => VLMConfig | null;
   findSkill: (identifier: string) => SkillRegistryEntry | null;
+}
+
+function markToolAlias(
+  toolInstance: StructuredToolInterface,
+  aliasOf: string,
+): StructuredToolInterface {
+  (toolInstance as any).__hidden = true;
+  (toolInstance as any).__aliasOf = aliasOf;
+  return toolInstance;
+}
+
+async function resolveAliasTabId(tabId?: number): Promise<number | { ok: false; error: string }> {
+  if (typeof tabId === 'number' && Number.isFinite(tabId)) return tabId;
+  const activeTab = await tabsGetActive();
+  if (activeTab?.tabId != null && activeTab.tabId >= 0) return activeTab.tabId;
+  return {
+    ok: false,
+    error: 'No active tab is available for this browser automation action.',
+  };
 }
 
 export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToolInterface[] {
@@ -67,7 +88,7 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
       JSON.stringify(await tabsListInteractiveElements(tabId, limit ?? 40), null, 2),
     {
       name: 'tabs_listInteractiveElements',
-      description: 'List visible interactive elements on a tab and return candidate CSS selectors, labels, roles, and attributes. Use this before clicking or typing.',
+      description: 'List visible interactive elements on a tab and return candidate selectors, labels, roles, and attributes. Prefer these returned selectors for buttons, links, and form fields before clicking or typing.',
       schema: z.object({
         tabId: z.number().describe('The ID of the tab to inspect'),
         limit: z.number().optional().describe('Maximum number of elements to return (default: 40, max: 100)'),
@@ -80,10 +101,58 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
       JSON.stringify(await tabsClick(tabId, selector), null, 2),
     {
       name: 'tabs_click',
-      description: 'Click an element on a specific tab using a CSS selector. Prefer selectors returned by tabs_listInteractiveElements.',
+      description: 'Click an element on a specific tab using a locator string. Prefer selectors returned by tabs_listInteractiveElements for interactive controls. Also supports simple text locators like heading="Daily Summary", text="Continue", title="Settings", or placeholder="Search".',
       schema: z.object({
         tabId: z.number().describe('The ID of the tab containing the target element'),
-        selector: z.string().describe('CSS selector for the element to click'),
+        selector: z.string().describe('Locator string for the element to click. Supports CSS selectors and simple text locators such as heading="...", text="...", title="...", or placeholder="..."'),
+      }),
+    },
+  );
+
+  const tabsHighlightTool = tool(
+    async ({
+      tabId,
+      selector,
+      message,
+      durationMs,
+    }: {
+      tabId: number;
+      selector: string;
+      message?: string;
+      durationMs?: number;
+    }) => JSON.stringify(await tabsHighlight(tabId, selector, message, durationMs), null, 2),
+    {
+      name: 'tabs_highlight',
+      description: 'Highlight an element on a specific tab using a locator string without clicking it. Prefer simple text locators for content such as heading="Daily Summary" or text="Security". Shows the Brow border overlay and optional label for a short duration.',
+      schema: z.object({
+        tabId: z.number().describe('The ID of the tab containing the target element'),
+        selector: z.string().describe('Locator string for the element to highlight. Supports CSS selectors and simple text locators such as heading="...", text="...", title="...", or placeholder="..."'),
+        message: z.string().optional().describe('Optional overlay label text. Default: a generated "Brow highlighting ..." message'),
+        durationMs: z.number().optional().describe('How long to keep the highlight visible in milliseconds. Default: 2200, clamped to 600-10000'),
+      }),
+    },
+  );
+
+  const tabsHoverTool = tool(
+    async ({
+      tabId,
+      selector,
+      message,
+      durationMs,
+    }: {
+      tabId: number;
+      selector: string;
+      message?: string;
+      durationMs?: number;
+    }) => JSON.stringify(await tabsHover(tabId, selector, message, durationMs), null, 2),
+    {
+      name: 'tabs_hover',
+      description: 'Hover an element on a specific tab using a locator string without clicking it. Useful for opening menus and navigation states. Prefer simple text locators for content such as heading="Daily Summary" or text="Security".',
+      schema: z.object({
+        tabId: z.number().describe('The ID of the tab containing the target element'),
+        selector: z.string().describe('Locator string for the element to hover. Supports CSS selectors and simple text locators such as heading="...", text="...", title="...", or placeholder="..."'),
+        message: z.string().optional().describe('Optional overlay label text. Default: a generated "Brow hovering ..." message'),
+        durationMs: z.number().optional().describe('How long to keep the visual hover preview visible in milliseconds. Default: 1400, clamped to 500-10000'),
       }),
     },
   );
@@ -93,10 +162,10 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
       JSON.stringify(await tabsType(tabId, selector, text, submit ?? false), null, 2),
     {
       name: 'tabs_type',
-      description: 'Type into an input, textarea, or contenteditable element on a specific tab using a CSS selector.',
+      description: 'Type into an input, textarea, or contenteditable element on a specific tab using a locator string. Prefer selectors returned by tabs_listInteractiveElements or simple locators like placeholder="Search".',
       schema: z.object({
         tabId: z.number().describe('The ID of the tab containing the target field'),
-        selector: z.string().describe('CSS selector for the target field'),
+        selector: z.string().describe('Locator string for the target field. Supports CSS selectors and simple text locators such as placeholder="..."'),
         text: z.string().describe('Text to place into the field'),
         submit: z.boolean().optional().describe('Press Enter / submit the form after typing'),
       }),
@@ -121,19 +190,19 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     }) => JSON.stringify(await tabsFillForm(tabId, fields, submit ?? false, submitSelector), null, 2),
     {
       name: 'tabs_fillForm',
-      description: 'Fill multiple form fields on a specific tab. Supports text inputs, textareas, contenteditable fields, selects, checkboxes, radios, and optional submit.',
+      description: 'Fill multiple form fields on a specific tab. Supports text inputs, textareas, contenteditable fields, selects, checkboxes, radios, and optional submit. Prefer selectors returned by tabs_listInteractiveElements or simple locators like placeholder="...".',
       schema: z.object({
         tabId: z.number().describe('The ID of the tab containing the form'),
         fields: z.array(
           z.object({
-            selector: z.string().describe('CSS selector for the target field'),
+            selector: z.string().describe('Locator string for the target field. Supports CSS selectors and simple text locators such as placeholder="..."'),
             value: z.union([z.string(), z.number(), z.boolean()]).describe('Value to apply. Use booleans for checkboxes/radios.'),
             mode: z.enum(['auto', 'text', 'checkbox', 'radio', 'select', 'contenteditable']).optional()
               .describe('Optional override for how to fill the field. Default: auto.'),
           }),
         ).describe('List of fields to fill'),
         submit: z.boolean().optional().describe('Submit the closest parent form after filling all fields'),
-        submitSelector: z.string().optional().describe('Optional CSS selector for a submit button to click after filling'),
+        submitSelector: z.string().optional().describe('Optional locator string for a submit button to click after filling'),
       }),
     },
   );
@@ -289,6 +358,339 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     },
   );
 
+  const clickAliasTool = markToolAlias(tool(
+    async ({ tabId, selector }: { tabId?: number; selector: string }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsClick(resolvedTabId, selector), null, 2);
+    },
+    {
+      name: 'click',
+      description: 'Alias for tabs_click.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_click');
+
+  const clickElementAliasTool = markToolAlias(tool(
+    async ({ tabId, selector }: { tabId?: number; selector: string }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsClick(resolvedTabId, selector), null, 2);
+    },
+    {
+      name: 'click_element',
+      description: 'Alias for tabs_click.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_click');
+
+  const highlightAliasTool = markToolAlias(tool(
+    async ({
+      tabId,
+      selector,
+      message,
+      durationMs,
+    }: {
+      tabId?: number;
+      selector: string;
+      message?: string;
+      durationMs?: number;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsHighlight(resolvedTabId, selector, message, durationMs), null, 2);
+    },
+    {
+      name: 'highlight',
+      description: 'Alias for tabs_highlight.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+        message: z.string().optional(),
+        durationMs: z.number().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_highlight');
+
+  const highlightElementAliasTool = markToolAlias(tool(
+    async ({
+      tabId,
+      selector,
+      message,
+      durationMs,
+    }: {
+      tabId?: number;
+      selector: string;
+      message?: string;
+      durationMs?: number;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsHighlight(resolvedTabId, selector, message, durationMs), null, 2);
+    },
+    {
+      name: 'highlight_element',
+      description: 'Alias for tabs_highlight.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+        message: z.string().optional(),
+        durationMs: z.number().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_highlight');
+
+  const hoverAliasTool = markToolAlias(tool(
+    async ({
+      tabId,
+      selector,
+      message,
+      durationMs,
+    }: {
+      tabId?: number;
+      selector: string;
+      message?: string;
+      durationMs?: number;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsHover(resolvedTabId, selector, message, durationMs), null, 2);
+    },
+    {
+      name: 'hover',
+      description: 'Alias for tabs_hover.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+        message: z.string().optional(),
+        durationMs: z.number().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_hover');
+
+  const hoverElementAliasTool = markToolAlias(tool(
+    async ({
+      tabId,
+      selector,
+      message,
+      durationMs,
+    }: {
+      tabId?: number;
+      selector: string;
+      message?: string;
+      durationMs?: number;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsHover(resolvedTabId, selector, message, durationMs), null, 2);
+    },
+    {
+      name: 'hover_element',
+      description: 'Alias for tabs_hover.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+        message: z.string().optional(),
+        durationMs: z.number().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_hover');
+
+  const typeAliasTool = markToolAlias(tool(
+    async ({ tabId, selector, text, submit }: { tabId?: number; selector: string; text: string; submit?: boolean }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsType(resolvedTabId, selector, text, submit ?? false), null, 2);
+    },
+    {
+      name: 'type',
+      description: 'Alias for tabs_type.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+        text: z.string(),
+        submit: z.boolean().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_type');
+
+  const typeTextAliasTool = markToolAlias(tool(
+    async ({ tabId, selector, text, submit }: { tabId?: number; selector: string; text: string; submit?: boolean }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsType(resolvedTabId, selector, text, submit ?? false), null, 2);
+    },
+    {
+      name: 'type_text',
+      description: 'Alias for tabs_type.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        selector: z.string(),
+        text: z.string(),
+        submit: z.boolean().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_type');
+
+  const fillFormAliasTool = markToolAlias(tool(
+    async ({
+      tabId,
+      fields,
+      submit,
+      submitSelector,
+    }: {
+      tabId?: number;
+      fields: Array<{
+        selector: string;
+        value: string | number | boolean;
+        mode?: 'auto' | 'text' | 'checkbox' | 'radio' | 'select' | 'contenteditable';
+      }>;
+      submit?: boolean;
+      submitSelector?: string;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsFillForm(resolvedTabId, fields, submit ?? false, submitSelector), null, 2);
+    },
+    {
+      name: 'fill_form',
+      description: 'Alias for tabs_fillForm.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        fields: z.array(
+          z.object({
+            selector: z.string(),
+            value: z.union([z.string(), z.number(), z.boolean()]),
+            mode: z.enum(['auto', 'text', 'checkbox', 'radio', 'select', 'contenteditable']).optional(),
+          }),
+        ),
+        submit: z.boolean().optional(),
+        submitSelector: z.string().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_fillForm');
+
+  const fillFormFieldsAliasTool = markToolAlias(tool(
+    async ({
+      tabId,
+      fields,
+      submit,
+      submitSelector,
+    }: {
+      tabId?: number;
+      fields: Array<{
+        selector: string;
+        value: string | number | boolean;
+        mode?: 'auto' | 'text' | 'checkbox' | 'radio' | 'select' | 'contenteditable';
+      }>;
+      submit?: boolean;
+      submitSelector?: string;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(await tabsFillForm(resolvedTabId, fields, submit ?? false, submitSelector), null, 2);
+    },
+    {
+      name: 'fill_form_fields',
+      description: 'Alias for tabs_fillForm.',
+      schema: z.object({
+        tabId: z.number().optional(),
+        fields: z.array(
+          z.object({
+            selector: z.string(),
+            value: z.union([z.string(), z.number(), z.boolean()]),
+            mode: z.enum(['auto', 'text', 'checkbox', 'radio', 'select', 'contenteditable']).optional(),
+          }),
+        ),
+        submit: z.boolean().optional(),
+        submitSelector: z.string().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_fillForm');
+
+  const listInteractiveElementsAliasTool = markToolAlias(tool(
+    async ({ tabId, limit }: { tabId: number; limit?: number }) =>
+      JSON.stringify(await tabsListInteractiveElements(tabId, limit ?? 40), null, 2),
+    {
+      name: 'list_interactive_elements',
+      description: 'Alias for tabs_listInteractiveElements.',
+      schema: z.object({
+        tabId: z.number(),
+        limit: z.number().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_listInteractiveElements');
+
+  const getActiveTabAliasTool = markToolAlias(tool(
+    async () => JSON.stringify(await tabsGetActive(), null, 2),
+    {
+      name: 'get_active_tab',
+      description: 'Alias for tabs_getActive.',
+      schema: z.object({}),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_getActive');
+
+  const listTabsAliasTool = markToolAlias(tool(
+    async () => JSON.stringify(await tabsList(), null, 2),
+    {
+      name: 'list_tabs',
+      description: 'Alias for tabs_list.',
+      schema: z.object({}),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_list');
+
+  const getContentAliasTool = markToolAlias(tool(
+    async ({ tabId, format }: { tabId: number; format?: string }) =>
+      JSON.stringify(await tabsGetContent(tabId, (format as 'text' | 'html') ?? 'text'), null, 2),
+    {
+      name: 'get_content',
+      description: 'Alias for tabs_getContent.',
+      schema: z.object({
+        tabId: z.number(),
+        format: z.enum(['text', 'html']).optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_getContent');
+
+  const activateTabAliasTool = markToolAlias(tool(
+    async ({ tabId }: { tabId: number }) => JSON.stringify(await tabsActivate(tabId)),
+    {
+      name: 'activate_tab',
+      description: 'Alias for tabs_activate.',
+      schema: z.object({ tabId: z.number() }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_activate');
+
+  const createTabAliasTool = markToolAlias(tool(
+    async ({ url, active }: { url: string; active?: boolean }) => JSON.stringify(await tabsCreate(url, active ?? true)),
+    {
+      name: 'create_tab',
+      description: 'Alias for tabs_create.',
+      schema: z.object({
+        url: z.string(),
+        active: z.boolean().optional(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_create');
+
+  const navigateAliasTool = markToolAlias(tool(
+    async ({ tabId, url }: { tabId: number; url: string }) => JSON.stringify(await tabsUpdateUrl(tabId, url)),
+    {
+      name: 'navigate',
+      description: 'Alias for tabs_updateUrl.',
+      schema: z.object({
+        tabId: z.number(),
+        url: z.string(),
+      }),
+    },
+  ) as unknown as StructuredToolInterface, 'tabs_updateUrl');
+
   const skillsLoadTool = tool(
     async ({ identifier }: { identifier: string }) => {
       const skill = deps.findSkill(identifier);
@@ -314,6 +716,8 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     tabsGetActiveTool as unknown as StructuredToolInterface,
     tabsGetContentTool as unknown as StructuredToolInterface,
     tabsListInteractiveElementsTool as unknown as StructuredToolInterface,
+    tabsHighlightTool as unknown as StructuredToolInterface,
+    tabsHoverTool as unknown as StructuredToolInterface,
     tabsClickTool as unknown as StructuredToolInterface,
     tabsTypeTool as unknown as StructuredToolInterface,
     tabsFillFormTool as unknown as StructuredToolInterface,
@@ -327,6 +731,23 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     tabScreenshotVlmTool as unknown as StructuredToolInterface,
     webmcpDiscoverTool as unknown as StructuredToolInterface,
     webmcpInvokeTool as unknown as StructuredToolInterface,
+    clickAliasTool,
+    clickElementAliasTool,
+    highlightAliasTool,
+    highlightElementAliasTool,
+    hoverAliasTool,
+    hoverElementAliasTool,
+    typeAliasTool,
+    typeTextAliasTool,
+    fillFormAliasTool,
+    fillFormFieldsAliasTool,
+    listInteractiveElementsAliasTool,
+    listTabsAliasTool,
+    getActiveTabAliasTool,
+    getContentAliasTool,
+    activateTabAliasTool,
+    createTabAliasTool,
+    navigateAliasTool,
     skillsLoadTool as unknown as StructuredToolInterface,
   ];
 }

@@ -7,7 +7,7 @@
 //  • ToolStepEvent tracking with callId mapping
 //  • Dynamic rebuildAgent()
 
-import type { StructuredToolInterface } from '@langchain/core/tools';
+import { tool, type StructuredToolInterface } from '@langchain/core/tools';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 
 import { createBuiltinTools } from './agent-tools/builtin-tools';
@@ -19,6 +19,7 @@ import {
   getCategoryLabel,
   getToolCompletionDescription,
   getToolDisplayLabel,
+  isAutomationToolName,
   registerMCPToolDisplayLabels,
   registerWebMCPToolDisplayLabels,
   removeMCPToolDisplayLabels,
@@ -69,14 +70,19 @@ export interface ToolStepEvent {
   stepIndex: number;
   toolName: string;
   label: string;
-  status: 'running' | 'completed';
+  status: 'running' | 'awaiting_approval' | 'completed' | 'error';
   description?: string;
   durationMs?: number;
   startTime: number;
+  inputText?: string;
+  resultText?: string;
+  errorText?: string;
+  approvalRequestId?: string;
 }
 
 export type ToolStepCallback = (steps: ToolStepEvent[]) => void;
 export type StreamTextCallback = (text: string) => void;
+export type AutomationApprovalDecision = 'allow' | 'allow_all' | 'skip';
 
 export interface AgentAPI {
   query: (query: string, history?: ChatTurn[], contextTabIds?: number[]) => Promise<string>;
@@ -84,6 +90,7 @@ export interface AgentAPI {
   offToolStep: (callback: ToolStepCallback) => void;
   onStreamText: (callback: StreamTextCallback) => void;
   offStreamText: (callback: StreamTextCallback) => void;
+  resolveAutomationApproval: (requestId: string, decision: AutomationApprovalDecision) => void;
   abort: () => void;
   isBusy: () => boolean;
   pause: () => void;
@@ -117,6 +124,99 @@ type ReactAgent = {
   stream: (input: any, config?: any) => AsyncIterable<any> | Promise<AsyncIterable<any>>;
 };
 
+function tryParseJson(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function truncateText(text: string, max = 120): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function formatToolPayload(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const parsed = tryParseJson(trimmed);
+    if (parsed !== undefined) return JSON.stringify(parsed, null, 2);
+    return trimmed;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractToolCallInput(call: unknown): string | undefined {
+  const rawArgs =
+    (call as any)?.args ??
+    (call as any)?.arguments ??
+    (call as any)?.function?.arguments;
+  return formatToolPayload(rawArgs);
+}
+
+function extractErrorText(value: unknown): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === 'string') return value.trim() || undefined;
+  if (typeof value === 'object' && typeof (value as any).message === 'string') {
+    return ((value as any).message as string).trim() || undefined;
+  }
+  const serialized = formatToolPayload(value);
+  return serialized?.trim() || undefined;
+}
+
+function analyzeToolOutcome(
+  toolName: string,
+  rawContent: unknown,
+): Pick<ToolStepEvent, 'status' | 'description' | 'resultText' | 'errorText'> {
+  const resultText = formatToolPayload(rawContent);
+  if (!resultText) {
+    return {
+      status: 'completed',
+      description: getToolCompletionDescription(toolName),
+    };
+  }
+
+  const parsed = tryParseJson(resultText);
+  let errorText: string | undefined;
+
+  if (parsed && typeof parsed === 'object') {
+    const payload = parsed as any;
+    if (payload.ok === false || payload.success === false || payload.error) {
+      errorText =
+        extractErrorText(payload.error)
+        ?? ((payload.ok === false || payload.success === false)
+          ? extractErrorText(payload.message)
+          : undefined);
+    }
+  }
+
+  if (!errorText && /^error\b[:\s-]/i.test(resultText)) {
+    errorText = resultText;
+  }
+
+  if (errorText) {
+    return {
+      status: 'error',
+      description: truncateText(errorText),
+      resultText,
+      errorText,
+    };
+  }
+
+  return {
+    status: 'completed',
+    description: getToolCompletionDescription(toolName, resultText),
+    resultText,
+  };
+}
+
 // ─── Agent Class (mirrors Agent from agent-singleton.ts) ───────────────────
 
 export class Agent implements AgentAPI {
@@ -134,12 +234,19 @@ export class Agent implements AgentAPI {
   private recursionLimit = DEFAULT_AGENT_RECURSION_LIMIT;
   private systemPrompt = DEFAULT_SYSTEM_PROMPT;
   private skillRegistry: SkillRegistryEntry[] = [];
+  private activeToolSteps: ToolStepEvent[] = [];
+  private activePendingTools = new Map<string, ToolStepEvent>();
+  private pendingAutomationApprovals = new Map<string, {
+    resolve: (decision: AutomationApprovalDecision) => void;
+    stepIndex?: number;
+  }>();
+  private allowAutomationForSession = false;
 
   constructor() {
     this.builtinTools = createBuiltinTools({
       getVLMConfig: () => this.vlmConfig,
       findSkill: (identifier) => this.findSkill(identifier),
-    });
+    }).map((builtinTool) => this.wrapAutomationToolWithApproval(builtinTool));
 
     void ensureLlm()
       .then(() => this.rebuildAgent())
@@ -355,6 +462,46 @@ export class Agent implements AgentAPI {
     this.streamTextCallbacks = this.streamTextCallbacks.filter((cb) => cb !== callback);
   }
 
+  resolveAutomationApproval(requestId: string, decision: AutomationApprovalDecision): void {
+    if (decision === 'allow_all') {
+      this.allowAutomationForSession = true;
+      for (const [pendingId, pending] of this.pendingAutomationApprovals.entries()) {
+        this.pendingAutomationApprovals.delete(pendingId);
+        const step = pending.stepIndex == null
+          ? undefined
+          : this.activeToolSteps.find((entry) => entry.stepIndex === pending.stepIndex);
+        if (step) {
+          step.approvalRequestId = undefined;
+          step.status = 'running';
+          step.description = pendingId === requestId
+            ? 'Approval granted. All automation actions allowed for this session.'
+            : 'Approval granted by session-wide allow. Executing action…';
+        }
+        pending.resolve(pendingId === requestId ? 'allow_all' : 'allow');
+      }
+      this.emitToolSteps(this.activeToolSteps);
+      return;
+    }
+
+    const pending = this.pendingAutomationApprovals.get(requestId);
+    if (!pending) return;
+    this.pendingAutomationApprovals.delete(requestId);
+
+    const step = pending.stepIndex == null
+      ? undefined
+      : this.activeToolSteps.find((entry) => entry.stepIndex === pending.stepIndex);
+    if (step) {
+      step.approvalRequestId = undefined;
+      step.status = 'running';
+      step.description = decision === 'skip'
+        ? 'Skipping action…'
+        : 'Approval granted. Executing action…';
+      this.emitToolSteps(this.activeToolSteps);
+    }
+
+    pending.resolve(decision);
+  }
+
   private emitToolSteps(steps: ToolStepEvent[]): void {
     for (const callback of this.toolStepCallbacks) {
       try {
@@ -375,8 +522,47 @@ export class Agent implements AgentAPI {
     }
   }
 
+  private isAutomationTool(tool: StructuredToolInterface): boolean {
+    const name = (tool as any).name as string;
+    const aliasOf = (tool as any).__aliasOf as string | undefined;
+    return isAutomationToolName(aliasOf ?? name);
+  }
+
+  private wrapAutomationToolWithApproval(originalTool: StructuredToolInterface): StructuredToolInterface {
+    if (!this.isAutomationTool(originalTool)) return originalTool;
+
+    const wrapped = tool(
+      async (input: unknown) => {
+        const decision = await this.waitForAutomationApproval((originalTool as any).name as string, input);
+        if (decision === 'skip') {
+          return JSON.stringify({
+            ok: false,
+            error: 'Automation action skipped by user.',
+            skippedByUser: true,
+          }, null, 2);
+        }
+        return await (originalTool as any).invoke(input);
+      },
+      {
+        name: (originalTool as any).name as string,
+        description: (originalTool as any).description ?? '',
+        schema: (originalTool as any).schema,
+      },
+    ) as unknown as StructuredToolInterface;
+
+    if ((originalTool as any).__hidden) {
+      (wrapped as any).__hidden = true;
+    }
+    if ((originalTool as any).__aliasOf) {
+      (wrapped as any).__aliasOf = (originalTool as any).__aliasOf;
+    }
+
+    return wrapped;
+  }
+
   abort(): void {
     console.log('[agent] Abort requested');
+    this.clearPendingAutomationApprovals('skip');
     if (this.queryAbortController) {
       this.queryAbortController.abort();
       this.queryAbortController = null;
@@ -412,6 +598,67 @@ export class Agent implements AgentAPI {
     return this.paused;
   }
 
+  private isToolEnabled(tool: StructuredToolInterface): boolean {
+    const name = (tool as any).name as string;
+    const aliasOf = (tool as any).__aliasOf as string | undefined;
+    if (this.disabledTools.has(name)) return false;
+    if (aliasOf && this.disabledTools.has(aliasOf)) return false;
+    return true;
+  }
+
+  private async waitForAutomationApproval(
+    toolName: string,
+    input: unknown,
+  ): Promise<'allow' | 'skip'> {
+    if (this.allowAutomationForSession) return 'allow';
+    if (!this.queryAbortController || this.queryAbortController.signal.aborted) return 'allow';
+
+    const inputText = formatToolPayload(input);
+    const step = this.activeToolSteps.find((entry) =>
+      entry.toolName === toolName
+      && entry.status === 'running'
+      && !entry.approvalRequestId
+      && (
+        (inputText && entry.inputText === inputText)
+        || (!inputText && !entry.inputText)
+      ),
+    ) ?? this.activeToolSteps.find((entry) =>
+      entry.toolName === toolName
+      && entry.status === 'running'
+      && !entry.approvalRequestId,
+    );
+
+    if (!step) return 'allow';
+
+    const requestId =
+      globalThis.crypto?.randomUUID?.()
+      ?? `approval-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    step.status = 'awaiting_approval';
+    step.description = 'Awaiting approval to run this automation action.';
+    step.approvalRequestId = requestId;
+    this.emitToolSteps(this.activeToolSteps);
+
+    const decision = await new Promise<AutomationApprovalDecision>((resolve) => {
+      this.pendingAutomationApprovals.set(requestId, {
+        resolve,
+        stepIndex: step.stepIndex,
+      });
+    });
+
+    if (decision === 'allow_all') {
+      this.allowAutomationForSession = true;
+      return 'allow';
+    }
+    return decision === 'skip' ? 'skip' : 'allow';
+  }
+
+  private clearPendingAutomationApprovals(decision: AutomationApprovalDecision): void {
+    for (const [requestId, pending] of this.pendingAutomationApprovals.entries()) {
+      this.pendingAutomationApprovals.delete(requestId);
+      pending.resolve(decision);
+    }
+  }
+
   private waitIfPaused(): Promise<void> {
     if (!this.paused) return Promise.resolve();
     return new Promise<void>((resolve) => {
@@ -444,8 +691,11 @@ export class Agent implements AgentAPI {
     ];
     let finalContent = '';
 
-    const toolSteps: ToolStepEvent[] = [];
-    const pendingTools = new Map<string, ToolStepEvent>();
+    this.activeToolSteps = [];
+    this.activePendingTools = new Map<string, ToolStepEvent>();
+    this.clearPendingAutomationApprovals('skip');
+    const toolSteps = this.activeToolSteps;
+    const pendingTools = this.activePendingTools;
     let stepCounter = 0;
 
     this.queryAbortController = new AbortController();
@@ -514,6 +764,7 @@ export class Agent implements AgentAPI {
                   label: getToolDisplayLabel(toolName),
                   status: 'running',
                   startTime: Date.now(),
+                  inputText: extractToolCallInput(call),
                 };
                 toolSteps.push(step);
                 pendingTools.set(callId, step);
@@ -532,7 +783,7 @@ export class Agent implements AgentAPI {
           for (const toolMessage of chunk.tools.messages) {
             const toolCallId = (toolMessage as any)?.tool_call_id;
             const toolName = (toolMessage as any)?.name;
-            const resultContent = typeof toolMessage.content === 'string' ? toolMessage.content : '';
+            const resultContent = (toolMessage as any)?.content;
 
             let step: ToolStepEvent | undefined;
             if (toolCallId && pendingTools.has(toolCallId)) {
@@ -549,9 +800,12 @@ export class Agent implements AgentAPI {
             }
 
             if (step) {
-              step.status = 'completed';
+              const outcome = analyzeToolOutcome(step.toolName, resultContent);
+              step.status = outcome.status;
               step.durationMs = Date.now() - step.startTime;
-              step.description = getToolCompletionDescription(step.toolName, resultContent);
+              step.description = outcome.description;
+              step.resultText = outcome.resultText;
+              step.errorText = outcome.errorText;
               this.emitToolSteps(toolSteps);
             }
           }
@@ -565,19 +819,29 @@ export class Agent implements AgentAPI {
     }
 
     for (const step of pendingTools.values()) {
-      if (step.status === 'running') {
-        step.status = 'completed';
+      if (step.status === 'running' || step.status === 'awaiting_approval') {
+        const errorText = abortSignal.aborted
+          ? 'Tool execution was interrupted before a result was received.'
+          : step.status === 'awaiting_approval'
+            ? 'Automation action was never approved.'
+            : 'Tool finished without returning a result.';
+        step.status = 'error';
         step.durationMs = Date.now() - step.startTime;
-        step.description = getToolCompletionDescription(step.toolName);
+        step.description = truncateText(errorText);
+        step.errorText = errorText;
+        step.approvalRequestId = undefined;
       }
     }
     if (toolSteps.length > 0) {
       this.emitToolSteps(toolSteps);
     }
 
+    this.clearPendingAutomationApprovals('skip');
     this.queryAbortController = null;
     this.paused = false;
     this.pauseResolve = null;
+    this.activePendingTools = new Map<string, ToolStepEvent>();
+    this.activeToolSteps = [];
 
     if (abortSignal.aborted) {
       return 'Agent turn was interrupted.';
@@ -608,7 +872,7 @@ export class Agent implements AgentAPI {
     }
 
     const tools = [...this.builtinTools, ...allWebmcpTools, ...allMcpTools]
-      .filter((tool) => !this.disabledTools.has((tool as any).name));
+      .filter((tool) => this.isToolEnabled(tool));
     console.log('[agent] Rebuilding agent graph with tools:', tools.map((tool: any) => tool.name));
 
     const prompt = buildSystemPrompt({

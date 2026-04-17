@@ -33,6 +33,14 @@ export function buildSystemPrompt(params: {
 
   let prompt = basePrompt;
 
+  prompt += '\n\n**Browser automation locator guidance:**';
+  prompt += '\n- For tabs_click, tabs_highlight, tabs_hover, tabs_type, and tabs_fillForm, the `selector` field is a locator string.';
+  prompt += '\n- Prefer selectors returned by tabs_listInteractiveElements for buttons, links, and form fields.';
+  prompt += '\n- For content targeting, prefer simple locators like `heading="Daily Summary"`, `text="Security"`, `title="Settings"`, or `placeholder="Search"`.';
+  prompt += '\n- Standard CSS selectors also work.';
+  prompt += '\n- Common Playwright-style text selectors like `h2:has-text("Daily Summary")` are supported, but the simple locators above are preferred.';
+  prompt += '\n- Avoid XPath and avoid inventing jQuery-only selectors when a returned selector or simple locator will do.';
+
   const activeSkills = skillRegistry.filter((skill) => skill.enabled);
   if (activeSkills.length > 0) {
     prompt += '\n\n**Active reusable skills:**';
@@ -87,4 +95,3 @@ export function buildSystemPrompt(params: {
 
   return prompt;
 }
-

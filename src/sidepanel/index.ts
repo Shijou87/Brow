@@ -6,6 +6,7 @@ import './style.scss';
 import { ChatView } from './chat-view';
 import type { ContextTabOption, SavedConversation } from './chat-view';
 import {
+  type AutomationApprovalDecision,
   getAgentApi,
   configureAndRebuild,
   type AgentAPI,
@@ -23,11 +24,10 @@ import {
   DEFAULT_VLM_CONFIG,
 } from '../shared/config';
 import {
-  DISABLED_TOOLS_STORAGE_KEY,
-  getStorageValue,
   loadDisabledTools,
   loadSidepanelConfig,
   saveDisabledTools,
+  getStorageValue,
 } from '../shared/storage';
 import type { WebMCPRegistryEntry, DirectLLMConfig } from '../shared/types';
 import { logInfo } from '../shared/logger';
@@ -51,6 +51,7 @@ const view = new ChatView(app, {
   onRefreshWebMCP: handleRefreshWebMCP,
   onToolToggle: handleToolToggle,
   onToolGroupToggle: handleToolGroupToggle,
+  onAutomationApprovalDecision: handleAutomationApprovalDecision,
   onConversationLoad: handleConversationLoad,
   onConversationNew: handleConversationNew,
   onConversationDelete: handleConversationDelete,
@@ -87,7 +88,7 @@ agent.restoreMCPServers().then(() => {
 
 // Restore disabled tools from storage
 void loadDisabledTools().then((saved) => {
-  if (saved.length === 0) return;
+  if (saved == null) return;
   agent.setDisabledTools(saved);
   logInfo('sidepanel', `Restored ${saved.length} disabled tools from storage`);
 });
@@ -138,6 +139,13 @@ async function handleSendMessage(message: string, contextTabIds: number[]): Prom
 function handleStopGeneration(): void {
   if (!agent.isBusy()) return;
   agent.abort();
+}
+
+function handleAutomationApprovalDecision(
+  requestId: string,
+  decision: AutomationApprovalDecision,
+): void {
+  agent.resolveAutomationApproval(requestId, decision);
 }
 
 function toContextTabOption(tab: chrome.tabs.Tab | undefined): ContextTabOption | null {

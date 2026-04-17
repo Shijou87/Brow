@@ -3,6 +3,7 @@
 
 import type { WebMCPRegistryEntry } from '../shared/types';
 import {
+  type AutomationApprovalDecision,
   type ToolStepEvent,
   type ToolManifestEntry,
 } from './agent';
@@ -53,6 +54,7 @@ export interface ChatViewCallbacks {
   onRefreshWebMCP: () => void;
   onToolToggle: (toolName: string, enabled: boolean) => void;
   onToolGroupToggle: (toolNames: string[], enabled: boolean) => void;
+  onAutomationApprovalDecision: (requestId: string, decision: AutomationApprovalDecision) => void;
   onConversationLoad: (conversation: SavedConversation) => void;
   onConversationNew: () => void;
   onConversationDelete: (id: string) => void;
@@ -112,6 +114,7 @@ export class ChatView {
   // Tool steps
   private currentToolStepsContainer: HTMLElement | null = null;
   private toolStepsCollapsed = false;
+  private expandedToolStepDetails = new Set<number>();
 
   // Composer context
   private currentContextTab: ContextTabOption | null = null;
@@ -342,40 +345,29 @@ export class ChatView {
     }
 
     const totalSteps = steps.length;
-    const completedSteps = steps.filter((s) => s.status === 'completed').length;
-    const allCompleted = completedSteps === totalSteps;
+    const finishedSteps = steps.filter((s) => this.isToolStepFinished(s)).length;
+    const errorSteps = steps.filter((s) => s.status === 'error').length;
+    const allFinished = finishedSteps === totalSteps;
+    const allSuccessful = allFinished && errorSteps === 0;
     const totalDuration = steps.reduce((sum, s) => sum + (s.durationMs ?? 0), 0);
     const durationStr = (totalDuration / 1000).toFixed(1) + 's';
 
-    const statusIcon = allCompleted ? this.checkSvg() : this.spinnerSvg();
-    const headerText = allCompleted
-      ? `Worked with ${totalSteps} tool${totalSteps > 1 ? 's' : ''} · ${durationStr}`
-      : `Working with ${totalSteps} tool${totalSteps > 1 ? 's' : ''}…`;
+    const statusIcon = !allFinished ? this.spinnerSvg() : errorSteps > 0 ? this.errorSvg() : this.checkSvg();
+    const headerText = !allFinished
+      ? `Working with ${totalSteps} tool${totalSteps > 1 ? 's' : ''}…`
+      : errorSteps > 0
+        ? `Finished ${totalSteps} tool${totalSteps > 1 ? 's' : ''} · ${errorSteps} failed · ${durationStr}`
+        : `Worked with ${totalSteps} tool${totalSteps > 1 ? 's' : ''} · ${durationStr}`;
 
-    const chevronSvg = this.toolStepsCollapsed
-      ? `<svg class="tool-steps-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>`
-      : `<svg class="tool-steps-chevron rotated" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
-
-    // Build steps list with timeline connector
     let stepsHtml = '';
     for (const step of steps) {
-      const stepIcon = step.status === 'completed' ? this.checkSvg() : this.spinnerSvg();
-      const stepDuration = step.durationMs ? `${(step.durationMs / 1000).toFixed(1)}s` : '';
-      const rawDesc = step.description || '';
-      const description = rawDesc.length > 100 ? rawDesc.slice(0, 100) + '…' : rawDesc;
-
-      stepsHtml += `
-        <div class="tool-step-item ${step.status}">
-          <div class="tool-step-connector">
-            <div class="tool-step-icon">${stepIcon}</div>
-          </div>
-          <div class="tool-step-info">
-            <span class="tool-step-label">${this.escapeHtml(step.label)}</span>
-            ${description ? `<span class="tool-step-description">${this.escapeHtml(description)}</span>` : ''}
-          </div>
-          ${stepDuration ? `<span class="tool-step-duration">· ${stepDuration}</span>` : ''}
-        </div>`;
+      stepsHtml += this.renderToolStepItem(step);
     }
+
+    const countText = errorSteps > 0
+      ? `${finishedSteps}/${totalSteps} finished · ${errorSteps} failed`
+      : `${finishedSteps}/${totalSteps} finished${allSuccessful ? ' ✓' : ''}`;
+    const chevronSvg = this.chevronSvg(!this.toolStepsCollapsed);
 
     this.currentToolStepsContainer.innerHTML = `
       <div class="tool-steps-header">
@@ -384,7 +376,7 @@ export class ChatView {
           <span class="tool-steps-header-text">${headerText}</span>
         </div>
         <div class="tool-steps-header-right">
-          <span class="tool-steps-count">${completedSteps} step${completedSteps !== 1 ? 's' : ''} ${allCompleted ? '✓' : ''}</span>
+          <span class="tool-steps-count">${countText}</span>
           ${chevronSvg}
         </div>
       </div>
@@ -396,15 +388,7 @@ export class ChatView {
       </div>
     `;
 
-    // Attach toggle listeners
-    const header = this.currentToolStepsContainer.querySelector('.tool-steps-header');
-    const toggleBtn = this.currentToolStepsContainer.querySelector('.tool-steps-toggle');
-    const toggleFn = () => {
-      this.toolStepsCollapsed = !this.toolStepsCollapsed;
-      this.updateToolSteps(steps);
-    };
-    header?.addEventListener('click', toggleFn);
-    toggleBtn?.addEventListener('click', (e) => { e.stopPropagation(); toggleFn(); });
+    this.bindLiveToolStepInteractions(steps);
 
     this.scrollToolStepsToBottom();
     this.scrollToBottom();
@@ -418,49 +402,169 @@ export class ChatView {
     if (this.currentToolStepsContainer) {
       const finalized = this.currentToolStepsContainer.cloneNode(true) as HTMLElement;
       finalized.classList.add('finalized');
-
-      const header = finalized.querySelector('.tool-steps-header') as HTMLElement | null;
-      const body = finalized.querySelector('.tool-steps-body') as HTMLElement | null;
-      const toggleBtn = finalized.querySelector('.tool-steps-toggle') as HTMLElement | null;
-      const chevronSvg = (collapsed: boolean) =>
-        `<svg class="tool-steps-chevron${collapsed ? '' : ' rotated'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
-
-      let collapsed = false;
-
-      const render = () => {
-        if (body) {
-          body.classList.toggle('collapsed', collapsed);
-          body.style.maxHeight = '';
-          body.style.opacity = '';
-          body.style.overflow = '';
-        }
-
-        finalized.querySelectorAll('.tool-steps-header .tool-steps-chevron').forEach((el) => {
-          el.classList.toggle('rotated', !collapsed);
-        });
-
-        if (toggleBtn) {
-          toggleBtn.innerHTML = `${collapsed ? 'Show details' : 'Hide details'} ${chevronSvg(collapsed)}`;
-        }
-      };
-
-      const toggle = () => {
-        collapsed = !collapsed;
-        render();
-      };
-
-      header?.addEventListener('click', toggle);
-      toggleBtn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggle();
-      });
-
-      render();
-
+      this.bindStaticToolTrackerInteractions(finalized);
       this.currentToolStepsContainer.replaceWith(finalized);
     }
     this.currentToolStepsContainer = null;
     this.toolStepsCollapsed = false;
+    this.expandedToolStepDetails.clear();
+  }
+
+  private bindLiveToolStepInteractions(steps: ToolStepEvent[]): void {
+    if (!this.currentToolStepsContainer) return;
+
+    const header = this.currentToolStepsContainer.querySelector('.tool-steps-header');
+    const toggleBtn = this.currentToolStepsContainer.querySelector('.tool-steps-toggle');
+    const toggleFn = () => {
+      this.toolStepsCollapsed = !this.toolStepsCollapsed;
+      this.updateToolSteps(steps);
+    };
+    header?.addEventListener('click', toggleFn);
+    toggleBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleFn();
+    });
+
+    this.currentToolStepsContainer.querySelectorAll<HTMLElement>('[data-step-toggle]').forEach((button) => {
+      button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const rawIndex = button.dataset.stepToggle;
+        if (!rawIndex) return;
+        const stepIndex = Number(rawIndex);
+        if (Number.isNaN(stepIndex)) return;
+        if (this.expandedToolStepDetails.has(stepIndex)) this.expandedToolStepDetails.delete(stepIndex);
+        else this.expandedToolStepDetails.add(stepIndex);
+        this.updateToolSteps(steps);
+      });
+    });
+
+    this.currentToolStepsContainer.querySelectorAll<HTMLButtonElement>('[data-approval-action]').forEach((button) => {
+      button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const requestId = button.dataset.approvalRequestId;
+        const action = button.dataset.approvalAction as AutomationApprovalDecision | undefined;
+        if (!requestId || !action) return;
+        this.callbacks.onAutomationApprovalDecision(requestId, action);
+      });
+    });
+  }
+
+  private bindStaticToolTrackerInteractions(container: HTMLElement): void {
+    const header = container.querySelector('.tool-steps-header') as HTMLElement | null;
+    const body = container.querySelector('.tool-steps-body') as HTMLElement | null;
+    const toggleBtn = container.querySelector('.tool-steps-toggle') as HTMLElement | null;
+    let collapsed = body?.classList.contains('collapsed') ?? false;
+
+    const renderHeader = () => {
+      body?.classList.toggle('collapsed', collapsed);
+      container.querySelectorAll<HTMLElement>('.tool-steps-header .tool-steps-chevron').forEach((el) => {
+        el.classList.toggle('rotated', !collapsed);
+      });
+      if (toggleBtn) {
+        toggleBtn.innerHTML = `${collapsed ? 'Show details' : 'Hide details'} ${this.chevronSvg(!collapsed)}`;
+      }
+    };
+
+    const toggle = () => {
+      collapsed = !collapsed;
+      renderHeader();
+    };
+
+    header?.addEventListener('click', toggle);
+    toggleBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle();
+    });
+
+    container.querySelectorAll<HTMLElement>('[data-step-toggle]').forEach((button) => {
+      button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const stepIndex = button.dataset.stepToggle;
+        if (!stepIndex) return;
+        const details = container.querySelector<HTMLElement>(`[data-step-details="${stepIndex}"]`);
+        if (!details) return;
+        const nextExpanded = details.classList.contains('collapsed');
+        details.classList.toggle('collapsed', !nextExpanded);
+        button.setAttribute('aria-expanded', String(nextExpanded));
+        button.innerHTML = `${nextExpanded ? 'Hide raw details' : 'Show raw details'} ${this.chevronSvg(nextExpanded, 'tool-step-detail-chevron')}`;
+      });
+    });
+
+    renderHeader();
+  }
+
+  private renderToolStepItem(step: ToolStepEvent): string {
+    const stepIcon = step.status === 'error'
+      ? this.errorSvg()
+      : step.status === 'completed'
+        ? this.checkSvg()
+        : step.status === 'awaiting_approval'
+          ? this.approvalSvg()
+          : this.spinnerSvg();
+    const stepDuration = step.durationMs ? `${(step.durationMs / 1000).toFixed(1)}s` : '';
+    const rawDesc = step.description || '';
+    const description = rawDesc.length > 140 ? `${rawDesc.slice(0, 140)}…` : rawDesc;
+    const hasDetails = Boolean(step.inputText || step.resultText || step.errorText);
+    const detailsExpanded = this.expandedToolStepDetails.has(step.stepIndex);
+    const detailSections: string[] = [];
+
+    if (step.inputText) {
+      detailSections.push(this.renderToolStepDetailSection('Input', step.inputText));
+    }
+    if (step.errorText) {
+      detailSections.push(this.renderToolStepDetailSection('Error', step.errorText, 'error'));
+    }
+    if (step.resultText && step.resultText !== step.errorText) {
+      detailSections.push(this.renderToolStepDetailSection('Result', step.resultText));
+    }
+
+    return `
+      <div class="tool-step-item ${step.status}">
+        <div class="tool-step-connector">
+          <div class="tool-step-icon">${stepIcon}</div>
+        </div>
+        <div class="tool-step-info">
+          <span class="tool-step-label">${this.escapeHtml(step.label)}</span>
+          ${description ? `<span class="tool-step-description ${step.status === 'error' ? 'error' : step.status === 'awaiting_approval' ? 'approval' : ''}">${this.escapeHtml(description)}</span>` : ''}
+          ${step.status === 'awaiting_approval' && step.approvalRequestId ? this.renderApprovalActions(step.approvalRequestId) : ''}
+          ${hasDetails ? `
+            <button class="tool-step-detail-toggle" type="button" data-step-toggle="${step.stepIndex}" aria-expanded="${detailsExpanded ? 'true' : 'false'}">
+              ${detailsExpanded ? 'Hide raw details' : 'Show raw details'} ${this.chevronSvg(detailsExpanded, 'tool-step-detail-chevron')}
+            </button>
+            <div class="tool-step-details ${detailsExpanded ? '' : 'collapsed'}" data-step-details="${step.stepIndex}">
+              ${detailSections.join('')}
+            </div>
+          ` : ''}
+        </div>
+        ${stepDuration ? `<span class="tool-step-duration">· ${stepDuration}</span>` : ''}
+      </div>`;
+  }
+
+  private renderToolStepDetailSection(
+    label: string,
+    text: string,
+    tone: 'default' | 'error' = 'default',
+  ): string {
+    return `
+      <div class="tool-step-detail-section ${tone}">
+        <span class="tool-step-detail-label">${this.escapeHtml(label)}</span>
+        <pre class="tool-step-detail-content">${this.escapeHtml(text)}</pre>
+      </div>
+    `;
+  }
+
+  private renderApprovalActions(requestId: string): string {
+    return `
+      <div class="tool-step-approval-actions">
+        <button class="tool-step-approval-btn allow" type="button" data-approval-action="allow" data-approval-request-id="${this.escapeHtml(requestId)}">Allow</button>
+        <button class="tool-step-approval-btn allow-all" type="button" data-approval-action="allow_all" data-approval-request-id="${this.escapeHtml(requestId)}">Allow All Session</button>
+        <button class="tool-step-approval-btn skip" type="button" data-approval-action="skip" data-approval-request-id="${this.escapeHtml(requestId)}">Skip</button>
+      </div>
+    `;
+  }
+
+  private isToolStepFinished(step: ToolStepEvent): boolean {
+    return step.status === 'completed' || step.status === 'error';
   }
 
   /** Render an MCP App inside a sandboxed iframe */
@@ -1590,6 +1694,8 @@ export class ChatView {
   public clearMessages(): void {
     this.messagesContainer.innerHTML = '';
     this.currentToolStepsContainer = null;
+    this.toolStepsCollapsed = false;
+    this.expandedToolStepDetails.clear();
     this.streamingElement = null;
     if (this.streamingTimer !== null) {
       clearInterval(this.streamingTimer);
@@ -2616,8 +2722,20 @@ export class ChatView {
     });
   }
 
+  private chevronSvg(expanded: boolean, className = 'tool-steps-chevron'): string {
+    return `<svg class="${className}${expanded ? ' rotated' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+  }
+
   private checkSvg(): string {
     return `<svg class="tool-step-check" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="9" stroke="#5cb582" stroke-width="2"/><path d="M6 10l3 3 5-6" stroke="#5cb582" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+
+  private errorSvg(): string {
+    return `<svg class="tool-step-error" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8.5" stroke="#d86a6a" stroke-width="2"/><path d="M7 7l6 6M13 7l-6 6" stroke="#d86a6a" stroke-width="2" stroke-linecap="round"/></svg>`;
+  }
+
+  private approvalSvg(): string {
+    return `<svg class="tool-step-approval" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8.5" stroke="#e3b341" stroke-width="2"/><path d="M10 5.6v5.1" stroke="#e3b341" stroke-width="2" stroke-linecap="round"/><circle cx="10" cy="13.9" r="1" fill="#e3b341"/></svg>`;
   }
 
   private spinnerSvg(): string {

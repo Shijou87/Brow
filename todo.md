@@ -1,0 +1,1 @@
+# UI automation using object recognition https://huggingface.co/blog/gemma4
