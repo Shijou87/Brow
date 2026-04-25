@@ -70,10 +70,17 @@ type PageAutomationAction =
 async function runPageAutomationAction(action: PageAutomationAction): Promise<unknown> {
   const ROOT_ID = '__brow-automation-overlay__';
   const STYLE_ID = '__brow-automation-style__';
-  const CURSOR_WIDTH = 28;
-  const CURSOR_HEIGHT = 34;
-  const CURSOR_HOTSPOT_X = 12;
-  const CURSOR_HOTSPOT_Y = 10;
+  type CursorFrame = 'hand' | 'push' | 'highlight' | 'pencil';
+  const CURSOR_SIZE = 40;
+  const CURSOR_WIDTH = CURSOR_SIZE;
+  const CURSOR_HEIGHT = CURSOR_SIZE;
+  const CURSOR_SPRITESHEET_URL = chrome.runtime.getURL('icons/cursors.png');
+  const CURSOR_HOTSPOT_X = 18;
+  const CURSOR_HOTSPOT_Y = 6;
+  const HIGHLIGHT_CURSOR_HOTSPOT_X = 20;
+  const HIGHLIGHT_CURSOR_HOTSPOT_Y = 20;
+  const PENCIL_CURSOR_HOTSPOT_X = 8;
+  const PENCIL_CURSOR_HOTSPOT_Y = 32;
   const BADGE_WIDTH = 300;
   const BADGE_HEIGHT = 60;
   const BADGE_CURSOR_OFFSET_X = CURSOR_WIDTH + 10;
@@ -101,16 +108,28 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
           position: fixed;
           top: 0;
           left: 0;
-          width: 28px;
-          height: 34px;
+          width: ${CURSOR_SIZE}px;
+          height: ${CURSOR_SIZE}px;
           opacity: 0;
-          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 40'%3E%3Cpath d='M11.7 2.4c1.85 0 3.35 1.5 3.35 3.35v9.1h1.2V4.9c0-1.85 1.5-3.35 3.35-3.35S22.95 3.05 22.95 4.9v9.95h1.2V7.9c0-1.85 1.5-3.35 3.35-3.35s3.35 1.5 3.35 3.35v13.45c0 8.95-5.1 15.55-13.35 15.55-5.35 0-8.4-2.95-10.05-6.7L2.65 19.35c-.8-1.75-.05-3.8 1.65-4.65 1.7-.85 3.8-.25 4.75 1.4l2.65 4.5V5.75c0-1.85 1.5-3.35 3.35-3.35Z' fill='%23d8b4fe' stroke='%237c3aed' stroke-width='2.15' stroke-linejoin='round'/%3E%3Cpath d='M15.05 14.85V6.35M22.95 14.85V7.4M24.15 14.85h-7.9' stroke='%23f5e9ff' stroke-width='1.4' stroke-linecap='round' opacity='.85'/%3E%3C/svg%3E");
+          background-image: url("${CURSOR_SPRITESHEET_URL}");
           background-repeat: no-repeat;
-          background-position: center;
-          background-size: contain;
+          background-position: 0 0;
+          background-size: ${CURSOR_SIZE * 4}px ${CURSOR_SIZE}px;
           filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.5));
           transform-origin: top left;
           transition: transform 160ms ease, opacity 140ms ease, filter 160ms ease;
+        }
+        #${ROOT_ID} .brow-automation-cursor[data-frame="hand"] {
+          background-position: 0 0;
+        }
+        #${ROOT_ID} .brow-automation-cursor[data-frame="push"] {
+          background-position: -${CURSOR_SIZE}px 0;
+        }
+        #${ROOT_ID} .brow-automation-cursor[data-frame="highlight"] {
+          background-position: -${CURSOR_SIZE * 2}px 0;
+        }
+        #${ROOT_ID} .brow-automation-cursor[data-frame="pencil"] {
+          background-position: -${CURSOR_SIZE * 3}px 0;
         }
         #${ROOT_ID} .brow-automation-cursor.visible {
           opacity: 1;
@@ -924,9 +943,16 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     positionBadge(anchorX, anchorY);
   };
 
-  const setCursorPosition = (x: number, y: number, scale = 1, rotationDeg = -8) => {
+  const setCursorPosition = (
+    x: number,
+    y: number,
+    scale = 1,
+    rotationDeg = -8,
+    frame: CursorFrame = 'hand',
+  ) => {
     const { cursor, badge } = ensureOverlay();
     cursor.classList.add('visible');
+    cursor.dataset.frame = frame;
     cursor.style.transform = `translate(${x}px, ${y}px) rotate(${rotationDeg}deg) scale(${scale})`;
     if (badge.dataset.followCursor === 'true') {
       positionBadgeNearCursor(x, y);
@@ -947,12 +973,6 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     badge.classList.add('visible');
     badge.dataset.followCursor = 'true';
     positionBadgeNearCursor(cursorX, cursorY);
-  };
-
-  const hideCursor = () => {
-    const { cursor, badge } = ensureOverlay();
-    cursor.classList.remove('visible');
-    delete badge.dataset.followCursor;
   };
 
   const showHighlight = (el: HTMLElement, emphasized = false) => {
@@ -1045,6 +1065,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     to: ClickPoint,
     durationMs: number,
     scale = 1,
+    frame: CursorFrame = 'hand',
   ) => {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
@@ -1060,7 +1081,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
         const eased = 1 - Math.pow(1 - progress, 3);
         const x = from.x + dx * eased;
         const y = from.y + dy * eased;
-        setCursorPosition(x, y, scale, -8 + tilt);
+        setCursorPosition(x, y, scale, -8 + tilt, frame);
 
         if (now - lastParticleTs >= 18) {
           const hotspotX = x + 12;
@@ -1310,19 +1331,20 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
 
     showHighlight(plan.target);
     showBadgeNearCursor(message, startX, startY);
-    setCursorPosition(startX, startY, 0.96);
+    setCursorPosition(startX, startY, 0.96, -8, 'hand');
     await sleep(60);
     await animateCursorTo(
       { x: startX, y: startY },
       { x: cursorX, y: cursorY },
       360,
       1,
+      'hand',
     );
+    setCursorPosition(cursorX, cursorY, 0.9, -8, 'push');
     createRipple(rippleX, rippleY);
     burstParticles(rippleX, rippleY, 8, 1.25);
-    setCursorPosition(cursorX, cursorY, 0.88);
     await sleep(90);
-    setCursorPosition(cursorX, cursorY, 1);
+    setCursorPosition(cursorX, cursorY, 1, -8, 'hand');
   };
 
   const previewHighlight = async (matchedEl: HTMLElement, message: string) => {
@@ -1330,8 +1352,18 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     await sleep(90);
     const plan = resolveClickPlan(matchedEl);
     if (!plan) return;
-    hideCursor();
+    const cursorX = clamp(
+      plan.point.x - HIGHLIGHT_CURSOR_HOTSPOT_X,
+      0,
+      Math.max(window.innerWidth - CURSOR_WIDTH, 0),
+    );
+    const cursorY = clamp(
+      plan.point.y - HIGHLIGHT_CURSOR_HOTSPOT_Y,
+      0,
+      Math.max(window.innerHeight - CURSOR_HEIGHT, 0),
+    );
     showHighlight(plan.target, true);
+    setCursorPosition(cursorX, cursorY, 1, 0, 'highlight');
     showBadge(message, plan.rect.right + 14, plan.rect.top - 2);
     positionBadgeNearRect(plan.rect);
     await sleep(180);
@@ -1365,16 +1397,17 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
 
     showHighlight(plan.target);
     showBadgeNearCursor(message, startX, startY);
-    setCursorPosition(startX, startY, 0.96);
+    setCursorPosition(startX, startY, 0.96, -8, 'hand');
     await sleep(60);
     await animateCursorTo(
       { x: startX, y: startY },
       { x: cursorX, y: cursorY },
       340,
       1,
+      'hand',
     );
     showHighlight(plan.target, true);
-    setCursorPosition(cursorX, cursorY, 1);
+    setCursorPosition(cursorX, cursorY, 1, -8, 'hand');
     await sleep(140);
     return plan;
   };
@@ -1384,12 +1417,20 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     await sleep(90);
     const rect = getVisibleRect(el);
     if (!rect) return;
-    const cursorX = clamp(rect.left + 8, 10, window.innerWidth - 26);
-    const cursorY = clamp(rect.top + rect.height / 2 - 8, 10, window.innerHeight - 34);
+    const cursorX = clamp(
+      rect.left + 8 - PENCIL_CURSOR_HOTSPOT_X,
+      0,
+      Math.max(window.innerWidth - CURSOR_WIDTH, 0),
+    );
+    const cursorY = clamp(
+      rect.top + rect.height / 2 - PENCIL_CURSOR_HOTSPOT_Y,
+      0,
+      Math.max(window.innerHeight - CURSOR_HEIGHT, 0),
+    );
 
     showHighlight(el);
     showBadgeNearCursor(message, cursorX, cursorY);
-    setCursorPosition(cursorX, cursorY, 1);
+    setCursorPosition(cursorX, cursorY, 1, 0, 'pencil');
     await sleep(180);
   };
 
