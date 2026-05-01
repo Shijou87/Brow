@@ -12,7 +12,12 @@ import { z } from 'zod';
 
 import type { WebMCPToolDescriptor } from '../shared/types';
 import { jsonSchemaToZod } from '../shared/json-schema';
-import { webmcpInvoke } from './tab-tools';
+import { buildToolSnapshotFields } from './agent-runtime/tool-result-snapshot';
+import { browserSnapshot, webmcpInvoke } from './tab-tools';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // ─── Factory ───────────────────────────────────────────────────────────────
 
@@ -47,7 +52,12 @@ export function createWebMCPTools(
     return tool(
       async (args: Record<string, unknown>) => {
         const result = await webmcpInvoke(tabId, descriptor.name, args);
-        return JSON.stringify(result, null, 2);
+        await sleep(250);
+        const snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
+        return JSON.stringify({
+          ...result,
+          ...buildToolSnapshotFields(snapshot),
+        }, null, 2);
       },
       {
         name: langchainName,

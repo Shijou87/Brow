@@ -13,8 +13,19 @@ export {
   tabsHover,
   tabsClick,
   tabsFillForm,
+  browserClick,
+  browserFillForm,
+  browserHover,
+  browserResolveRef,
+  browserSnapshot,
+  browserType,
   tabsListInteractiveElements,
   tabsType,
+  waitForTabSettled,
+  type BrowserActionOptions,
+  type BrowserActionResult,
+  type BrowserFormFillField,
+  type BrowserRefResolution,
   type FormFillField,
   type FormFillFieldResult,
   type FormFillMode,
@@ -22,7 +33,9 @@ export {
 } from './tab-tools/page-automation';
 
 export {
+  cropImageDataUrlToViewportRect,
   tabCaptureScreenshot,
+  tabCaptureScreenshotRegion,
   vlmQuery,
   type VLMConfig,
 } from './tab-tools/screenshot-vlm';

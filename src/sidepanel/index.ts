@@ -5,6 +5,7 @@ import './style.scss';
 
 import { ChatView } from './chat-view';
 import type { ContextTabOption, SavedConversation } from './chat-view';
+import { MCPAppHost } from './mcp-app-host';
 import {
   type AutomationApprovalDecision,
   getAgentApi,
@@ -69,10 +70,14 @@ view.enableInput();
 // Wire agent callbacks
 const agent = getAgentApi();
 const chatHistory: ChatTurn[] = [];
+const mcpAppHost = new MCPAppHost();
 
 restoreSavedSkills();
 
 agent.onToolStep((steps: ToolStepEvent[]) => view.updateToolSteps(steps));
+agent.onMCPAppRender((request) => {
+  void handleMCPAppRender(request);
+});
 
 // Provide tool manifest to ChatView
 view.setToolManifestProvider(() => agent.getToolManifest());
@@ -146,6 +151,44 @@ function handleAutomationApprovalDecision(
   decision: AutomationApprovalDecision,
 ): void {
   agent.resolveAutomationApproval(requestId, decision);
+}
+
+function getMCPAppSandboxUrl(sessionId: string): string {
+  const url = new URL(chrome.runtime.getURL('mcp-app-sandbox.html'));
+  url.searchParams.set('session', sessionId);
+  return url.toString();
+}
+
+async function handleMCPAppRender(request: import('./mcp-client').MCPAppRenderRequest): Promise<void> {
+  const container = view.renderMCPAppLoading(request);
+
+  try {
+    const resource = await mcpAppHost.loadResource(request);
+    view.renderMCPAppApproval(container, request, resource, {
+      onApprove: () => {
+        const iframe = view.renderMCPAppFrame(container, request, resource);
+        void mcpAppHost.mount(
+          request,
+          iframe,
+          getMCPAppSandboxUrl(request.id),
+          resource,
+          {
+            onSizeChange: (height) => view.resizeMCPAppFrame(iframe, height),
+            onLog: (message) => logInfo('mcp-app', message),
+            onError: (message) => view.renderMCPAppError(container, request, message),
+          },
+        ).catch((err: any) => {
+          view.renderMCPAppError(container, request, err?.message ?? String(err));
+        });
+      },
+      onSkip: () => {
+        mcpAppHost.teardown(request.id);
+        view.renderMCPAppSkipped(container, request);
+      },
+    });
+  } catch (err: any) {
+    view.renderMCPAppError(container, request, err?.message ?? String(err));
+  }
 }
 
 function toContextTabOption(tab: chrome.tabs.Tab | undefined): ContextTabOption | null {
@@ -304,6 +347,7 @@ function handleToolGroupToggle(toolNames: string[], enabled: boolean): void {
 
 function handleConversationLoad(conversation: SavedConversation): void {
   // Clear current chat and load saved conversation
+  mcpAppHost.teardownAll();
   chatHistory.length = 0;
   chatHistory.push(...conversation.chatHistory as ChatTurn[]);
   view.loadConversation(conversation);
@@ -313,6 +357,7 @@ function handleConversationLoad(conversation: SavedConversation): void {
 
 function handleConversationNew(): void {
   // Clear current chat and start fresh
+  mcpAppHost.teardownAll();
   chatHistory.length = 0;
   view.clearMessages();
   view.setCurrentConversationId(null);

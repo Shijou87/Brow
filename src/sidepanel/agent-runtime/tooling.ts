@@ -1,12 +1,27 @@
 import type { StructuredToolInterface } from '@langchain/core/tools';
-import type { MCPToolDescriptor } from '../mcp-client';
+import { toJsonSchema } from '@langchain/core/utils/json_schema';
+import {
+  getMCPToolUIResourceUri,
+  getMCPToolVisibility,
+  isToolVisibleToModel,
+  type MCPAppVisibility,
+  type MCPToolDescriptor,
+} from '../mcp-client';
 import type { WebMCPToolDescriptor } from '../../shared/types';
+
+export type ToolManifestSource = 'builtin' | 'webmcp' | 'mcp';
 
 export interface ToolManifestEntry {
   name: string;
   description: string;
   category: string;
   enabled: boolean;
+  source: ToolManifestSource;
+  sourceLabel: string;
+  title?: string;
+  inputSchema?: Record<string, unknown>;
+  visibility?: MCPAppVisibility[];
+  resourceUri?: string;
 }
 
 export interface WebMCPToolState {
@@ -21,10 +36,41 @@ export interface MCPToolState {
   name: string;
   url: string;
   authToken?: string;
+  sessionId?: string;
   status: 'disconnected' | 'connecting' | 'connected' | 'error';
   tools: MCPToolDescriptor[];
   langchainTools: StructuredToolInterface[];
   error?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isZodLikeSchema(value: unknown): boolean {
+  return isRecord(value)
+    && (typeof value.safeParse === 'function' || isRecord(value._def));
+}
+
+function normalizeToolInputSchema(value: unknown): Record<string, unknown> | undefined {
+  if (isZodLikeSchema(value)) {
+    try {
+      const converted = toJsonSchema(value as any);
+      return isRecord(converted) ? converted : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (isRecord(value)) return value;
+  if (typeof value !== 'string') return undefined;
+
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const TOOL_DISPLAY_LABELS: Record<string, string> = {
@@ -61,6 +107,12 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   bookmarks_getAll: 'Getting all bookmarks',
   bookmarks_search: 'Searching bookmarks',
   history_search: 'Searching history',
+  browser_snapshot: 'Capturing browser snapshot',
+  browser_click: 'Clicking page element',
+  browser_hover: 'Hovering page element',
+  browser_type: 'Typing into page element',
+  browser_fill_form: 'Filling form',
+  browser_visual_query: 'Querying visual region',
   tab_screenshot_vlm: 'Capturing & querying VLM',
   webmcp_discover: 'Discovering WebMCP tools',
   webmcp_invoke: 'Invoking WebMCP tool',
@@ -76,6 +128,10 @@ const AUTOMATION_TOOL_NAMES = new Set([
   'tabs_activate',
   'tabs_create',
   'tabs_updateUrl',
+  'browser_click',
+  'browser_hover',
+  'browser_type',
+  'browser_fill_form',
   'http_fetch',
   'webmcp_invoke',
 ]);
@@ -83,12 +139,12 @@ const AUTOMATION_TOOL_NAMES = new Set([
 export const DEFAULT_DISABLED_TOOL_NAMES = new Set(AUTOMATION_TOOL_NAMES);
 
 export function isAutomationToolName(toolName: string): boolean {
-  return AUTOMATION_TOOL_NAMES.has(toolName);
+  return AUTOMATION_TOOL_NAMES.has(toolName) || /^webmcp_t\d+_/.test(toolName);
 }
 
 export function getBuiltinToolCategory(toolName: string): string {
   if (toolName.startsWith('skills_')) return 'skills';
-  if (AUTOMATION_TOOL_NAMES.has(toolName)) return 'browser_automation';
+  if (isAutomationToolName(toolName)) return 'browser_automation';
   return 'browser_read';
 }
 
@@ -154,6 +210,12 @@ export function getToolCompletionDescription(toolName: string, result?: string):
     bookmarks_getAll: 'Retrieved bookmarks',
     bookmarks_search: 'Bookmarks search complete',
     history_search: 'History search complete',
+    browser_snapshot: 'Captured browser snapshot',
+    browser_click: 'Element clicked',
+    browser_hover: 'Element hovered',
+    browser_type: 'Typed into element',
+    browser_fill_form: 'Form filled',
+    browser_visual_query: 'Visual query complete',
     tab_screenshot_vlm: 'VLM analysis complete',
     webmcp_discover: 'Discovery complete',
     webmcp_invoke: 'Tool invoked',
@@ -207,23 +269,32 @@ export function buildToolManifest(
   for (const tool of builtinTools) {
     if ((tool as any).__hidden) continue;
     const name = (tool as any).name as string;
+    const category = getBuiltinToolCategory(name);
     manifest.push({
       name,
       description: (tool as any).description ?? '',
-      category: getBuiltinToolCategory(name),
+      category,
       enabled: !disabledTools.has(name),
+      source: 'builtin',
+      sourceLabel: getCategoryLabel(category),
+      title: getToolDisplayLabel(name),
+      inputSchema: normalizeToolInputSchema((tool as any).schema),
     });
   }
 
   for (const [tabId, entry] of webmcpByTab.entries()) {
     const category = `webmcp_tab_${tabId}`;
-    for (const tool of entry.tools) {
-      const name = (tool as any).name as string;
+    for (const descriptor of entry.descriptors) {
+      const name = `webmcp_t${tabId}_${descriptor.name}`;
       manifest.push({
         name,
-        description: (tool as any).description ?? '',
+        description: descriptor.description ?? '',
         category,
         enabled: !disabledTools.has(name),
+        source: 'webmcp',
+        sourceLabel: entry.title ? `WebMCP · ${entry.title}` : `WebMCP · Tab ${tabId}`,
+        title: descriptor.name,
+        inputSchema: normalizeToolInputSchema(descriptor.inputSchema),
       });
     }
   }
@@ -231,13 +302,21 @@ export function buildToolManifest(
   for (const [serverId, entry] of mcpServers.entries()) {
     if (entry.status !== 'connected') continue;
     const category = `mcp_server_${serverId}`;
-    for (const tool of entry.langchainTools) {
-      const name = (tool as any).name as string;
+    const safeId = serverId.replace(/[^a-zA-Z0-9]/g, '');
+    for (const descriptor of entry.tools) {
+      if (!isToolVisibleToModel(descriptor)) continue;
+      const name = `mcp_${safeId}_${descriptor.name}`;
       manifest.push({
         name,
-        description: (tool as any).description ?? '',
+        description: descriptor.description ?? '',
         category,
         enabled: !disabledTools.has(name),
+        source: 'mcp',
+        sourceLabel: `MCP · ${entry.name}`,
+        title: descriptor.title ?? descriptor.name,
+        inputSchema: normalizeToolInputSchema(descriptor.inputSchema),
+        visibility: getMCPToolVisibility(descriptor),
+        resourceUri: getMCPToolUIResourceUri(descriptor),
       });
     }
   }

@@ -3,6 +3,17 @@ import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 
 import {
+  attachToolSnapshotFields,
+  buildToolSnapshotFields,
+  type ToolSnapshotPayload,
+} from '../agent-runtime/tool-result-snapshot';
+import {
+  browserClick,
+  browserFillForm,
+  browserHover,
+  browserResolveRef,
+  browserSnapshot,
+  browserType,
   tabsActivate,
   tabsClick,
   tabsCreate,
@@ -17,6 +28,7 @@ import {
   tabsUpdateUrl,
   httpFetch,
   tabCaptureScreenshot,
+  tabCaptureScreenshotRegion,
   vlmQuery,
   bookmarksGetAll,
   bookmarksSearch,
@@ -24,7 +36,7 @@ import {
   webmcpDiscover,
   webmcpInvoke,
 } from '../tab-tools';
-import type { VLMConfig } from '../../shared/types';
+import type { BrowserSnapshot, BrowserViewportRect, BrowActionPostcondition, VLMConfig } from '../../shared/types';
 import type { SkillRegistryEntry } from '../skills-registry';
 
 interface BuiltinToolDependencies {
@@ -50,6 +62,62 @@ async function resolveAliasTabId(tabId?: number): Promise<number | { ok: false; 
     error: 'No active tab is available for this browser automation action.',
   };
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function appendFreshSnapshot<T extends object>(
+  tabId: number,
+  payload: T,
+  waitMs = 250,
+): Promise<ToolSnapshotPayload<T & { snapshot?: BrowserSnapshot }>> {
+  if (waitMs > 0) await sleep(waitMs);
+  const snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
+  return attachToolSnapshotFields({ ...payload, snapshot });
+}
+
+function normalizeViewportRect(input: {
+  x?: number;
+  y?: number;
+  left?: number;
+  top?: number;
+  width: number;
+  height: number;
+}): BrowserViewportRect {
+  const left = Number.isFinite(input.left) ? Number(input.left) : Number(input.x ?? 0);
+  const top = Number.isFinite(input.top) ? Number(input.top) : Number(input.y ?? 0);
+  const width = Number(input.width);
+  const height = Number(input.height);
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+  };
+}
+
+const postconditionSchema = z.array(
+  z.object({
+    type: z.enum([
+      'urlIncludes',
+      'urlMatches',
+      'titleIncludes',
+      'textVisible',
+      'textAbsent',
+      'elementVisible',
+      'elementHidden',
+      'valueEquals',
+    ]),
+    value: z.string().optional(),
+    ref: z.string().optional(),
+    snapshotId: z.string().optional(),
+  }),
+).optional().describe('Optional checks to verify after the action, such as textVisible, urlIncludes, or elementVisible.');
 
 export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToolInterface[] {
   const tabsListTool = tool(
@@ -98,7 +166,7 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
 
   const tabsClickTool = tool(
     async ({ tabId, selector }: { tabId: number; selector: string }) =>
-      JSON.stringify(await tabsClick(tabId, selector), null, 2),
+      JSON.stringify(await appendFreshSnapshot(tabId, await tabsClick(tabId, selector)), null, 2),
     {
       name: 'tabs_click',
       description: 'Click an element on a specific tab using a locator string. Prefer selectors returned by tabs_listInteractiveElements for interactive controls. Also supports simple text locators like heading="Daily Summary", text="Continue", title="Settings", or placeholder="Search".',
@@ -144,7 +212,7 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
       selector: string;
       message?: string;
       durationMs?: number;
-    }) => JSON.stringify(await tabsHover(tabId, selector, message, durationMs), null, 2),
+    }) => JSON.stringify(await appendFreshSnapshot(tabId, await tabsHover(tabId, selector, message, durationMs)), null, 2),
     {
       name: 'tabs_hover',
       description: 'Hover an element on a specific tab using a locator string without clicking it. Useful for opening menus and navigation states. Prefer simple text locators for content such as heading="Daily Summary" or text="Security".',
@@ -159,7 +227,7 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
 
   const tabsTypeTool = tool(
     async ({ tabId, selector, text, submit }: { tabId: number; selector: string; text: string; submit?: boolean }) =>
-      JSON.stringify(await tabsType(tabId, selector, text, submit ?? false), null, 2),
+      JSON.stringify(await appendFreshSnapshot(tabId, await tabsType(tabId, selector, text, submit ?? false)), null, 2),
     {
       name: 'tabs_type',
       description: 'Type into an input, textarea, or contenteditable element on a specific tab using a locator string. Prefer selectors returned by tabs_listInteractiveElements or simple locators like placeholder="Search".',
@@ -187,7 +255,7 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
       }>;
       submit?: boolean;
       submitSelector?: string;
-    }) => JSON.stringify(await tabsFillForm(tabId, fields, submit ?? false, submitSelector), null, 2),
+    }) => JSON.stringify(await appendFreshSnapshot(tabId, await tabsFillForm(tabId, fields, submit ?? false, submitSelector)), null, 2),
     {
       name: 'tabs_fillForm',
       description: 'Fill multiple form fields on a specific tab. Supports text inputs, textareas, contenteditable fields, selects, checkboxes, radios, and optional submit. Prefer selectors returned by tabs_listInteractiveElements or simple locators like placeholder="...".',
@@ -208,7 +276,8 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
   );
 
   const tabsActivateTool = tool(
-    async ({ tabId }: { tabId: number }) => JSON.stringify(await tabsActivate(tabId)),
+    async ({ tabId }: { tabId: number }) =>
+      JSON.stringify(await appendFreshSnapshot(tabId, await tabsActivate(tabId)), null, 2),
     {
       name: 'tabs_activate',
       description: 'Activate (switch to) a specific browser tab by its tabId.',
@@ -217,7 +286,10 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
   );
 
   const tabsCreateTool = tool(
-    async ({ url, active }: { url: string; active?: boolean }) => JSON.stringify(await tabsCreate(url, active ?? true)),
+    async ({ url, active }: { url: string; active?: boolean }) => {
+      const result = await tabsCreate(url, active ?? true);
+      return JSON.stringify(await appendFreshSnapshot(result.tabId, result, 800), null, 2);
+    },
     {
       name: 'tabs_create',
       description: 'Create a new browser tab with the specified URL. The agent decides appropriate URLs.',
@@ -229,7 +301,8 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
   );
 
   const tabsUpdateUrlTool = tool(
-    async ({ tabId, url }: { tabId: number; url: string }) => JSON.stringify(await tabsUpdateUrl(tabId, url)),
+    async ({ tabId, url }: { tabId: number; url: string }) =>
+      JSON.stringify(await appendFreshSnapshot(tabId, await tabsUpdateUrl(tabId, url), 800), null, 2),
     {
       name: 'tabs_updateUrl',
       description: 'Navigate an existing tab to a new URL.',
@@ -309,6 +382,294 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     },
   );
 
+  const browserSnapshotTool = tool(
+    async ({
+      tabId,
+      mode,
+      maxElements,
+      rootRef,
+      snapshotId,
+    }: {
+      tabId?: number;
+      mode?: 'compact' | 'full';
+      maxElements?: number;
+      rootRef?: string;
+      snapshotId?: string;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      const snapshot = await browserSnapshot(resolvedTabId, { mode, maxElements, rootRef, snapshotId });
+      return JSON.stringify({ ok: snapshot.ok, ...buildToolSnapshotFields(snapshot) }, null, 2);
+    },
+    {
+      name: 'browser_snapshot',
+      description: 'Capture a Playwright MCP-style DOM-derived browser snapshot for a tab. Returns compact role/name text with element refs like [ref=e12]. Use refs from this snapshot for browser_click, browser_type, browser_hover, browser_fill_form, or browser_visual_query.',
+      schema: z.object({
+        tabId: z.number().optional().describe('Tab ID to snapshot (default: active tab)'),
+        mode: z.enum(['compact', 'full']).optional().describe('compact shows meaningful/actionable nodes; full shows more visible nodes. Default: compact'),
+        maxElements: z.number().optional().describe('Maximum elements to return (default 70, max 250)'),
+        rootRef: z.string().optional().describe('Optional ref to snapshot only a subtree/region from a previous snapshot'),
+        snapshotId: z.string().optional().describe('Snapshot id that rootRef came from'),
+      }),
+    },
+  );
+
+  const browserClickTool = tool(
+    async ({
+      tabId,
+      ref,
+      snapshotId,
+      intent,
+      postconditions,
+      useActionMemory,
+    }: {
+      tabId?: number;
+      ref: string;
+      snapshotId?: string;
+      intent?: string;
+      postconditions?: BrowActionPostcondition[];
+      useActionMemory?: boolean;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(attachToolSnapshotFields(await browserClick(resolvedTabId, ref, snapshotId, {
+        intent,
+        postconditions,
+        useActionMemory,
+      })), null, 2);
+    },
+    {
+      name: 'browser_click',
+      description: 'Click an actionable element by ref from browser_snapshot. Prefer this over selector-based tabs_click. Returns a fresh snapshot after the action.',
+      schema: z.object({
+        tabId: z.number().optional().describe('Tab ID (default: active tab)'),
+        ref: z.string().describe('Element ref from browser_snapshot, e.g. "e12"'),
+        snapshotId: z.string().optional().describe('Snapshot id the ref came from; improves stale-ref recovery'),
+        intent: z.string().optional().describe('Stable natural-language action intent for Brow Action Memory, e.g. "click the Sign in button"'),
+        postconditions: postconditionSchema,
+        useActionMemory: z.boolean().optional().describe('Set false to bypass cached action replay/storage for this call'),
+      }),
+    },
+  );
+
+  const browserHoverTool = tool(
+    async ({
+      tabId,
+      ref,
+      snapshotId,
+      message,
+      durationMs,
+      intent,
+      postconditions,
+      useActionMemory,
+    }: {
+      tabId?: number;
+      ref: string;
+      snapshotId?: string;
+      message?: string;
+      durationMs?: number;
+      intent?: string;
+      postconditions?: BrowActionPostcondition[];
+      useActionMemory?: boolean;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(attachToolSnapshotFields(await browserHover(resolvedTabId, ref, snapshotId, message, durationMs, {
+        intent,
+        postconditions,
+        useActionMemory,
+      })), null, 2);
+    },
+    {
+      name: 'browser_hover',
+      description: 'Hover an actionable element by ref from browser_snapshot. Useful for menus/tooltips. Returns a fresh snapshot after the hover.',
+      schema: z.object({
+        tabId: z.number().optional().describe('Tab ID (default: active tab)'),
+        ref: z.string().describe('Element ref from browser_snapshot'),
+        snapshotId: z.string().optional().describe('Snapshot id the ref came from'),
+        message: z.string().optional().describe('Optional overlay label'),
+        durationMs: z.number().optional().describe('How long to show the hover preview'),
+        intent: z.string().optional().describe('Stable natural-language action intent for Brow Action Memory'),
+        postconditions: postconditionSchema,
+        useActionMemory: z.boolean().optional().describe('Set false to bypass cached action replay/storage for this call'),
+      }),
+    },
+  );
+
+  const browserTypeTool = tool(
+    async ({
+      tabId,
+      ref,
+      text,
+      submit,
+      snapshotId,
+      intent,
+      postconditions,
+      useActionMemory,
+    }: {
+      tabId?: number;
+      ref: string;
+      text: string;
+      submit?: boolean;
+      snapshotId?: string;
+      intent?: string;
+      postconditions?: BrowActionPostcondition[];
+      useActionMemory?: boolean;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(attachToolSnapshotFields(await browserType(resolvedTabId, ref, text, submit ?? false, snapshotId, {
+        intent,
+        postconditions,
+        useActionMemory,
+      })), null, 2);
+    },
+    {
+      name: 'browser_type',
+      description: 'Type text into an editable element by ref from browser_snapshot. Returns a fresh snapshot after typing.',
+      schema: z.object({
+        tabId: z.number().optional().describe('Tab ID (default: active tab)'),
+        ref: z.string().describe('Editable element ref from browser_snapshot'),
+        text: z.string().describe('Text to place into the field'),
+        submit: z.boolean().optional().describe('Press Enter / submit after typing'),
+        snapshotId: z.string().optional().describe('Snapshot id the ref came from'),
+        intent: z.string().optional().describe('Stable natural-language action intent for Brow Action Memory. Do not include secret field values in the intent.'),
+        postconditions: postconditionSchema,
+        useActionMemory: z.boolean().optional().describe('Set false to bypass cached action replay/storage for this call'),
+      }),
+    },
+  );
+
+  const browserFillFormTool = tool(
+    async ({
+      tabId,
+      fields,
+      submit,
+      submitRef,
+      snapshotId,
+      intent,
+      postconditions,
+      useActionMemory,
+    }: {
+      tabId?: number;
+      fields: Array<{
+        ref: string;
+        value: string | number | boolean;
+        mode?: 'auto' | 'text' | 'checkbox' | 'radio' | 'select' | 'contenteditable';
+      }>;
+      submit?: boolean;
+      submitRef?: string;
+      snapshotId?: string;
+      intent?: string;
+      postconditions?: BrowActionPostcondition[];
+      useActionMemory?: boolean;
+    }) => {
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+      return JSON.stringify(attachToolSnapshotFields(await browserFillForm(resolvedTabId, fields, submit ?? false, submitRef, snapshotId, {
+        intent,
+        postconditions,
+        useActionMemory,
+      })), null, 2);
+    },
+    {
+      name: 'browser_fill_form',
+      description: 'Fill multiple form fields by refs from browser_snapshot. Supports text inputs, contenteditable, selects, checkboxes, and radios. Returns a fresh snapshot after filling.',
+      schema: z.object({
+        tabId: z.number().optional().describe('Tab ID (default: active tab)'),
+        fields: z.array(
+          z.object({
+            ref: z.string().describe('Field ref from browser_snapshot'),
+            value: z.union([z.string(), z.number(), z.boolean()]).describe('Value to apply. Use booleans for checkboxes/radios.'),
+            mode: z.enum(['auto', 'text', 'checkbox', 'radio', 'select', 'contenteditable']).optional()
+              .describe('Optional fill mode override'),
+          }),
+        ).describe('Fields to fill by ref'),
+        submit: z.boolean().optional().describe('Submit the closest form after filling'),
+        submitRef: z.string().optional().describe('Optional submit button ref to click after filling'),
+        snapshotId: z.string().optional().describe('Snapshot id the refs came from'),
+        intent: z.string().optional().describe('Stable natural-language form intent for Brow Action Memory. Do not include secret field values in the intent.'),
+        postconditions: postconditionSchema,
+        useActionMemory: z.boolean().optional().describe('Set false to bypass cached action replay/storage for this call'),
+      }),
+    },
+  );
+
+  const browserVisualQueryTool = tool(
+    async ({
+      tabId,
+      ref,
+      snapshotId,
+      rect,
+      query,
+      paddingPx,
+    }: {
+      tabId?: number;
+      ref?: string;
+      snapshotId?: string;
+      rect?: { x?: number; y?: number; left?: number; top?: number; width: number; height: number };
+      query: string;
+      paddingPx?: number;
+    }) => {
+      const vlmConfig = deps.getVLMConfig();
+      if (!vlmConfig || !vlmConfig.baseUrl || !vlmConfig.model) {
+        return JSON.stringify({ ok: false, error: 'VLM not configured. Please set VLM endpoint, model, and API key in the config panel.' }, null, 2);
+      }
+
+      const resolvedTabId = await resolveAliasTabId(tabId);
+      if (typeof resolvedTabId !== 'number') return JSON.stringify(resolvedTabId, null, 2);
+
+      let region;
+      let resolution;
+      if (ref) {
+        resolution = await browserResolveRef(resolvedTabId, ref, snapshotId, false);
+        if (!resolution.ok || !resolution.region) {
+          return JSON.stringify({ ok: false, error: resolution.error ?? `Unable to resolve visual ref ${ref}`, resolution }, null, 2);
+        }
+        region = resolution.region;
+      } else if (rect) {
+        const snapshot = await browserSnapshot(resolvedTabId, { mode: 'compact', maxElements: 1 });
+        if (!snapshot.ok) {
+          return JSON.stringify({ ok: false, error: snapshot.error ?? 'Failed to read viewport before visual query', snapshot }, null, 2);
+        }
+        region = {
+          source: 'rect' as const,
+          rect: normalizeViewportRect(rect),
+          viewport: snapshot.viewport,
+        };
+      } else {
+        return JSON.stringify({ ok: false, error: 'Provide either ref or rect for browser_visual_query.' }, null, 2);
+      }
+
+      const screenshot = await tabCaptureScreenshotRegion(resolvedTabId, region.rect, region.viewport, paddingPx ?? 8);
+      if (!screenshot.ok || !screenshot.dataUrl) {
+        return JSON.stringify({ ok: false, error: screenshot.error ?? 'Failed to capture regional screenshot', region, resolution }, null, 2);
+      }
+
+      const result = await vlmQuery(vlmConfig, screenshot.dataUrl, query);
+      return JSON.stringify({ ...result, region, resolution }, null, 2);
+    },
+    {
+      name: 'browser_visual_query',
+      description: 'Ask the configured VLM about a specific visual region. Provide either a snapshot ref or viewport rect. This is perception-only: use it to extract/describe visual information, not to choose coordinate clicks.',
+      schema: z.object({
+        tabId: z.number().optional().describe('Tab ID (default: active tab)'),
+        ref: z.string().optional().describe('Any visible element/region ref from browser_snapshot'),
+        snapshotId: z.string().optional().describe('Snapshot id the ref came from'),
+        rect: z.object({
+          x: z.number().optional(),
+          y: z.number().optional(),
+          left: z.number().optional(),
+          top: z.number().optional(),
+          width: z.number(),
+          height: z.number(),
+        }).optional().describe('Viewport rectangle in CSS pixels if no ref is available'),
+        query: z.string().describe('Question or extraction instruction for the VLM about this region'),
+        paddingPx: z.number().optional().describe('Extra pixels around the region to include (default 8)'),
+      }),
+    },
+  );
+
   const tabScreenshotVlmTool = tool(
     async ({ tabId, query }: { tabId?: number; query: string }) => {
       const vlmConfig = deps.getVLMConfig();
@@ -346,7 +707,7 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
 
   const webmcpInvokeTool = tool(
     async ({ tabId, toolName, args }: { tabId: number; toolName: string; args?: Record<string, unknown> }) =>
-      JSON.stringify(await webmcpInvoke(tabId, toolName, args ?? {}), null, 2),
+      JSON.stringify(await appendFreshSnapshot(tabId, await webmcpInvoke(tabId, toolName, args ?? {}), 250), null, 2),
     {
       name: 'webmcp_invoke',
       description: 'Invoke a WebMCP tool on a specific tab. Must be discovered first.',
@@ -728,6 +1089,12 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     bookmarksGetAllTool as unknown as StructuredToolInterface,
     bookmarksSearchTool as unknown as StructuredToolInterface,
     historySearchTool as unknown as StructuredToolInterface,
+    browserSnapshotTool as unknown as StructuredToolInterface,
+    browserClickTool as unknown as StructuredToolInterface,
+    browserHoverTool as unknown as StructuredToolInterface,
+    browserTypeTool as unknown as StructuredToolInterface,
+    browserFillFormTool as unknown as StructuredToolInterface,
+    browserVisualQueryTool as unknown as StructuredToolInterface,
     tabScreenshotVlmTool as unknown as StructuredToolInterface,
     webmcpDiscoverTool as unknown as StructuredToolInterface,
     webmcpInvokeTool as unknown as StructuredToolInterface,

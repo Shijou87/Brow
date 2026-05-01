@@ -5,6 +5,7 @@
 
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
+import { getToolUiResourceUri } from '@modelcontextprotocol/ext-apps/app-bridge';
 import { z } from 'zod';
 import { logInfo, logError } from '../shared/logger';
 import { jsonSchemaToZod } from '../shared/json-schema';
@@ -25,6 +26,8 @@ export interface MCPServerConfig {
   url: string;
   /** Optional auth header value (Bearer token) */
   authToken?: string;
+  /** Streamable HTTP session id returned by the MCP server during initialize. */
+  sessionId?: string;
 }
 
 export interface MCPServerEntry extends MCPServerConfig {
@@ -36,7 +39,31 @@ export interface MCPServerEntry extends MCPServerConfig {
 export interface MCPToolDescriptor {
   name: string;
   description: string;
+  title?: string;
   inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
+}
+
+export type MCPAppVisibility = 'model' | 'app';
+
+export interface MCPAppRenderRequest {
+  id: string;
+  server: MCPServerConfig;
+  serverTools: MCPToolDescriptor[];
+  toolName: string;
+  toolTitle?: string;
+  toolDescription: string;
+  resourceUri: string;
+  arguments: Record<string, unknown>;
+  result: unknown;
+  descriptor: MCPToolDescriptor;
+  createdAt: number;
+}
+
+export interface CreateMCPServerToolsOptions {
+  onAppToolResult?: (request: MCPAppRenderRequest) => void;
 }
 
 // ─── JSON-RPC helpers ──────────────────────────────────────────────────────
@@ -57,30 +84,44 @@ interface JsonRpcResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 
-async function rpcCall(
+function buildRpcHeaders(authToken?: string, sessionId?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json, text/event-stream',
+    'MCP-Protocol-Version': '2024-11-05',
+  };
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+  return headers;
+}
+
+function readSessionId(res: Response): string | undefined {
+  return res.headers.get('mcp-session-id') ?? res.headers.get('Mcp-Session-Id') ?? undefined;
+}
+
+export async function rpcCall(
   url: string,
   method: string,
   params?: Record<string, unknown>,
   authToken?: string,
+  sessionId?: string,
+  onSessionId?: (sessionId: string) => void,
 ): Promise<any> {
   const id = rpcIdCounter++;
   const body: JsonRpcRequest = { jsonrpc: '2.0', id, method, params: params ?? {} };
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json, text/event-stream',
-  };
-  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-
   const res = await fetch(url, {
     method: 'POST',
-    headers,
+    headers: buildRpcHeaders(authToken, sessionId),
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     throw new Error(`MCP HTTP ${res.status}: ${res.statusText}`);
   }
+
+  const nextSessionId = readSessionId(res);
+  if (nextSessionId) onSessionId?.(nextSessionId);
 
   const contentType = res.headers.get('content-type') ?? '';
 
@@ -95,6 +136,90 @@ async function rpcCall(
     throw new Error(`MCP RPC error ${json.error.code}: ${json.error.message}`);
   }
   return json.result;
+}
+
+async function rpcNotify(
+  url: string,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  authToken?: string,
+  sessionId?: string,
+): Promise<void> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: buildRpcHeaders(authToken, sessionId),
+    body: JSON.stringify({ jsonrpc: '2.0', method, params: params ?? {} }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`MCP HTTP ${res.status}: ${res.statusText}`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+function getToolUiMeta(descriptor: MCPToolDescriptor): Record<string, unknown> | undefined {
+  return optionalRecord(descriptor._meta?.ui);
+}
+
+function normalizeVisibility(value: unknown): MCPAppVisibility[] {
+  if (!Array.isArray(value)) return ['model', 'app'];
+  const scopes = value.filter((entry): entry is MCPAppVisibility => entry === 'model' || entry === 'app');
+  return scopes.length > 0 ? [...new Set(scopes)] : ['model', 'app'];
+}
+
+export function getMCPToolVisibility(descriptor: MCPToolDescriptor): MCPAppVisibility[] {
+  return normalizeVisibility(getToolUiMeta(descriptor)?.visibility);
+}
+
+export function isToolVisibleToModel(descriptor: MCPToolDescriptor): boolean {
+  return getMCPToolVisibility(descriptor).includes('model');
+}
+
+export function isToolVisibleToApp(descriptor: MCPToolDescriptor): boolean {
+  return getMCPToolVisibility(descriptor).includes('app');
+}
+
+export function getMCPToolUIResourceUri(descriptor: MCPToolDescriptor): string | undefined {
+  try {
+    return getToolUiResourceUri(descriptor as any);
+  } catch (err: any) {
+    logError('mcp-client', `Invalid MCP App UI metadata on ${descriptor.name}: ${err?.message ?? err}`);
+    return undefined;
+  }
+}
+
+function createAppRenderRequest(
+  config: MCPServerConfig,
+  descriptor: MCPToolDescriptor,
+  descriptors: MCPToolDescriptor[],
+  args: Record<string, unknown>,
+  result: unknown,
+  resourceUri: string,
+): MCPAppRenderRequest {
+  const id =
+    globalThis.crypto?.randomUUID?.()
+    ?? `mcp-app-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+  return {
+    id,
+    server: { ...config },
+    serverTools: descriptors,
+    toolName: descriptor.name,
+    toolTitle: descriptor.title,
+    toolDescription: descriptor.description,
+    resourceUri,
+    arguments: args,
+    result,
+    descriptor,
+    createdAt: Date.now(),
+  };
 }
 
 async function parseSseResponse(res: Response, expectedId: number): Promise<any> {
@@ -135,6 +260,11 @@ async function parseSseResponse(res: Response, expectedId: number): Promise<any>
  */
 export async function mcpConnect(config: MCPServerConfig): Promise<MCPToolDescriptor[]> {
   logInfo('mcp-client', `Connecting to ${config.url}…`);
+  let sessionId = config.sessionId;
+  const rememberSessionId = (nextSessionId: string) => {
+    sessionId = nextSessionId;
+    config.sessionId = nextSessionId;
+  };
 
   // Step 1: Initialize
   try {
@@ -147,6 +277,8 @@ export async function mcpConnect(config: MCPServerConfig): Promise<MCPToolDescri
         clientInfo: { name: 'agent-webmcp', version: '1.0.0' },
       },
       config.authToken,
+      sessionId,
+      rememberSessionId,
     );
   } catch (err: any) {
     // Some servers don't require initialize — continue anyway
@@ -155,28 +287,24 @@ export async function mcpConnect(config: MCPServerConfig): Promise<MCPToolDescri
 
   // Step 2: Send initialized notification (fire-and-forget, no id)
   try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-    };
-    if (config.authToken) headers['Authorization'] = `Bearer ${config.authToken}`;
-    await fetch(config.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
-    });
-  } catch {
+    await rpcNotify(config.url, 'notifications/initialized', {}, config.authToken, sessionId);
+  } catch (err: any) {
     // Optional notification
+    logInfo('mcp-client', `Initialized notification skipped or failed: ${err.message}`);
   }
 
   // Step 3: List tools
-  const result = await rpcCall(config.url, 'tools/list', {}, config.authToken);
+  const result = await rpcCall(config.url, 'tools/list', {}, config.authToken, sessionId, rememberSessionId);
   const rawTools: any[] = result?.tools ?? [];
 
   const tools: MCPToolDescriptor[] = rawTools.map((t: any) => ({
     name: t.name ?? 'unknown',
     description: t.description ?? '',
-    inputSchema: t.inputSchema ?? undefined,
+    title: typeof t.title === 'string' ? t.title : undefined,
+    inputSchema: optionalRecord(t.inputSchema),
+    outputSchema: optionalRecord(t.outputSchema),
+    annotations: optionalRecord(t.annotations),
+    _meta: optionalRecord(t._meta),
   }));
 
   logInfo('mcp-client', `Connected to ${config.name}: ${tools.length} tools discovered`);
@@ -197,8 +325,31 @@ export async function mcpCallTool(
     'tools/call',
     { name: toolName, arguments: args },
     config.authToken,
+    config.sessionId,
   );
   return result;
+}
+
+export async function mcpReadResource(
+  config: MCPServerConfig,
+  uri: string,
+): Promise<unknown> {
+  logInfo('mcp-client', `Reading resource ${uri} on ${config.name}`);
+  return rpcCall(config.url, 'resources/read', { uri }, config.authToken, config.sessionId);
+}
+
+export async function mcpListResources(
+  config: MCPServerConfig,
+  params: Record<string, unknown> = {},
+): Promise<unknown> {
+  return rpcCall(config.url, 'resources/list', params, config.authToken, config.sessionId);
+}
+
+export async function mcpListResourceTemplates(
+  config: MCPServerConfig,
+  params: Record<string, unknown> = {},
+): Promise<unknown> {
+  return rpcCall(config.url, 'resources/templates/list', params, config.authToken, config.sessionId);
 }
 
 // ─── LangChain Tool Factory ───────────────────────────────────────────────
@@ -210,8 +361,9 @@ export async function mcpCallTool(
 export function createMCPServerTools(
   config: MCPServerConfig,
   descriptors: MCPToolDescriptor[],
+  options: CreateMCPServerToolsOptions = {},
 ): StructuredToolInterface[] {
-  return descriptors.map((descriptor) => {
+  return descriptors.filter(isToolVisibleToModel).map((descriptor) => {
     const zodSchema = descriptor.inputSchema
       ? jsonSchemaToZod(descriptor.inputSchema)
       : z.object({});
@@ -222,11 +374,17 @@ export function createMCPServerTools(
     return tool(
       async (args: Record<string, unknown>) => {
         const result = await mcpCallTool(config, descriptor.name, args);
+        const resourceUri = getMCPToolUIResourceUri(descriptor);
+        if (resourceUri) {
+          options.onAppToolResult?.(
+            createAppRenderRequest(config, descriptor, descriptors, args, result, resourceUri),
+          );
+        }
         return JSON.stringify(result, null, 2);
       },
       {
         name: langchainName,
-        description: `[MCP · ${config.name}] ${descriptor.description}`,
+        description: `[MCP · ${config.name}] ${descriptor.title ?? descriptor.description}`,
         schema: zodSchema,
       },
     ) as unknown as StructuredToolInterface;

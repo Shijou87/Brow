@@ -33,13 +33,14 @@ export function buildSystemPrompt(params: {
 
   let prompt = basePrompt;
 
-  prompt += '\n\n**Browser automation locator guidance:**';
-  prompt += '\n- For tabs_click, tabs_highlight, tabs_hover, tabs_type, and tabs_fillForm, the `selector` field is a locator string.';
-  prompt += '\n- Prefer selectors returned by tabs_listInteractiveElements for buttons, links, and form fields.';
-  prompt += '\n- For content targeting, prefer simple locators like `heading="Daily Summary"`, `text="Security"`, `title="Settings"`, or `placeholder="Search"`.';
-  prompt += '\n- Standard CSS selectors also work.';
-  prompt += '\n- Common Playwright-style text selectors like `h2:has-text("Daily Summary")` are supported, but the simple locators above are preferred.';
-  prompt += '\n- Avoid XPath and avoid inventing jQuery-only selectors when a returned selector or simple locator will do.';
+  prompt += '\n\n**Browser automation guidance:**';
+  prompt += '\n- Prefer WebMCP page tools when a relevant one is available; they are the semantic page API.';
+  prompt += '\n- Otherwise prefer Playwright MCP-style browser refs: use browser_snapshot, then browser_click/browser_type/browser_hover/browser_fill_form with the returned `ref` values.';
+  prompt += '\n- Refs are valid for the snapshot they came from. If a ref is stale, the browser tools will safely rematch only when there is exactly one confident target; otherwise take a fresh browser_snapshot.';
+  prompt += '\n- When an action is likely to repeat, pass a short stable `intent` to browser_click/browser_type/browser_hover/browser_fill_form so Brow Action Memory can replay it later. Keep secrets and dynamic values out of `intent`; put values only in tool value fields.';
+  prompt += '\n- For important actions, include simple `postconditions` such as textVisible, urlIncludes, or elementVisible so Brow can detect when an action technically ran but did not complete the task.';
+  prompt += '\n- browser_visual_query is perception-only. Use it to extract visual information from a ref or viewport rect, then verify actions against browser_snapshot refs.';
+  prompt += '\n- Selector-based tabs_* tools remain fallback compatibility tools. If you must use them, prefer selectors returned by tabs_listInteractiveElements or simple locators like `heading="Daily Summary"`, `text="Security"`, `title="Settings"`, or `placeholder="Search"`.';
 
   const activeSkills = skillRegistry.filter((skill) => skill.enabled);
   if (activeSkills.length > 0) {

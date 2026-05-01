@@ -28,7 +28,13 @@ import {
   upsertSavedConversation,
 } from './chat-view/conversation-store';
 import type { ContextTabOption, SavedConversation } from './chat-view/types';
-import type { MCPServerEntry } from './mcp-client';
+import {
+  isToolVisibleToModel,
+  type MCPAppRenderRequest,
+  type MCPServerEntry,
+  type MCPToolDescriptor,
+} from './mcp-client';
+import type { MCPAppLoadedResource } from './mcp-app-host';
 import {
   formatSkillTagsInput,
   parseSkillTagsInput,
@@ -115,6 +121,8 @@ export class ChatView {
   private currentToolStepsContainer: HTMLElement | null = null;
   private toolStepsCollapsed = false;
   private expandedToolStepDetails = new Set<number>();
+  private expandedToolCards = new Set<string>();
+  private pendingToolCardFocusKey: string | null = null;
 
   // Composer context
   private currentContextTab: ContextTabOption | null = null;
@@ -567,25 +575,141 @@ export class ChatView {
     return step.status === 'completed' || step.status === 'error';
   }
 
-  /** Render an MCP App inside a sandboxed iframe */
-  public renderMCPApp(appPayload: Record<string, unknown>): void {
+  /** Create an inert MCP App card while Brow fetches and validates the UI resource. */
+  public renderMCPAppLoading(request: MCPAppRenderRequest): HTMLElement {
+    this.addSystemMessage(`MCP App View requested: ${request.toolTitle ?? request.toolName}`);
+
     const wrapper = document.createElement('div');
-    wrapper.className = 'mcp-app-container';
-
-    const iframe = document.createElement('iframe');
-    iframe.sandbox.add('allow-scripts');
-    iframe.className = 'mcp-app-iframe';
-
-    // Set content via srcdoc if HTML is provided
-    if (typeof appPayload.html === 'string') {
-      iframe.srcdoc = appPayload.html;
-    } else if (typeof appPayload.url === 'string') {
-      iframe.src = appPayload.url;
-    }
-
-    wrapper.appendChild(iframe);
+    wrapper.className = 'mcp-app-container mcp-app-loading';
+    wrapper.dataset.mcpAppId = request.id;
+    wrapper.innerHTML = `
+      <div class="mcp-app-card">
+        ${this.renderMCPAppHeader(request)}
+        <div class="mcp-app-status">
+          <span class="mcp-app-spinner" aria-hidden="true"></span>
+          <span>Inspecting app resource...</span>
+        </div>
+      </div>`;
     this.messagesContainer.appendChild(wrapper);
     this.scrollToBottom();
+    return wrapper;
+  }
+
+  public renderMCPAppApproval(
+    container: HTMLElement,
+    request: MCPAppRenderRequest,
+    resource: MCPAppLoadedResource,
+    callbacks: { onApprove: () => void; onSkip: () => void },
+  ): void {
+    container.className = 'mcp-app-container mcp-app-pending';
+    container.innerHTML = `
+      <div class="mcp-app-card">
+        ${this.renderMCPAppHeader(request)}
+        <div class="mcp-app-meta-grid">
+          <div><span>Server</span><strong>${this.escapeHtml(request.server.name)}</strong></div>
+          <div><span>Resource</span><strong>${this.escapeHtml(resource.uri)}</strong></div>
+          <div><span>Permissions</span><strong>${this.escapeHtml(this.formatMCPAppPermissions(resource.permissions))}</strong></div>
+          <div><span>CSP</span><strong>${this.escapeHtml(this.formatMCPAppCsp(resource.csp))}</strong></div>
+        </div>
+        <div class="mcp-app-actions">
+          <button class="mcp-app-approve-btn" type="button">Render App</button>
+          <button class="mcp-app-skip-btn" type="button">Skip</button>
+        </div>
+      </div>`;
+
+    container.querySelector<HTMLButtonElement>('.mcp-app-approve-btn')?.addEventListener('click', () => {
+      callbacks.onApprove();
+    });
+    container.querySelector<HTMLButtonElement>('.mcp-app-skip-btn')?.addEventListener('click', () => {
+      callbacks.onSkip();
+    });
+    this.scrollToBottom();
+  }
+
+  public renderMCPAppFrame(
+    container: HTMLElement,
+    request: MCPAppRenderRequest,
+    resource: MCPAppLoadedResource,
+  ): HTMLIFrameElement {
+    container.className = `mcp-app-container mcp-app-live${resource.prefersBorder === false ? ' borderless' : ''}`;
+    container.innerHTML = `
+      <div class="mcp-app-live-header">
+        ${this.renderMCPAppTitle(request)}
+        <span>${this.escapeHtml(request.server.name)}</span>
+      </div>
+      <div class="mcp-app-frame-shell"></div>`;
+
+    const iframe = document.createElement('iframe');
+    iframe.className = 'mcp-app-iframe';
+    iframe.title = `MCP App View: ${request.toolTitle ?? request.toolName}`;
+    iframe.style.height = '260px';
+
+    container.querySelector('.mcp-app-frame-shell')?.appendChild(iframe);
+    this.scrollToBottom();
+    return iframe;
+  }
+
+  public resizeMCPAppFrame(iframe: HTMLIFrameElement, height: number): void {
+    iframe.style.height = `${height}px`;
+    this.scrollToBottom();
+  }
+
+  public renderMCPAppError(
+    container: HTMLElement,
+    request: MCPAppRenderRequest,
+    message: string,
+  ): void {
+    container.className = 'mcp-app-container mcp-app-error';
+    container.innerHTML = `
+      <div class="mcp-app-card">
+        ${this.renderMCPAppHeader(request)}
+        <div class="mcp-app-error-text">${this.escapeHtml(message)}</div>
+      </div>`;
+    this.scrollToBottom();
+  }
+
+  public renderMCPAppSkipped(container: HTMLElement, request: MCPAppRenderRequest): void {
+    container.className = 'mcp-app-container mcp-app-skipped';
+    container.innerHTML = `
+      <div class="mcp-app-card">
+        ${this.renderMCPAppHeader(request)}
+        <div class="mcp-app-status">Skipped. The app HTML was not rendered.</div>
+      </div>`;
+    this.scrollToBottom();
+  }
+
+  private renderMCPAppHeader(request: MCPAppRenderRequest): string {
+    return `
+      <div class="mcp-app-header">
+        <div>
+          ${this.renderMCPAppTitle(request)}
+          <p>${this.escapeHtml(request.toolDescription || 'Interactive MCP App View')}</p>
+        </div>
+        <span>MCP App</span>
+      </div>`;
+  }
+
+  private renderMCPAppTitle(request: MCPAppRenderRequest): string {
+    return `<strong>${this.escapeHtml(request.toolTitle ?? request.toolName)}</strong>`;
+  }
+
+  private formatMCPAppPermissions(permissions: MCPAppLoadedResource['permissions']): string {
+    if (!permissions) return 'None requested';
+    const entries: string[] = [];
+    if (permissions.camera) entries.push('camera');
+    if (permissions.microphone) entries.push('microphone');
+    if (permissions.geolocation) entries.push('location');
+    if (permissions.clipboardWrite) entries.push('clipboard write');
+    return entries.length > 0 ? entries.join(', ') : 'None requested';
+  }
+
+  private formatMCPAppCsp(csp: MCPAppLoadedResource['csp']): string {
+    if (!csp) return 'No external domains';
+    const parts: string[] = [];
+    if (csp.connectDomains?.length) parts.push(`connect ${csp.connectDomains.length}`);
+    if (csp.resourceDomains?.length) parts.push(`resource ${csp.resourceDomains.length}`);
+    if (csp.frameDomains?.length) parts.push(`frame ${csp.frameDomains.length}`);
+    return parts.length > 0 ? parts.join(' / ') : 'No external domains';
   }
 
   // ─── Build ──────────────────────────────────────────────────────────────
@@ -1228,6 +1352,193 @@ export class ChatView {
     this.toolManifestProvider = provider;
   }
 
+  private toggleToolCard(key: string): void {
+    if (this.expandedToolCards.has(key)) {
+      this.expandedToolCards.delete(key);
+      return;
+    }
+    this.expandedToolCards.add(key);
+  }
+
+  private openToolInToolsPanel(toolName: string): void {
+    const key = `tools:${toolName}`;
+    this.expandedToolCards.add(key);
+    this.pendingToolCardFocusKey = key;
+    this.setActiveSurface('tools');
+    this.focusPendingToolCard();
+  }
+
+  private focusPendingToolCard(): void {
+    const key = this.pendingToolCardFocusKey;
+    if (!key) return;
+
+    requestAnimationFrame(() => {
+      const target = Array.from(this.toolsPanel.querySelectorAll<HTMLElement>('[data-tool-card-key]'))
+        .find((el) => el.dataset.toolCardKey === key);
+      if (!target) return;
+      this.pendingToolCardFocusKey = null;
+      target.closest('.tool-card')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      target.focus({ preventScroll: true });
+    });
+  }
+
+  private getToolTypeLabel(toolEntry: ToolManifestEntry): string {
+    if (toolEntry.source === 'mcp') return 'MCP';
+    if (toolEntry.source === 'webmcp') return 'WebMCP';
+    return getCategoryLabel(toolEntry.category);
+  }
+
+  private renderGlobalToolCard(toolEntry: ToolManifestEntry): string {
+    const key = `tools:${toolEntry.name}`;
+    const expanded = this.expandedToolCards.has(key);
+    const title = toolEntry.title || toolEntry.name;
+    const description = toolEntry.description || 'No description provided.';
+    const typeLabel = this.getToolTypeLabel(toolEntry);
+
+    return `
+      <div class="tools-item tool-card${expanded ? ' expanded' : ''}">
+        <div class="tools-item-row">
+          <label class="tools-toggle-switch" title="${toolEntry.enabled ? 'Disable tool' : 'Enable tool'}">
+            <input type="checkbox" data-tool="${this.escapeHtml(toolEntry.name)}" ${toolEntry.enabled ? 'checked' : ''} />
+            <span class="tools-toggle-slider"></span>
+          </label>
+          <button class="tool-card-summary" type="button" data-tool-card-key="${this.escapeHtml(key)}" aria-expanded="${expanded}">
+            <span class="tool-card-copy">
+              <span class="tool-card-title-row">
+                <span class="tools-item-name">${this.escapeHtml(title)}</span>
+                <span class="tool-card-badge type">${this.escapeHtml(typeLabel)}</span>
+              </span>
+            </span>
+            <span class="tools-item-arrow" aria-hidden="true">&rsaquo;</span>
+          </button>
+        </div>
+        ${expanded ? this.renderToolCardDetails({
+          title,
+          technicalName: toolEntry.name,
+          description,
+          sourceLabel: toolEntry.sourceLabel,
+          inputSchema: toolEntry.inputSchema,
+          visibility: toolEntry.visibility,
+          resourceUri: toolEntry.resourceUri,
+        }) : ''}
+      </div>`;
+  }
+
+  private renderMCPToolCard(server: MCPServerEntry, toolDescriptor: MCPToolDescriptor): string {
+    const title = toolDescriptor.title || toolDescriptor.name;
+    const safeId = server.id.replace(/[^a-zA-Z0-9]/g, '');
+    const toolName = `mcp_${safeId}_${toolDescriptor.name}`;
+
+    return `
+      <div class="mcp-tool-card mini">
+        <button class="mcp-tool-card-summary" type="button" data-tool-name="${this.escapeHtml(toolName)}" title="Open in Tools">
+          <span class="mcp-tool-mini-title">${this.escapeHtml(title)}</span>
+        </button>
+      </div>`;
+  }
+
+  private renderToolCardBadges(
+    sourceLabel: string,
+    visibility?: Array<'model' | 'app'>,
+    resourceUri?: string,
+  ): string {
+    const badges = [`<span class="tool-card-badge source">${this.escapeHtml(sourceLabel)}</span>`];
+    for (const scope of visibility ?? []) {
+      badges.push(`<span class="tool-card-badge">${this.escapeHtml(scope)}</span>`);
+    }
+    if (resourceUri) {
+      badges.push('<span class="tool-card-badge ui">UI</span>');
+    }
+    return `<span class="tool-card-badges">${badges.join('')}</span>`;
+  }
+
+  private renderToolCardDetails(details: {
+    title: string;
+    technicalName: string;
+    description: string;
+    sourceLabel: string;
+    inputSchema?: Record<string, unknown>;
+    visibility?: Array<'model' | 'app'>;
+    resourceUri?: string;
+  }): string {
+    const visibility = details.visibility?.length ? details.visibility.join(' + ') : undefined;
+    const resourceHtml = details.resourceUri
+      ? `<div class="tool-card-meta-row"><span>UI Resource</span><strong>${this.escapeHtml(details.resourceUri)}</strong></div>`
+      : '';
+    const visibilityHtml = visibility
+      ? `<div class="tool-card-meta-row"><span>Visibility</span><strong>${this.escapeHtml(visibility)}</strong></div>`
+      : '';
+
+    return `
+      <div class="tool-card-details">
+        <div class="tool-card-detail-section">
+          <span class="tool-card-detail-label">Description</span>
+          <p>${this.escapeHtml(details.description || 'No description provided.')}</p>
+        </div>
+        <div class="tool-card-meta-grid">
+          <div class="tool-card-meta-row"><span>Source</span><strong>${this.escapeHtml(details.sourceLabel)}</strong></div>
+          <div class="tool-card-meta-row"><span>Name</span><strong>${this.escapeHtml(details.technicalName)}</strong></div>
+          ${visibilityHtml}
+          ${resourceHtml}
+        </div>
+        <div class="tool-card-detail-section">
+          <span class="tool-card-detail-label">Arguments</span>
+          ${this.renderToolInputParameters(details.inputSchema)}
+        </div>
+      </div>`;
+  }
+
+  private renderToolInputParameters(inputSchema?: Record<string, unknown>): string {
+    const properties = this.asRecord(inputSchema?.properties);
+    if (!properties || Object.keys(properties).length === 0) {
+      return '<div class="tool-card-empty-detail">No arguments.</div>';
+    }
+
+    const required = new Set(
+      Array.isArray(inputSchema?.required)
+        ? inputSchema.required.filter((name): name is string => typeof name === 'string')
+        : [],
+    );
+
+    return `
+      <div class="tool-param-list">
+        ${Object.entries(properties).map(([name, schema]) => {
+          const prop = this.asRecord(schema);
+          const label = prop?.title && typeof prop.title === 'string' ? prop.title : name;
+          const description = prop?.description && typeof prop.description === 'string' ? prop.description : '';
+          return `
+            <div class="tool-param">
+              <div class="tool-param-heading">
+                <span class="tool-param-name">${this.escapeHtml(label)}</span>
+                <span class="tool-param-type">${this.escapeHtml(this.formatSchemaType(prop))}</span>
+                <span class="tool-param-required ${required.has(name) ? 'required' : ''}">${required.has(name) ? 'Required' : 'Optional'}</span>
+              </div>
+              ${label !== name ? `<div class="tool-param-key">${this.escapeHtml(name)}</div>` : ''}
+              ${description ? `<div class="tool-param-description">${this.escapeHtml(description)}</div>` : ''}
+            </div>`;
+        }).join('')}
+      </div>`;
+  }
+
+  private formatSchemaType(schema?: Record<string, unknown>): string {
+    if (!schema) return 'value';
+    const rawType = schema.type;
+    const type = Array.isArray(rawType)
+      ? rawType.filter((value): value is string => typeof value === 'string').join(' | ')
+      : typeof rawType === 'string' ? rawType : 'value';
+    const enumValues = Array.isArray(schema.enum)
+      ? schema.enum.slice(0, 4).map((value) => this.truncateText(String(value), 24)).join(' | ')
+      : '';
+    const enumSuffix = Array.isArray(schema.enum) && schema.enum.length > 4 ? ' | ...' : '';
+    return enumValues ? `${type}: ${enumValues}${enumSuffix}` : type;
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> | undefined {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
+  }
+
   private createToolsPanel(): HTMLElement {
     const panel = document.createElement('div');
     panel.className = 'tools-panel';
@@ -1255,8 +1566,8 @@ export class ChatView {
       groups.set(entry.category, list);
     }
 
-    const container = this.toolsPanel.querySelector('.tools-groups-container')!;
-    container.innerHTML = '';
+      const container = this.toolsPanel.querySelector('.tools-groups-container')!;
+      container.innerHTML = '';
 
     for (const [category, tools] of groups.entries()) {
       const enabledCount = tools.filter(t => t.enabled).length;
@@ -1282,18 +1593,7 @@ export class ChatView {
         </div>
         ${warningHtml}
         <div class="tools-group-items">
-          ${tools.map(t => `
-            <div class="tools-item">
-              <label class="tools-toggle-switch">
-                <input type="checkbox" data-tool="${this.escapeHtml(t.name)}" ${t.enabled ? 'checked' : ''} />
-                <span class="tools-toggle-slider"></span>
-              </label>
-              <div class="tools-item-info">
-                <span class="tools-item-name">${this.escapeHtml(t.name)}</span>
-                <span class="tools-item-arrow">&rsaquo;</span>
-              </div>
-            </div>
-          `).join('')}
+          ${tools.map(t => this.renderGlobalToolCard(t)).join('')}
         </div>`;
 
       // Group toggle button
@@ -1316,8 +1616,20 @@ export class ChatView {
         });
       });
 
+      groupEl.querySelectorAll<HTMLButtonElement>('.tool-card-summary').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const key = btn.dataset.toolCardKey;
+          if (!key) return;
+          this.toggleToolCard(key);
+          this.refreshToolsPanel();
+        });
+      });
+
       container.appendChild(groupEl);
     }
+
+    this.focusPendingToolCard();
   }
 
   // ─── Config Panel ───────────────────────────────────────────────────────
@@ -1481,9 +1793,14 @@ export class ChatView {
 
       // Build tool list for connected servers
       let toolsHtml = '';
-      if (server.status === 'connected' && server.tools.length > 0) {
+      const visibleTools = server.tools.filter(isToolVisibleToModel);
+      if (server.status === 'connected' && visibleTools.length > 0) {
         toolsHtml = `<div class="mcp-server-tools">
-          ${server.tools.map(t => `<span class="mcp-tool-chip" title="${this.escapeHtml(t.description)}">${this.escapeHtml(t.name)}</span>`).join('')}
+          ${visibleTools.map(t => this.renderMCPToolCard(server, t)).join('')}
+        </div>`;
+      } else if (server.status === 'connected') {
+        toolsHtml = `<div class="mcp-server-tools empty">
+          <span>No model-visible tools discovered</span>
         </div>`;
       }
 
@@ -1492,11 +1809,11 @@ export class ChatView {
           <div class="mcp-server-info">
             <span class="status-dot ${statusDot}"></span>
             <div class="mcp-server-details">
-              <span class="mcp-server-name">${this.escapeHtml(server.name)}</span>
-              <span class="mcp-server-url">${this.escapeHtml(server.url)}</span>
-              <span class="mcp-server-status">${statusText}</span>
-            </div>
-          </div>
+	              <span class="mcp-server-name">${this.escapeHtml(server.name)}</span>
+	              <span class="mcp-server-url">${this.escapeHtml(server.url)}</span>
+	              <span class="mcp-server-status">${this.escapeHtml(statusText)}</span>
+	            </div>
+	          </div>
           <div class="mcp-server-actions">
             <button class="mcp-reconnect-btn" title="Reconnect" data-id="${server.id}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="12" height="12">
@@ -1535,6 +1852,15 @@ export class ChatView {
         this.callbacks.onMCPServerRemove(server.id);
         this.refreshMCPPanel();
         if (this.toolManifestProvider) this.refreshToolsPanel();
+      });
+
+      el.querySelectorAll<HTMLButtonElement>('.mcp-tool-card-summary').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const toolName = btn.dataset.toolName;
+          if (!toolName) return;
+          this.openToolInToolsPanel(toolName);
+        });
       });
 
       container.appendChild(el);

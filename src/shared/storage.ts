@@ -18,6 +18,7 @@ export const DISABLED_TOOLS_STORAGE_KEY = 'agent-webmcp-disabled-tools';
 export const CONVERSATIONS_STORAGE_KEY = 'agent-webmcp-conversations';
 export const MCP_SERVERS_STORAGE_KEY = 'agent-webmcp-mcp-servers';
 export const SKILL_REGISTRY_STORAGE_KEY = 'agent-webmcp-skills';
+export const BROW_ACTION_MEMORY_STORAGE_KEY = 'agent-webmcp-action-memory';
 
 export interface SidepanelConfigRecord {
   activeMode: LLMProviderMode;

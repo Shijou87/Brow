@@ -42,6 +42,7 @@ import {
   loadSavedServers,
   saveServers,
   generateServerId,
+  type MCPAppRenderRequest,
   type MCPServerConfig,
   type MCPServerEntry,
 } from './mcp-client';
@@ -82,6 +83,7 @@ export interface ToolStepEvent {
 
 export type ToolStepCallback = (steps: ToolStepEvent[]) => void;
 export type StreamTextCallback = (text: string) => void;
+export type MCPAppRenderCallback = (request: MCPAppRenderRequest) => void;
 export type AutomationApprovalDecision = 'allow' | 'allow_all' | 'skip';
 
 export interface AgentAPI {
@@ -90,6 +92,8 @@ export interface AgentAPI {
   offToolStep: (callback: ToolStepCallback) => void;
   onStreamText: (callback: StreamTextCallback) => void;
   offStreamText: (callback: StreamTextCallback) => void;
+  onMCPAppRender: (callback: MCPAppRenderCallback) => void;
+  offMCPAppRender: (callback: MCPAppRenderCallback) => void;
   resolveAutomationApproval: (requestId: string, decision: AutomationApprovalDecision) => void;
   abort: () => void;
   isBusy: () => boolean;
@@ -228,6 +232,7 @@ export class Agent implements AgentAPI {
   private vlmConfig: VLMConfig | null = null;
   private toolStepCallbacks: ToolStepCallback[] = [];
   private streamTextCallbacks: StreamTextCallback[] = [];
+  private mcpAppRenderCallbacks: MCPAppRenderCallback[] = [];
   private queryAbortController: AbortController | null = null;
   private paused = false;
   private pauseResolve: (() => void) | null = null;
@@ -254,7 +259,8 @@ export class Agent implements AgentAPI {
   }
 
   updateWebMCPTools(tabId: number, descriptors: WebMCPToolDescriptor[], url?: string, title?: string): void {
-    const tools = createWebMCPTools(tabId, descriptors);
+    const tools = createWebMCPTools(tabId, descriptors)
+      .map((webmcpTool) => this.wrapAutomationToolWithApproval(webmcpTool));
     this.webmcpByTab.set(tabId, { descriptors, tools, url, title });
     registerWebMCPToolDisplayLabels(tabId, descriptors);
     console.log('[agent] WebMCP tools updated for tab', tabId, ':', descriptors.map((tool) => tool.name));
@@ -322,8 +328,11 @@ export class Agent implements AgentAPI {
     try {
       const tools = await mcpConnect(config);
       entry.status = 'connected';
+      entry.sessionId = config.sessionId;
       entry.tools = tools;
-      entry.langchainTools = createMCPServerTools(config, tools);
+      entry.langchainTools = createMCPServerTools(config, tools, {
+        onAppToolResult: (request) => this.emitMCPAppRender(request),
+      });
       registerMCPToolDisplayLabels(config.id, config.name, tools);
       this.rebuildAgent();
       this.persistMCPServers();
@@ -361,8 +370,11 @@ export class Agent implements AgentAPI {
       const config: MCPServerConfig = { id: entry.id, name: entry.name, url: entry.url, authToken: entry.authToken };
       const tools = await mcpConnect(config);
       entry.status = 'connected';
+      entry.sessionId = config.sessionId;
       entry.tools = tools;
-      entry.langchainTools = createMCPServerTools(config, tools);
+      entry.langchainTools = createMCPServerTools(config, tools, {
+        onAppToolResult: (request) => this.emitMCPAppRender(request),
+      });
       registerMCPToolDisplayLabels(id, entry.name, tools);
       this.rebuildAgent();
       console.log(`[agent] MCP server "${entry.name}" reconnected with ${tools.length} tools`);
@@ -462,6 +474,14 @@ export class Agent implements AgentAPI {
     this.streamTextCallbacks = this.streamTextCallbacks.filter((cb) => cb !== callback);
   }
 
+  onMCPAppRender(callback: MCPAppRenderCallback): void {
+    this.mcpAppRenderCallbacks.push(callback);
+  }
+
+  offMCPAppRender(callback: MCPAppRenderCallback): void {
+    this.mcpAppRenderCallbacks = this.mcpAppRenderCallbacks.filter((cb) => cb !== callback);
+  }
+
   resolveAutomationApproval(requestId: string, decision: AutomationApprovalDecision): void {
     if (decision === 'allow_all') {
       this.allowAutomationForSession = true;
@@ -518,6 +538,16 @@ export class Agent implements AgentAPI {
         callback(text);
       } catch (err) {
         console.warn('[agent] streamText callback error', err);
+      }
+    }
+  }
+
+  private emitMCPAppRender(request: MCPAppRenderRequest): void {
+    for (const callback of this.mcpAppRenderCallbacks) {
+      try {
+        callback(request);
+      } catch (err) {
+        console.warn('[agent] MCP App render callback error', err);
       }
     }
   }

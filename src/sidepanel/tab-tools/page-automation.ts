@@ -1,4 +1,26 @@
 import { ensureTabIsActive } from './tabs';
+import type {
+  BrowserSnapshot,
+  BrowserSnapshotElement,
+  BrowserSnapshotOptions,
+  BrowserViewportInfo,
+  BrowserViewportRect,
+  BrowserVisualRegion,
+  BrowActionCacheStatus,
+  BrowActionKind,
+  BrowActionMemoryField,
+  BrowActionMemoryTarget,
+  BrowActionPostcondition,
+  BrowActionTrace,
+  BrowElementSignature,
+  BrowPostconditionResult,
+} from '../../shared/types';
+import {
+  findActionMemoryEntry,
+  memoryFieldFromElement,
+  memoryTargetFromElement,
+  upsertActionMemoryEntry,
+} from './action-memory';
 
 export interface InteractiveElementInfo {
   selector: string;
@@ -31,6 +53,24 @@ interface ClickPlan {
   point: ClickPoint;
   rect: VisibleRect;
   dispatchMode: 'synthetic' | 'programmatic';
+}
+
+export interface BrowserActionOptions {
+  intent?: string;
+  postconditions?: BrowActionPostcondition[];
+  useActionMemory?: boolean;
+}
+
+interface BrowserMemoryResolution {
+  ok: boolean;
+  selector?: string;
+  ref?: string;
+  snapshotId?: string;
+  entry?: BrowserSnapshotElement;
+  matchScore?: number;
+  snapshot?: BrowserSnapshot;
+  preconditions?: Record<string, unknown>;
+  error?: string;
 }
 
 type PageAutomationAction =
@@ -67,10 +107,903 @@ type PageAutomationAction =
     submitSelector?: string;
   };
 
+type BrowserSnapshotOperation =
+  | {
+    kind: 'snapshot';
+    tabId: number;
+    options?: BrowserSnapshotOptions;
+  }
+  | {
+    kind: 'resolve';
+    tabId: number;
+    ref: string;
+    snapshotId?: string;
+    requireActionable?: boolean;
+  }
+  | {
+    kind: 'resolveMemory';
+    tabId: number;
+    target: BrowActionMemoryTarget;
+    requireActionable?: boolean;
+  };
+
+async function runBrowserSnapshotOperation(operation: BrowserSnapshotOperation): Promise<unknown> {
+  const STATE_KEY = '__browBrowserSnapshotState__';
+  const BROW_REF_PREFIX = 'brow-ref://';
+  const MAX_STORED_SNAPSHOTS = 5;
+  const MAX_REGISTRY_ELEMENTS = 1000;
+  const MIN_MEMORY_MATCH_SCORE = 38;
+
+  type StoredSnapshot = {
+    snapshotId: string;
+    entriesByRef: Record<string, BrowserSnapshotElement>;
+    nodesByRef: Record<string, Element>;
+    order: string[];
+    createdAt: number;
+  };
+
+  type SnapshotState = {
+    currentSnapshotId?: string;
+    snapshots: Record<string, StoredSnapshot>;
+    snapshotOrder: string[];
+  };
+
+  const getState = (): SnapshotState => {
+    const target = window as unknown as Record<string, SnapshotState | undefined>;
+    if (!target[STATE_KEY]) {
+      target[STATE_KEY] = {
+        snapshots: {},
+        snapshotOrder: [],
+      };
+    }
+    return target[STATE_KEY]!;
+  };
+
+  const isElementNode = (value: unknown): value is Element => (
+    Boolean(value)
+    && typeof value === 'object'
+    && (value as Node).nodeType === 1
+    && typeof (value as Element).getBoundingClientRect === 'function'
+  );
+
+  const cleanText = (value: string | null | undefined, max = 160): string => {
+    const cleaned = (value ?? '').replace(/\s+/g, ' ').trim();
+    return cleaned.length > max ? `${cleaned.slice(0, max)}...` : cleaned;
+  };
+
+  const round = (value: number): number => Math.round(value * 10) / 10;
+
+  const getViewport = (): BrowserViewportInfo => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    scrollX: window.scrollX,
+    scrollY: window.scrollY,
+    devicePixelRatio: window.devicePixelRatio || 1,
+  });
+
+  const getBounds = (el: Element): BrowserViewportRect => {
+    const rect = (el as HTMLElement).getBoundingClientRect();
+    return {
+      x: round(rect.left),
+      y: round(rect.top),
+      left: round(rect.left),
+      top: round(rect.top),
+      right: round(rect.right),
+      bottom: round(rect.bottom),
+      width: round(rect.width),
+      height: round(rect.height),
+    };
+  };
+
+  const isSkippableElement = (el: Element): boolean => {
+    const tag = el.tagName.toLowerCase();
+    if (['script', 'style', 'meta', 'link', 'noscript', 'template', 'head'].includes(tag)) return true;
+    if ((el as HTMLElement).id === '__brow-automation-overlay__') return true;
+    if (el.closest?.('#__brow-automation-overlay__')) return true;
+    return false;
+  };
+
+  const isVisible = (el: Element): boolean => {
+    if (isSkippableElement(el)) return false;
+    const htmlEl = el as HTMLElement;
+    const rect = htmlEl.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+    const ownerWindow = htmlEl.ownerDocument.defaultView ?? window;
+    if (rect.bottom < 0 || rect.right < 0 || rect.top > ownerWindow.innerHeight || rect.left > ownerWindow.innerWidth) {
+      return false;
+    }
+    const style = ownerWindow.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    if (htmlEl.getAttribute('aria-hidden') === 'true') return false;
+    return true;
+  };
+
+  const escapeAttributeValue = (value: string): string => (
+    value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  );
+
+  const escapeCss = (value: string): string => {
+    if (globalThis.CSS?.escape) return globalThis.CSS.escape(value);
+    return value.replace(/["\\]/g, '\\$&');
+  };
+
+  const hasReliableValue = (value: string | null | undefined): value is string => {
+    if (!value) return false;
+    const trimmed = value.trim();
+    return Boolean(trimmed) && !['undefined', 'null', 'nan'].includes(trimmed.toLowerCase());
+  };
+
+  const canUseHashIdSelector = (value: string): boolean => (
+    /^-?[_a-zA-Z][_a-zA-Z0-9-]*$/.test(value)
+  );
+
+  const buildIdSelector = (value: string): string => (
+    canUseHashIdSelector(value)
+      ? `#${escapeCss(value)}`
+      : `[id="${escapeAttributeValue(value)}"]`
+  );
+
+  const isUniqueSelectorFor = (selector: string, el: Element): boolean => {
+    try {
+      const ownerDocument = el.ownerDocument ?? document;
+      const matches = Array.from(ownerDocument.querySelectorAll(selector));
+      return matches.length === 1 && matches[0] === el;
+    } catch {
+      return false;
+    }
+  };
+
+  const buildAttributeSelector = (
+    tag: string,
+    attrName: string,
+    attrValue: string | null,
+  ): string | null => (
+    hasReliableValue(attrValue)
+      ? `${tag}[${attrName}="${escapeAttributeValue(attrValue)}"]`
+      : null
+  );
+
+  const buildDomPath = (el: Element): string => {
+    const parts: string[] = [];
+    let current: Element | null = el;
+
+    while (current && current !== document.body && parts.length < 7) {
+      const htmlEl = current as HTMLElement;
+      if (hasReliableValue(htmlEl.id)) {
+        const idSelector = buildIdSelector(htmlEl.id);
+        const anchoredSelector = parts.length > 0 ? `${idSelector} > ${parts.join(' > ')}` : idSelector;
+        if (isUniqueSelectorFor(anchoredSelector, el)) return anchoredSelector;
+      }
+
+      let part = current.tagName.toLowerCase();
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children as HTMLCollectionOf<Element>).filter(
+          (child: Element) => child.tagName === current!.tagName,
+        );
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+      parts.unshift(part);
+      current = parent;
+    }
+
+    return parts.join(' > ') || el.tagName.toLowerCase();
+  };
+
+  const buildSelector = (el: Element): string => {
+    const tag = el.tagName.toLowerCase();
+    const htmlEl = el as HTMLElement;
+    const attrCandidates: Array<string | null> = [
+      hasReliableValue(htmlEl.id) ? buildIdSelector(htmlEl.id) : null,
+      buildAttributeSelector(tag, 'data-testid', el.getAttribute('data-testid')),
+      buildAttributeSelector(tag, 'data-test', el.getAttribute('data-test')),
+      buildAttributeSelector(tag, 'aria-label', el.getAttribute('aria-label')),
+      buildAttributeSelector(tag, 'name', el.getAttribute('name')),
+      buildAttributeSelector(tag, 'placeholder', el.getAttribute('placeholder')),
+      buildAttributeSelector(tag, 'title', el.getAttribute('title')),
+    ];
+
+    for (const candidate of attrCandidates) {
+      if (candidate && isUniqueSelectorFor(candidate, el)) return candidate;
+    }
+
+    return buildDomPath(el);
+  };
+
+  const getDepth = (el: Element): number => {
+    let depth = 0;
+    let current = el.parentElement;
+    while (current && current !== document.body) {
+      depth += 1;
+      current = current.parentElement;
+    }
+    return depth;
+  };
+
+  const getLabelText = (el: Element): string => {
+    const input = el as HTMLInputElement;
+    const labels = input.labels ? Array.from(input.labels) : [];
+    const labelText = labels.map((label) => cleanText(label.innerText || label.textContent, 80)).find(Boolean);
+    if (labelText) return labelText;
+
+    const wrappingLabel = el.closest('label');
+    if (wrappingLabel) return cleanText(wrappingLabel.innerText || wrappingLabel.textContent, 80);
+    return '';
+  };
+
+  const getAriaLabelledByText = (el: Element): string => {
+    const ids = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean);
+    const ownerDocument = el.ownerDocument ?? document;
+    return cleanText(ids.map((id) => ownerDocument.getElementById(id)?.innerText || ownerDocument.getElementById(id)?.textContent || '').join(' '), 120);
+  };
+
+  const inferRole = (el: Element): string => {
+    const explicit = cleanText(el.getAttribute('role'), 50);
+    if (explicit) return explicit;
+
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'a' && (el as HTMLAnchorElement).href) return 'link';
+    if (tag === 'button') return 'button';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'summary') return 'button';
+    if (tag === 'img') return 'image';
+    if (tag === 'nav') return 'navigation';
+    if (tag === 'main') return 'main';
+    if (tag === 'header') return 'banner';
+    if (tag === 'footer') return 'contentinfo';
+    if (tag === 'form') return 'form';
+    if (tag === 'table') return 'table';
+    if (tag === 'tr') return 'row';
+    if (tag === 'th') return 'columnheader';
+    if (tag === 'td') return 'cell';
+    if (tag === 'ul' || tag === 'ol') return 'list';
+    if (tag === 'li') return 'listitem';
+    if (tag === 'article') return 'article';
+    if (tag === 'section') return 'region';
+    if (tag === 'canvas' || tag === 'svg' || tag === 'video') return 'region';
+    if (/^h[1-6]$/.test(tag)) return 'heading';
+    if (tag === 'input') {
+      const type = ((el as HTMLInputElement).type || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'range') return 'slider';
+      if (type === 'search') return 'searchbox';
+      if (['button', 'submit', 'reset'].includes(type)) return 'button';
+      return 'textbox';
+    }
+    if ((el as HTMLElement).isContentEditable) return 'textbox';
+    return 'text';
+  };
+
+  const getElementText = (el: Element, max = 160): string => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const input = el as HTMLInputElement;
+      return cleanText(input.value || input.placeholder || input.name, max);
+    }
+    if (tag === 'textarea') {
+      const textarea = el as HTMLTextAreaElement;
+      return cleanText(textarea.value || textarea.placeholder || textarea.name, max);
+    }
+    return cleanText((el as HTMLElement).innerText || el.textContent, max);
+  };
+
+  const getAccessibleName = (el: Element, role: string): string => {
+    const direct = [
+      el.getAttribute('aria-label'),
+      getAriaLabelledByText(el),
+      getLabelText(el),
+      el.getAttribute('alt'),
+      el.getAttribute('title'),
+      el.getAttribute('placeholder'),
+      el.getAttribute('name'),
+    ].map((value) => cleanText(value, 120)).find(Boolean);
+    if (direct) return direct;
+
+    if (role === 'textbox' || role === 'searchbox') {
+      const input = el as HTMLInputElement;
+      return cleanText(input.placeholder || input.value || input.name, 120);
+    }
+
+    return cleanText((el as HTMLElement).innerText || el.textContent, 120);
+  };
+
+  const isActionable = (el: Element, role: string): boolean => {
+    const tag = el.tagName.toLowerCase();
+    const htmlEl = el as HTMLElement;
+    if (htmlEl.isContentEditable) return true;
+    if (tag === 'a' && (el as HTMLAnchorElement).href) return true;
+    if (['button', 'input', 'textarea', 'select', 'summary'].includes(tag)) return true;
+    if ([
+      'button',
+      'link',
+      'textbox',
+      'searchbox',
+      'checkbox',
+      'radio',
+      'combobox',
+      'switch',
+      'menuitem',
+      'menuitemcheckbox',
+      'menuitemradio',
+      'option',
+      'tab',
+      'treeitem',
+      'slider',
+      'spinbutton',
+      'gridcell',
+      'row',
+    ].includes(role)) return true;
+    if (typeof (htmlEl as any).onclick === 'function') return true;
+    if (htmlEl.hasAttribute('onclick') || htmlEl.hasAttribute('jsaction')) return true;
+    if (htmlEl.hasAttribute('aria-haspopup') || htmlEl.hasAttribute('aria-expanded')) return true;
+    if ((el.ownerDocument.defaultView ?? window).getComputedStyle(el).cursor === 'pointer') return true;
+    const tabIndex = htmlEl.getAttribute('tabindex');
+    return tabIndex != null && Number(tabIndex) >= 0;
+  };
+
+  const findActionTarget = (el: Element): Element | null => {
+    let current: Element | null = el;
+    let depth = 0;
+    while (current && current !== document.body && depth < 8) {
+      if (isVisible(current) && isActionable(current, inferRole(current))) {
+        return current;
+      }
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    const descendant = Array.from(el.querySelectorAll('*')).find((candidate) =>
+      isVisible(candidate) && isActionable(candidate, inferRole(candidate)),
+    );
+    return descendant ?? null;
+  };
+
+  const getAttributes = (el: Element): Record<string, string> | undefined => {
+    const names = ['id', 'data-testid', 'data-test', 'aria-label', 'name', 'placeholder', 'title', 'alt'];
+    const attrs: Record<string, string> = {};
+    for (const name of names) {
+      const value = cleanText(el.getAttribute(name), 100);
+      if (value) attrs[name] = value;
+    }
+    return Object.keys(attrs).length > 0 ? attrs : undefined;
+  };
+
+  const contextByNode = new Map<Element, { framePath?: string[]; shadowPath?: string[] }>();
+
+  const collectElements = (root: Element): Element[] => {
+    const collected: Element[] = [];
+    const seen = new Set<Element>();
+    const rootContext = contextByNode.get(root) ?? {};
+
+    const visit = (el: Element, context: { framePath?: string[]; shadowPath?: string[] }) => {
+      if (seen.has(el) || seen.size >= MAX_REGISTRY_ELEMENTS) return;
+      seen.add(el);
+      contextByNode.set(el, context);
+      if (isVisible(el)) collected.push(el);
+
+      const children = Array.from(el.children);
+      for (const child of children) {
+        visit(child, context);
+      }
+
+      const shadowRoot = (el as HTMLElement).shadowRoot;
+      if (shadowRoot) {
+        const hostSelector = buildSelector(el);
+        const shadowPath = [...(context.shadowPath ?? []), hostSelector];
+        for (const child of Array.from(shadowRoot.children)) {
+          visit(child, { ...context, shadowPath });
+        }
+      }
+
+      if (el instanceof HTMLIFrameElement || el instanceof HTMLFrameElement) {
+        try {
+          const frameDocument = el.contentDocument;
+          const frameRoot = frameDocument?.documentElement;
+          if (!frameRoot) return;
+          const frameSelector = buildSelector(el);
+          const framePath = [...(context.framePath ?? []), frameSelector];
+          visit(frameRoot, { ...context, framePath });
+        } catch {
+          // Cross-origin frames are intentionally skipped in MV3-native mode.
+        }
+      }
+    };
+
+    visit(root, rootContext);
+    return collected;
+  };
+
+  const evaluateActionability = (
+    el: Element,
+    role: string,
+    requireEditable = false,
+  ): Record<string, unknown> => {
+    const htmlEl = el as HTMLElement;
+    const rect = htmlEl.getBoundingClientRect?.();
+    const visible = isVisible(el);
+    const enabled = !('disabled' in htmlEl) || !Boolean((htmlEl as HTMLInputElement).disabled);
+    const editable = htmlEl.isContentEditable
+      || (htmlEl instanceof HTMLTextAreaElement && !htmlEl.disabled && !htmlEl.readOnly)
+      || (htmlEl instanceof HTMLInputElement && !htmlEl.disabled && !htmlEl.readOnly && !['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'image'].includes((htmlEl.type || '').toLowerCase()));
+    let receivesEvents = false;
+    if (rect && rect.width > 0 && rect.height > 0) {
+      const ownerDocument = el.ownerDocument ?? document;
+      const pointX = Math.max(1, Math.min(rect.left + rect.width / 2, (ownerDocument.defaultView?.innerWidth ?? window.innerWidth) - 1));
+      const pointY = Math.max(1, Math.min(rect.top + rect.height / 2, (ownerDocument.defaultView?.innerHeight ?? window.innerHeight) - 1));
+      const hit = ownerDocument.elementFromPoint(pointX, pointY);
+      receivesEvents = Boolean(hit && (hit === el || el.contains(hit) || hit.contains(el)));
+    }
+    const actionable = isActionable(el, role);
+
+    return {
+      visible,
+      enabled,
+      editable: requireEditable ? editable : undefined,
+      stable: true,
+      receivesEvents,
+      actionable,
+      ok: visible && enabled && receivesEvents && actionable && (!requireEditable || editable),
+    };
+  };
+
+  const createEntry = (
+    el: Element,
+    ref: string,
+    parentRef?: string,
+  ): BrowserSnapshotElement => {
+    const role = inferRole(el);
+    const text = getElementText(el);
+    const name = getAccessibleName(el, role) || text;
+    const context = contextByNode.get(el);
+    return {
+      ref,
+      parentRef,
+      framePath: context?.framePath,
+      shadowPath: context?.shadowPath,
+      role,
+      name,
+      text: text && text !== name ? text : undefined,
+      tagName: el.tagName.toLowerCase(),
+      type: (el as HTMLInputElement).type || undefined,
+      selector: buildSelector(el),
+      actionable: isActionable(el, role),
+      depth: getDepth(el),
+      bounds: getBounds(el),
+      attributes: getAttributes(el),
+    };
+  };
+
+  const isMostlyContainerText = (el: Element, text: string): boolean => {
+    if (!text) return false;
+    const children = Array.from(el.children).filter((child) => isVisible(child));
+    if (children.length === 0) return false;
+    const childText = cleanText(children.map((child) => (child as HTMLElement).innerText || child.textContent || '').join(' '), 220);
+    return childText.length > 0 && text.startsWith(childText.slice(0, Math.min(80, childText.length)));
+  };
+
+  const isMeaningfulEntry = (entry: BrowserSnapshotElement, el: Element): boolean => {
+    if (entry.actionable) return true;
+    if (['heading', 'image', 'table', 'row', 'list', 'listitem', 'navigation', 'main', 'form', 'search', 'banner', 'contentinfo', 'dialog', 'article'].includes(entry.role)) {
+      return true;
+    }
+    if (entry.role === 'region' && (entry.name || ['canvas', 'svg', 'video', 'section'].includes(entry.tagName))) return true;
+    const text = entry.text || entry.name;
+    if (!text || text.length < 2) return false;
+    if (['div', 'span', 'body'].includes(entry.tagName) && isMostlyContainerText(el, text)) return false;
+    return ['p', 'label', 'legend', 'caption', 'strong', 'em', 'code', 'pre', 'td', 'th', 'li', 'span'].includes(entry.tagName);
+  };
+
+  const resolveStoredElement = (
+    ref: string,
+    snapshotId?: string,
+  ): { snapshotId: string; snapshot: StoredSnapshot; node?: Element; entry?: BrowserSnapshotElement } | null => {
+    const state = getState();
+    const candidateIds = snapshotId
+      ? [snapshotId]
+      : [state.currentSnapshotId, ...state.snapshotOrder.slice().reverse()].filter(Boolean) as string[];
+
+    for (const id of candidateIds) {
+      const snapshot = state.snapshots[id];
+      if (!snapshot) continue;
+      const entry = snapshot.entriesByRef[ref];
+      const node = snapshot.nodesByRef[ref];
+      if (entry || node) return { snapshotId: id, snapshot, node, entry };
+    }
+    return null;
+  };
+
+  const normalizeOptions = (options?: BrowserSnapshotOptions): Required<Pick<BrowserSnapshotOptions, 'mode' | 'maxElements'>> & BrowserSnapshotOptions => ({
+    mode: options?.mode === 'full' ? 'full' : 'compact',
+    maxElements: Math.max(1, Math.min(Math.floor(options?.maxElements ?? 70), 250)),
+    rootRef: options?.rootRef,
+    snapshotId: options?.snapshotId,
+  });
+
+  const captureSnapshot = (
+    tabId: number,
+    options?: BrowserSnapshotOptions,
+  ): { snapshot: BrowserSnapshot; allEntries: BrowserSnapshotElement[]; nodesByRef: Record<string, Element> } => {
+    const normalized = normalizeOptions(options);
+    const storedRoot = normalized.rootRef
+      ? resolveStoredElement(normalized.rootRef, normalized.snapshotId)
+      : null;
+    const root = isElementNode(storedRoot?.node) && isVisible(storedRoot.node)
+      ? storedRoot.node
+      : document.body;
+    contextByNode.clear();
+    const allNodes = collectElements(root).slice(0, MAX_REGISTRY_ELEMENTS);
+
+    const refsByNode = new Map<Element, string>();
+    allNodes.forEach((node, index) => refsByNode.set(node, `e${index + 1}`));
+    const rootRef = root !== document.body ? refsByNode.get(root) : undefined;
+
+    const nodesByRef: Record<string, Element> = {};
+    const allEntries = allNodes.map((node) => {
+      const ref = refsByNode.get(node)!;
+      let parentRef: string | undefined;
+      let parent = node.parentElement;
+      while (parent) {
+        const candidate = refsByNode.get(parent);
+        if (candidate) {
+          parentRef = candidate;
+          break;
+        }
+        parent = parent.parentElement;
+      }
+      nodesByRef[ref] = node;
+      return createEntry(node, ref, parentRef);
+    });
+
+    const displayedEntries = (normalized.mode === 'full'
+      ? allEntries
+      : allEntries.filter((entry) => isMeaningfulEntry(entry, nodesByRef[entry.ref])))
+      .slice(0, normalized.maxElements);
+
+    const snapshotId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const snapshot: BrowserSnapshot = {
+      ok: true,
+      snapshotId,
+      tabId,
+      url: location.href,
+      title: document.title,
+      generatedAt: Date.now(),
+      viewport: getViewport(),
+      elements: displayedEntries,
+      visibleElementCount: allEntries.length,
+      displayedElementCount: displayedEntries.length,
+      omittedElementCount: Math.max(allEntries.length - displayedEntries.length, 0),
+      rootRef,
+    };
+
+    const entriesByRef: Record<string, BrowserSnapshotElement> = {};
+    for (const entry of allEntries) {
+      entriesByRef[entry.ref] = entry;
+    }
+
+    const state = getState();
+    state.snapshots[snapshotId] = {
+      snapshotId,
+      entriesByRef,
+      nodesByRef,
+      order: allEntries.map((entry) => entry.ref),
+      createdAt: Date.now(),
+    };
+    state.currentSnapshotId = snapshotId;
+    state.snapshotOrder = [...state.snapshotOrder.filter((id) => id !== snapshotId), snapshotId];
+    while (state.snapshotOrder.length > MAX_STORED_SNAPSHOTS) {
+      const expired = state.snapshotOrder.shift();
+      if (expired) delete state.snapshots[expired];
+    }
+
+    return { snapshot, allEntries, nodesByRef };
+  };
+
+  const findBySelector = (entry: BrowserSnapshotElement): Element | null => {
+    if (!entry.selector) return null;
+    try {
+      const matches = Array.from(document.querySelectorAll(entry.selector)).filter((candidate) => isVisible(candidate));
+      if (matches.length !== 1) return null;
+      return matches[0];
+    } catch {
+      return null;
+    }
+  };
+
+  const scoreRecoveryCandidate = (
+    oldEntry: BrowserSnapshotElement,
+    candidate: BrowserSnapshotElement,
+  ): number => {
+    let score = 0;
+    if (candidate.tagName === oldEntry.tagName) score += 4;
+    if (candidate.role === oldEntry.role) score += 6;
+    if (candidate.type && candidate.type === oldEntry.type) score += 4;
+    if (candidate.name && oldEntry.name && candidate.name === oldEntry.name) score += 24;
+    if (candidate.text && oldEntry.text && candidate.text === oldEntry.text) score += 10;
+    if (candidate.attributes?.id && candidate.attributes.id === oldEntry.attributes?.id) score += 30;
+    if (candidate.attributes?.['data-testid'] && candidate.attributes['data-testid'] === oldEntry.attributes?.['data-testid']) score += 30;
+    if (candidate.attributes?.name && candidate.attributes.name === oldEntry.attributes?.name) score += 12;
+    if (candidate.attributes?.placeholder && candidate.attributes.placeholder === oldEntry.attributes?.placeholder) score += 12;
+
+    const dx = Math.abs(candidate.bounds.left - oldEntry.bounds.left);
+    const dy = Math.abs(candidate.bounds.top - oldEntry.bounds.top);
+    if (dx <= 4 && dy <= 4) score += 8;
+    else if (dx <= 32 && dy <= 32) score += 4;
+
+    return score;
+  };
+
+  const signatureFromEntry = (entry: BrowserSnapshotElement): BrowElementSignature => {
+    const textEntry = ['textbox', 'searchbox'].includes(entry.role)
+      || ['input', 'textarea'].includes(entry.tagName)
+      || entry.type === 'password';
+    const attrs = entry.attributes ?? {};
+    return {
+      role: entry.role,
+      name: textEntry
+        ? cleanText(attrs['aria-label'] ?? attrs.placeholder ?? attrs.name ?? attrs.title, 120)
+        : cleanText(entry.name, 120),
+      text: textEntry ? undefined : cleanText(entry.text, 120),
+      tagName: entry.tagName,
+      type: entry.type,
+      selector: entry.selector,
+      attributes: entry.attributes,
+    };
+  };
+
+  const scoreMemoryCandidate = (
+    signature: BrowElementSignature,
+    candidate: BrowserSnapshotElement,
+  ): number => {
+    const candidateSignature = signatureFromEntry(candidate);
+    let score = 0;
+
+    if (candidateSignature.role === signature.role) score += 16;
+    if (candidateSignature.tagName === signature.tagName) score += 10;
+    if (signature.type && candidateSignature.type === signature.type) score += 8;
+    if (signature.selector && candidateSignature.selector === signature.selector) score += 12;
+    if (signature.name && candidateSignature.name) {
+      if (candidateSignature.name === signature.name) score += 36;
+      else if (candidateSignature.name.toLowerCase() === signature.name.toLowerCase()) score += 24;
+    }
+    if (signature.text && candidateSignature.text) {
+      if (candidateSignature.text === signature.text) score += 14;
+      else if (candidateSignature.text.toLowerCase() === signature.text.toLowerCase()) score += 8;
+    }
+
+    const attrs = signature.attributes ?? {};
+    const candidateAttrs = candidateSignature.attributes ?? {};
+    const weightedAttrs: Array<[string, number]> = [
+      ['id', 30],
+      ['data-testid', 30],
+      ['data-test', 26],
+      ['aria-label', 22],
+      ['name', 16],
+      ['placeholder', 16],
+      ['title', 14],
+      ['alt', 14],
+    ];
+    for (const [name, weight] of weightedAttrs) {
+      if (attrs[name] && attrs[name] === candidateAttrs[name]) score += weight;
+    }
+
+    return score;
+  };
+
+  const recoverRef = (
+    oldEntry: BrowserSnapshotElement,
+    currentEntries: BrowserSnapshotElement[],
+    requireActionable: boolean,
+  ): BrowserSnapshotElement | null => {
+    const selectorMatch = findBySelector(oldEntry);
+    if (selectorMatch) {
+      const entry = currentEntries.find((candidate) => candidate.selector === buildSelector(selectorMatch));
+      if (entry && (!requireActionable || entry.actionable)) {
+        const score = scoreRecoveryCandidate(oldEntry, entry);
+        if (score >= 18) return entry;
+      }
+    }
+
+    const scored = currentEntries
+      .filter((candidate) => !requireActionable || candidate.actionable)
+      .map((candidate) => ({ candidate, score: scoreRecoveryCandidate(oldEntry, candidate) }))
+      .filter((item) => item.score >= 24)
+      .sort((left, right) => right.score - left.score);
+
+    if (scored.length === 0) return null;
+    const [best, second] = scored;
+    if (second && best.score - second.score < 8) return null;
+    return best.candidate;
+  };
+
+  if (operation.kind === 'snapshot') {
+    return captureSnapshot(operation.tabId, operation.options).snapshot;
+  }
+
+  if (operation.kind === 'resolveMemory') {
+    const current = captureSnapshot(operation.tabId, { mode: 'compact', maxElements: 80 });
+    const requireActionable = Boolean(operation.requireActionable);
+    const scored = current.allEntries
+      .filter((candidate) => !requireActionable || candidate.actionable)
+      .map((candidate) => ({
+        candidate,
+        score: Math.max(
+          scoreMemoryCandidate(operation.target.signature, candidate),
+          operation.target.selector && candidate.selector === operation.target.selector ? 42 : 0,
+        ),
+      }))
+      .filter((item) => item.score >= MIN_MEMORY_MATCH_SCORE)
+      .sort((left, right) => right.score - left.score);
+
+    if (scored.length === 0) {
+      return {
+        ok: false,
+        error: 'Cached action target was not found on the current page.',
+        snapshot: current.snapshot,
+      } satisfies BrowserMemoryResolution;
+    }
+
+    const [best, second] = scored;
+    if (second && best.score - second.score < 8) {
+      return {
+        ok: false,
+        error: 'Cached action target matched multiple similar elements.',
+        matchScore: best.score,
+        snapshot: current.snapshot,
+      } satisfies BrowserMemoryResolution;
+    }
+
+    const preconditions = evaluateActionability(
+      current.nodesByRef[best.candidate.ref],
+      best.candidate.role,
+      ['textbox', 'searchbox'].includes(best.candidate.role),
+    );
+
+    if (preconditions.ok !== true) {
+      return {
+        ok: false,
+        error: 'Cached action target failed actionability checks.',
+        ref: best.candidate.ref,
+        snapshotId: current.snapshot.snapshotId,
+        entry: best.candidate,
+        matchScore: best.score,
+        snapshot: current.snapshot,
+        preconditions,
+      } satisfies BrowserMemoryResolution;
+    }
+
+    return {
+      ok: true,
+      selector: `${BROW_REF_PREFIX}${current.snapshot.snapshotId}/${best.candidate.ref}`,
+      ref: best.candidate.ref,
+      snapshotId: current.snapshot.snapshotId,
+      entry: best.candidate,
+      matchScore: best.score,
+      snapshot: current.snapshot,
+      preconditions,
+    } satisfies BrowserMemoryResolution;
+  }
+
+  const stored = resolveStoredElement(operation.ref, operation.snapshotId);
+  const requireActionable = Boolean(operation.requireActionable);
+
+  if (isElementNode(stored?.node) && isVisible(stored.node)) {
+    const entry = createEntry(stored.node, operation.ref);
+    const preconditions = evaluateActionability(stored.node, entry.role, ['textbox', 'searchbox'].includes(entry.role));
+    if (requireActionable && !entry.actionable) {
+      const actionTarget = findActionTarget(stored.node);
+      if (actionTarget) {
+        const targetEntry = createEntry(actionTarget, operation.ref);
+        const targetPreconditions = evaluateActionability(actionTarget, targetEntry.role, ['textbox', 'searchbox'].includes(targetEntry.role));
+        return {
+          ok: true,
+          ref: operation.ref,
+          snapshotId: stored.snapshotId,
+          selector: `${BROW_REF_PREFIX}${stored.snapshotId}/${operation.ref}`,
+          entry: targetEntry,
+          recovered: false,
+          preconditions: targetPreconditions,
+          promotedFrom: entry,
+          message: `Ref ${operation.ref} pointed at a non-actionable child; using nearest actionable ${targetEntry.role}.`,
+          region: {
+            source: 'ref',
+            ref: operation.ref,
+            snapshotId: stored.snapshotId,
+            rect: targetEntry.bounds,
+            viewport: getViewport(),
+          } satisfies BrowserVisualRegion,
+        };
+      }
+      return {
+        ok: false,
+        error: `Ref ${operation.ref} resolves to a visible element, but it is not actionable.`,
+        ref: operation.ref,
+        snapshotId: stored.snapshotId,
+        entry,
+      };
+    }
+    return {
+      ok: true,
+      ref: operation.ref,
+      snapshotId: stored.snapshotId,
+      selector: `${BROW_REF_PREFIX}${stored.snapshotId}/${operation.ref}`,
+      entry,
+      recovered: false,
+      preconditions,
+      region: {
+        source: 'ref',
+        ref: operation.ref,
+        snapshotId: stored.snapshotId,
+        rect: entry.bounds,
+        viewport: getViewport(),
+      } satisfies BrowserVisualRegion,
+    };
+  }
+
+  const oldEntry = stored?.entry;
+  if (!oldEntry) {
+    return {
+      ok: false,
+      error: `Unknown element ref: ${operation.ref}. Take a fresh browser_snapshot and try again.`,
+      ref: operation.ref,
+      snapshotId: operation.snapshotId,
+    };
+  }
+
+  const current = captureSnapshot(operation.tabId, { mode: 'compact', maxElements: 80 });
+  const recovered = recoverRef(oldEntry, current.allEntries, requireActionable);
+  if (!recovered) {
+    return {
+      ok: false,
+      error: `Ref ${operation.ref} is stale and could not be safely rematched. Take a fresh browser_snapshot and choose a new ref.`,
+      ref: operation.ref,
+      snapshotId: operation.snapshotId ?? stored?.snapshotId,
+      snapshot: current.snapshot,
+    };
+  }
+
+  return {
+    ok: true,
+    ref: recovered.ref,
+    originalRef: operation.ref,
+    snapshotId: current.snapshot.snapshotId,
+    selector: `${BROW_REF_PREFIX}${current.snapshot.snapshotId}/${recovered.ref}`,
+    entry: recovered,
+    recovered: true,
+    snapshot: current.snapshot,
+    matchScore: scoreRecoveryCandidate(oldEntry, recovered),
+    preconditions: evaluateActionability(current.nodesByRef[recovered.ref], recovered.role, ['textbox', 'searchbox'].includes(recovered.role)),
+    region: {
+      source: 'ref',
+      ref: recovered.ref,
+      snapshotId: current.snapshot.snapshotId,
+      rect: recovered.bounds,
+      viewport: current.snapshot.viewport,
+    } satisfies BrowserVisualRegion,
+  };
+}
+
 async function runPageAutomationAction(action: PageAutomationAction): Promise<unknown> {
   const ROOT_ID = '__brow-automation-overlay__';
   const STYLE_ID = '__brow-automation-style__';
+  const SNAPSHOT_STATE_KEY = '__browBrowserSnapshotState__';
+  const BROW_REF_PREFIX = 'brow-ref://';
   type CursorFrame = 'hand' | 'push' | 'highlight' | 'pencil';
+  type StoredSnapshot = {
+    snapshotId: string;
+    entriesByRef: Record<string, BrowserSnapshotElement>;
+    nodesByRef: Record<string, Element>;
+    order: string[];
+    createdAt: number;
+  };
+  type SnapshotState = {
+    currentSnapshotId?: string;
+    snapshots: Record<string, StoredSnapshot>;
+    snapshotOrder: string[];
+  };
   const CURSOR_SIZE = 40;
   const CURSOR_WIDTH = CURSOR_SIZE;
   const CURSOR_HEIGHT = CURSOR_SIZE;
@@ -91,6 +1024,35 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
   const toScreenX = (clientX: number) => (window.screenX ?? window.screenLeft ?? 0) + clientX;
   const toScreenY = (clientY: number) => (window.screenY ?? window.screenTop ?? 0) + clientY;
+  const getSnapshotState = (): SnapshotState | undefined => (
+    (window as unknown as Record<string, SnapshotState | undefined>)[SNAPSHOT_STATE_KEY]
+  );
+  const isHTMLElementLike = (value: unknown): value is HTMLElement => (
+    Boolean(value)
+    && typeof value === 'object'
+    && (value as Node).nodeType === 1
+    && typeof (value as HTMLElement).getBoundingClientRect === 'function'
+    && typeof (value as HTMLElement).tagName === 'string'
+  );
+
+  const parseBrowRefSelector = (selector: string): { snapshotId: string; ref: string } | null => {
+    if (!selector.startsWith(BROW_REF_PREFIX)) return null;
+    const rest = selector.slice(BROW_REF_PREFIX.length);
+    const slash = rest.lastIndexOf('/');
+    if (slash <= 0 || slash >= rest.length - 1) return null;
+    return {
+      snapshotId: decodeURIComponent(rest.slice(0, slash)),
+      ref: decodeURIComponent(rest.slice(slash + 1)),
+    };
+  };
+
+  const resolveBrowRefElement = (selector: string): HTMLElement | null => {
+    const parsed = parseBrowRefSelector(selector);
+    if (!parsed) return null;
+    const snapshot = getSnapshotState()?.snapshots?.[parsed.snapshotId];
+    const node = snapshot?.nodesByRef?.[parsed.ref];
+    return isHTMLElementLike(node) && node.isConnected ? node : null;
+  };
 
   const ensureOverlay = () => {
     let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
@@ -301,7 +1263,8 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   const isElementVisible = (el: Element): boolean => {
     const rect = (el as HTMLElement).getBoundingClientRect?.();
     if (!rect || rect.width <= 0 || rect.height <= 0) return false;
-    const style = window.getComputedStyle(el);
+    const ownerWindow = el.ownerDocument?.defaultView ?? window;
+    const style = ownerWindow.getComputedStyle(el);
     return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
   };
 
@@ -363,8 +1326,9 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
 
   const tryQueryElement = (selector: string): HTMLElement | null => {
     try {
-      const match = document.querySelector(selector);
-      return match instanceof HTMLElement ? match : null;
+      const matches = Array.from(document.querySelectorAll(selector))
+        .filter((match): match is HTMLElement => match instanceof HTMLElement);
+      return matches.find((match) => isElementVisible(match)) ?? matches[0] ?? null;
     } catch {
       return null;
     }
@@ -373,7 +1337,8 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   const tryQueryUniqueElement = (selector: string): HTMLElement | null => {
     try {
       const matches = Array.from(document.querySelectorAll(selector))
-        .filter((match): match is HTMLElement => match instanceof HTMLElement);
+        .filter((match): match is HTMLElement => match instanceof HTMLElement)
+        .filter((match) => isElementVisible(match));
       if (matches.length !== 1) return null;
       return matches[0];
     } catch {
@@ -829,6 +1794,11 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   };
 
   const resolveActionElement = (selector: string): { element: HTMLElement; resolvedSelector: string } | null => {
+    const refElement = resolveBrowRefElement(selector);
+    if (refElement && isElementVisible(refElement)) {
+      return { element: refElement, resolvedSelector: selector };
+    }
+
     const direct = queryExtendedElement(selector);
     if (direct) {
       return direct;
@@ -913,7 +1883,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
 
       const points = buildClickPoints(rect);
       for (const point of points) {
-        const hit = document.elementFromPoint(point.x, point.y);
+        const hit = candidate.ownerDocument.elementFromPoint(point.x, point.y);
         if (isRelatedElement(matchedEl, hit) || isRelatedElement(candidate, hit)) {
           return { target: candidate, point, rect, dispatchMode: 'synthetic' };
         }
@@ -1108,8 +2078,8 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   };
 
   const resolvePlanDispatchTarget = (matchedEl: HTMLElement, plan: ClickPlan): HTMLElement => {
-    const hit = document.elementFromPoint(plan.point.x, plan.point.y);
-    return hit instanceof HTMLElement && isRelatedElement(matchedEl, hit)
+    const hit = plan.target.ownerDocument.elementFromPoint(plan.point.x, plan.point.y);
+    return isHTMLElementLike(hit) && isRelatedElement(matchedEl, hit)
       ? hit
       : plan.target;
   };
@@ -1117,11 +2087,12 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   const dispatchHover = (matchedEl: HTMLElement, plan: ClickPlan) => {
     const target = resolvePlanDispatchTarget(matchedEl, plan);
     const previousTarget = getLastHoveredElement();
+    const ownerWindow = target.ownerDocument.defaultView ?? window;
     const shared = {
       bubbles: true,
       cancelable: true,
       composed: true,
-      view: window,
+      view: ownerWindow,
       clientX: plan.point.x,
       clientY: plan.point.y,
       screenX: toScreenX(plan.point.x),
@@ -1223,6 +2194,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
 
   const dispatchClick = (matchedEl: HTMLElement, plan: ClickPlan) => {
     const target = resolvePlanDispatchTarget(matchedEl, plan);
+    const ownerWindow = target.ownerDocument.defaultView ?? window;
 
     target.focus?.({ preventScroll: true });
 
@@ -1235,7 +2207,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       bubbles: true,
       cancelable: true,
       composed: true,
-      view: window,
+      view: ownerWindow,
       clientX: plan.point.x,
       clientY: plan.point.y,
       screenX: toScreenX(plan.point.x),
@@ -1438,15 +2410,17 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
     target.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', bubbles: true }));
     target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-      target.form?.requestSubmit?.();
+    const tag = target.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea') {
+      (target as HTMLInputElement | HTMLTextAreaElement).form?.requestSubmit?.();
     }
   };
 
   const setValue = (el: HTMLInputElement | HTMLTextAreaElement, nextValue: string) => {
-    const prototype = el instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype;
+    const ownerWindow = el.ownerDocument.defaultView ?? window;
+    const prototype = el.tagName.toLowerCase() === 'textarea'
+      ? ownerWindow.HTMLTextAreaElement.prototype
+      : ownerWindow.HTMLInputElement.prototype;
     const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
     if (valueSetter) valueSetter.call(el, nextValue);
     else el.value = nextValue;
@@ -1454,9 +2428,97 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     el.dispatchEvent(new Event('change', { bubbles: true }));
   };
 
+  type TypeableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+
+  const isTextInput = (el: HTMLInputElement): boolean => {
+    if (el.disabled || el.readOnly) return false;
+    const type = (el.type || 'text').toLowerCase();
+    return ![
+      'button',
+      'checkbox',
+      'color',
+      'file',
+      'hidden',
+      'image',
+      'radio',
+      'range',
+      'reset',
+      'submit',
+    ].includes(type);
+  };
+
+  const asTypeableElement = (candidate: Element | null): TypeableElement | null => {
+    if (!isHTMLElementLike(candidate)) return null;
+    if (!isElementVisible(candidate)) return null;
+    const tag = candidate.tagName.toLowerCase();
+    if (tag === 'input') return isTextInput(candidate as HTMLInputElement) ? candidate : null;
+    if (tag === 'textarea') {
+      const textarea = candidate as HTMLTextAreaElement;
+      return textarea.disabled || textarea.readOnly ? null : candidate;
+    }
+    if (candidate.isContentEditable) return candidate;
+    return null;
+  };
+
+  const findTypeTarget = (matchedEl: HTMLElement): TypeableElement | null => {
+    const activeTarget = asTypeableElement(document.activeElement);
+    if (activeTarget) return activeTarget;
+
+    const directTarget = asTypeableElement(matchedEl);
+    if (directTarget) return directTarget;
+
+    const selector = [
+      'input:not([type="hidden"])',
+      'textarea',
+      '[contenteditable="true"]',
+      '[contenteditable=""]',
+      '[contenteditable="plaintext-only"]',
+    ].join(', ');
+
+    const findIn = (root: Element): TypeableElement | null => (
+      Array.from(root.querySelectorAll(selector))
+        .map((candidate) => asTypeableElement(candidate))
+        .find((candidate): candidate is TypeableElement => Boolean(candidate)) ?? null
+    );
+
+    const descendantTarget = findIn(matchedEl);
+    if (descendantTarget) return descendantTarget;
+
+    let parent = matchedEl.parentElement;
+    let depth = 0;
+    while (parent && parent !== document.body && depth < 6) {
+      const parentTarget = asTypeableElement(parent) ?? findIn(parent);
+      if (parentTarget) return parentTarget;
+      parent = parent.parentElement;
+      depth += 1;
+    }
+
+    const visibleTypeTargets = Array.from(document.querySelectorAll(selector))
+      .map((candidate) => asTypeableElement(candidate))
+      .filter((candidate): candidate is TypeableElement => Boolean(candidate));
+    return visibleTypeTargets.length === 1 ? visibleTypeTargets[0] : null;
+  };
+
+  const setTypeableElementValue = (target: TypeableElement, nextValue: string) => {
+    const tag = target.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea') {
+      setValue(target as HTMLInputElement | HTMLTextAreaElement, nextValue);
+      return;
+    }
+
+    target.textContent = nextValue;
+    target.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      data: nextValue,
+      inputType: 'insertText',
+    }));
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
   const setChecked = (el: HTMLInputElement, nextChecked: boolean) => {
+    const ownerWindow = el.ownerDocument.defaultView ?? window;
     const checkedSetter = Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
+      ownerWindow.HTMLInputElement.prototype,
       'checked',
     )?.set;
     if (checkedSetter) checkedSetter.call(el, nextChecked);
@@ -1470,11 +2532,12 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     requestedMode?: 'auto' | 'text' | 'checkbox' | 'radio' | 'select' | 'contenteditable',
   ): 'text' | 'checkbox' | 'radio' | 'select' | 'contenteditable' | 'unknown' => {
     if (requestedMode && requestedMode !== 'auto') return requestedMode;
-    if (el instanceof HTMLSelectElement) return 'select';
-    if (el instanceof HTMLInputElement && el.type === 'checkbox') return 'checkbox';
-    if (el instanceof HTMLInputElement && el.type === 'radio') return 'radio';
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return 'text';
-    if (el instanceof HTMLElement && el.isContentEditable) return 'contenteditable';
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'select') return 'select';
+    if (tag === 'input' && (el as HTMLInputElement).type === 'checkbox') return 'checkbox';
+    if (tag === 'input' && (el as HTMLInputElement).type === 'radio') return 'radio';
+    if (tag === 'input' || tag === 'textarea') return 'text';
+    if (isHTMLElementLike(el) && el.isContentEditable) return 'contenteditable';
     return 'unknown';
   };
 
@@ -1600,31 +2663,22 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       textLength: action.text.length,
     });
 
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-      await previewFieldEdit(el, `Brow typing into ${describeElement(el)}`);
-      el.focus({ preventScroll: true });
-      setValue(el, action.text);
+    const typeTarget = findTypeTarget(el);
+    if (typeTarget) {
+      await previewFieldEdit(typeTarget, `Brow typing into ${describeElement(typeTarget)}`);
+      typeTarget.focus({ preventScroll: true });
+      setTypeableElementValue(typeTarget, action.text);
       if (action.submit) {
         showBadge('Brow submitting input', 16, 16);
         await sleep(120);
-        dispatchEnter(el);
+        dispatchEnter(typeTarget);
       }
       cleanupOverlay();
-      return { ok: true, typed: summarize(el) };
-    }
-
-    if (el instanceof HTMLElement && el.isContentEditable) {
-      await previewFieldEdit(el, `Brow typing into ${describeElement(el)}`);
-      el.focus({ preventScroll: true });
-      el.textContent = action.text;
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: action.text, inputType: 'insertText' }));
-      if (action.submit) {
-        showBadge('Brow submitting input', 16, 16);
-        await sleep(120);
-        dispatchEnter(el);
-      }
-      cleanupOverlay();
-      return { ok: true, typed: summarize(el) };
+      return {
+        ok: true,
+        typed: summarize(typeTarget),
+        resolvedFrom: typeTarget === el ? undefined : summarize(el),
+      };
     }
 
     return { ok: false, error: 'Matched element is not typeable' };
@@ -1674,19 +2728,20 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     el.focus({ preventScroll: true });
 
     if (!formForSubmit) {
-      const closestForm = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement
-        ? el.form
+      const fieldTag = el.tagName.toLowerCase();
+      const closestForm = ['input', 'textarea', 'select'].includes(fieldTag)
+        ? (el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).form
         : el.closest('form');
-      if (closestForm instanceof HTMLFormElement) {
-        formForSubmit = closestForm;
+      if (closestForm && typeof (closestForm as HTMLFormElement).submit === 'function') {
+        formForSubmit = closestForm as HTMLFormElement;
       }
     }
 
     try {
       if (mode === 'text') {
-        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        if (tagName === 'input' || tagName === 'textarea') {
           await previewFieldEdit(el, `Brow typing into ${describeElement(el)}`);
-          setValue(el, String(field.value));
+          setValue(el as HTMLInputElement | HTMLTextAreaElement, String(field.value));
           results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: field.value });
           continue;
         }
@@ -1727,9 +2782,10 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       }
 
       if (mode === 'select') {
-        if (el instanceof HTMLSelectElement) {
+        if (tagName === 'select') {
+          const selectEl = el as HTMLSelectElement;
           const targetValue = String(field.value).trim();
-          const options = Array.from(el.options);
+          const options = Array.from(selectEl.options);
           const option = options.find((candidate) =>
             candidate.value === targetValue ||
             candidate.label === targetValue ||
@@ -1752,10 +2808,10 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
           }
 
           await previewFieldEdit(el, `Brow selecting ${option.label || option.text}`);
-          el.value = option.value;
+          selectEl.value = option.value;
           option.selected = true;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+          selectEl.dispatchEvent(new Event('input', { bubbles: true }));
+          selectEl.dispatchEvent(new Event('change', { bubbles: true }));
           results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: option.value });
           continue;
         }
@@ -1773,15 +2829,16 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       }
 
       if (mode === 'checkbox' || mode === 'radio') {
-        if (el instanceof HTMLInputElement && el.type === mode) {
+        if (tagName === 'input' && (el as HTMLInputElement).type === mode) {
+          const inputEl = el as HTMLInputElement;
           const nextChecked = Boolean(field.value);
           await previewClick(el, `${nextChecked ? 'Brow selecting' : 'Brow clearing'} ${describeElement(el)}`);
-          if (el.checked !== nextChecked) {
+          if (inputEl.checked !== nextChecked) {
             if (nextChecked) {
-              el.click();
+              inputEl.click();
             }
-            if (el.checked !== nextChecked) {
-              setChecked(el, nextChecked);
+            if (inputEl.checked !== nextChecked) {
+              setChecked(inputEl, nextChecked);
             }
           }
           results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: nextChecked });
@@ -1828,7 +2885,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   if ((action.submit || action.submitSelector) && results.every((result) => result.ok)) {
     if (action.submitSelector) {
       const resolvedSubmit = resolveActionElement(action.submitSelector);
-      if (resolvedSubmit?.element instanceof HTMLElement) {
+      if (resolvedSubmit?.element && isHTMLElementLike(resolvedSubmit.element)) {
         const submitEl = resolvedSubmit.element;
         await previewClick(submitEl, `Brow submitting ${describeElement(submitEl)}`);
         submitEl.focus({ preventScroll: true });
@@ -1856,6 +2913,57 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     results,
     submitted,
     error: submitError ?? (hadFieldErrors ? 'One or more form fields could not be filled' : undefined),
+  };
+}
+
+async function runPageSettlingProbe(options?: {
+  quietMs?: number;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; readyState: string; quietMs: number; durationMs: number; error?: string }> {
+  const quietMs = Math.max(50, Math.min(Math.floor(options?.quietMs ?? 180), 1000));
+  const timeoutMs = Math.max(250, Math.min(Math.floor(options?.timeoutMs ?? 1600), 5000));
+  const startedAt = performance.now();
+
+  const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+  if (document.readyState === 'loading') {
+    await new Promise<void>((resolve) => {
+      const timer = window.setTimeout(resolve, timeoutMs);
+      document.addEventListener('DOMContentLoaded', () => {
+        window.clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
+  }
+
+  let lastMutationAt = performance.now();
+  const observer = new MutationObserver(() => {
+    lastMutationAt = performance.now();
+  });
+
+  try {
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+
+    while (performance.now() - startedAt < timeoutMs) {
+      await wait(50);
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      if (performance.now() - lastMutationAt >= quietMs) break;
+    }
+  } finally {
+    observer.disconnect();
+  }
+
+  return {
+    ok: true,
+    readyState: document.readyState,
+    quietMs,
+    durationMs: Math.round(performance.now() - startedAt),
   };
 }
 
@@ -2194,4 +3302,729 @@ export async function tabsFillForm(
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to fill form' };
   }
+}
+
+export interface BrowserRefResolution {
+  ok: boolean;
+  ref?: string;
+  originalRef?: string;
+  snapshotId?: string;
+  selector?: string;
+  entry?: BrowserSnapshotElement;
+  recovered?: boolean;
+  region?: BrowserVisualRegion;
+  snapshot?: BrowserSnapshot;
+  matchScore?: number;
+  preconditions?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface BrowserActionResult {
+  ok: boolean;
+  action?: unknown;
+  resolved?: BrowserRefResolution;
+  snapshot?: BrowserSnapshot;
+  cacheStatus?: BrowActionCacheStatus;
+  trace?: BrowActionTrace;
+  postconditions?: BrowPostconditionResult[];
+  repairNeeded?: boolean;
+  error?: string;
+}
+
+export interface BrowserFormFillField {
+  ref: string;
+  value: string | number | boolean;
+  mode?: FormFillMode;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function waitForTabSettled(
+  tabId: number,
+  timeoutMs = 1600,
+): Promise<{ ok: boolean; readyState?: string; quietMs?: number; durationMs?: number; error?: string }> {
+  try {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    if (tab?.status === 'loading') {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        const current = await chrome.tabs.get(tabId).catch(() => undefined);
+        if (current?.status !== 'loading') break;
+        await delay(100);
+      }
+    }
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runPageSettlingProbe,
+      args: [{ timeoutMs }],
+    });
+
+    return (results?.[0]?.result as { ok: boolean; readyState: string; quietMs: number; durationMs: number; error?: string } | undefined)
+      ?? { ok: false, error: 'No response from tab while waiting for page stability' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to wait for page stability' };
+  }
+}
+
+export async function browserSnapshot(
+  tabId: number,
+  options: BrowserSnapshotOptions = {},
+): Promise<BrowserSnapshot> {
+  try {
+    await waitForTabSettled(tabId);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runBrowserSnapshotOperation,
+      args: [{ kind: 'snapshot', tabId, options }],
+    });
+
+    return (results?.[0]?.result as BrowserSnapshot | undefined)
+      ?? {
+        ok: false,
+        snapshotId: '',
+        tabId,
+        url: '',
+        title: '',
+        generatedAt: Date.now(),
+        viewport: { width: 0, height: 0, scrollX: 0, scrollY: 0, devicePixelRatio: 1 },
+        elements: [],
+        visibleElementCount: 0,
+        displayedElementCount: 0,
+        omittedElementCount: 0,
+        error: 'No response from tab',
+      };
+  } catch (err: any) {
+    return {
+      ok: false,
+      snapshotId: '',
+      tabId,
+      url: '',
+      title: '',
+      generatedAt: Date.now(),
+      viewport: { width: 0, height: 0, scrollX: 0, scrollY: 0, devicePixelRatio: 1 },
+      elements: [],
+      visibleElementCount: 0,
+      displayedElementCount: 0,
+      omittedElementCount: 0,
+      error: err?.message ?? 'Failed to capture browser snapshot',
+    };
+  }
+}
+
+export async function browserResolveRef(
+  tabId: number,
+  ref: string,
+  snapshotId?: string,
+  requireActionable = false,
+): Promise<BrowserRefResolution> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runBrowserSnapshotOperation,
+      args: [{ kind: 'resolve', tabId, ref, snapshotId, requireActionable }],
+    });
+
+    return (results?.[0]?.result as BrowserRefResolution | undefined)
+      ?? { ok: false, ref, snapshotId, error: 'No response from tab' };
+  } catch (err: any) {
+    return { ok: false, ref, snapshotId, error: err?.message ?? 'Failed to resolve element ref' };
+  }
+}
+
+async function browserResolveMemoryTarget(
+  tabId: number,
+  target: BrowActionMemoryTarget,
+  requireActionable = true,
+): Promise<BrowserMemoryResolution> {
+  try {
+    await waitForTabSettled(tabId);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runBrowserSnapshotOperation,
+      args: [{ kind: 'resolveMemory', tabId, target, requireActionable }],
+    });
+
+    return (results?.[0]?.result as BrowserMemoryResolution | undefined)
+      ?? { ok: false, error: 'No response from tab while resolving cached action target' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to resolve cached action target' };
+  }
+}
+
+async function snapshotAfterAction(tabId: number): Promise<BrowserSnapshot> {
+  await delay(180);
+  await waitForTabSettled(tabId);
+  return browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
+}
+
+function createActionTrace(
+  tabId: number,
+  actionKind: BrowActionKind,
+  options?: BrowserActionOptions,
+): BrowActionTrace {
+  return {
+    traceId: globalThis.crypto?.randomUUID?.()
+      ?? `trace-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    tabId,
+    actionKind,
+    intent: options?.intent,
+    cacheStatus: options?.intent && options.useActionMemory !== false ? 'miss' : 'disabled',
+    startedAt: Date.now(),
+  };
+}
+
+function completeTrace(trace: BrowActionTrace): BrowActionTrace {
+  return {
+    ...trace,
+    completedAt: Date.now(),
+  };
+}
+
+function snapshotContainsText(snapshot: BrowserSnapshot, needle: string): boolean {
+  const normalizedNeedle = needle.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!normalizedNeedle) return true;
+  return snapshot.elements.some((element) =>
+    `${element.name ?? ''} ${element.text ?? ''}`.replace(/\s+/g, ' ').trim().toLowerCase().includes(normalizedNeedle),
+  );
+}
+
+async function evaluatePostconditions(
+  tabId: number,
+  snapshot: BrowserSnapshot,
+  postconditions: BrowActionPostcondition[] | undefined,
+): Promise<BrowPostconditionResult[]> {
+  if (!postconditions || postconditions.length === 0) return [];
+
+  const results: BrowPostconditionResult[] = [];
+  for (const condition of postconditions) {
+    try {
+      if (condition.type === 'urlIncludes') {
+        const actual = snapshot.url;
+        results.push({ ok: actual.includes(condition.value), condition, actual });
+        continue;
+      }
+      if (condition.type === 'urlMatches') {
+        const actual = snapshot.url;
+        results.push({ ok: new RegExp(condition.value).test(actual), condition, actual });
+        continue;
+      }
+      if (condition.type === 'titleIncludes') {
+        const actual = snapshot.title;
+        results.push({ ok: actual.toLowerCase().includes(condition.value.toLowerCase()), condition, actual });
+        continue;
+      }
+      if (condition.type === 'textVisible') {
+        results.push({ ok: snapshotContainsText(snapshot, condition.value), condition });
+        continue;
+      }
+      if (condition.type === 'textAbsent') {
+        results.push({ ok: !snapshotContainsText(snapshot, condition.value), condition });
+        continue;
+      }
+      if (condition.type === 'elementVisible') {
+        const resolution = await browserResolveRef(tabId, condition.ref, condition.snapshotId, false);
+        results.push({ ok: resolution.ok && Boolean(resolution.region), condition, actual: resolution.entry?.name });
+        continue;
+      }
+      if (condition.type === 'elementHidden') {
+        const resolution = await browserResolveRef(tabId, condition.ref, condition.snapshotId, false);
+        results.push({ ok: !resolution.ok || !resolution.region, condition, actual: resolution.entry?.name });
+        continue;
+      }
+      if (condition.type === 'valueEquals') {
+        const resolution = await browserResolveRef(tabId, condition.ref, condition.snapshotId, false);
+        const actual = resolution.entry?.text ?? resolution.entry?.name ?? '';
+        results.push({ ok: actual === condition.value, condition, actual });
+      }
+    } catch (err: any) {
+      results.push({ ok: false, condition, error: err?.message ?? 'Postcondition check failed' });
+    }
+  }
+
+  return results;
+}
+
+function postconditionsPassed(results: BrowPostconditionResult[]): boolean {
+  return results.every((result) => result.ok);
+}
+
+async function tryReplaySingleTargetAction(params: {
+  tabId: number;
+  actionKind: Exclude<BrowActionKind, 'fillForm'>;
+  options?: BrowserActionOptions;
+  trace: BrowActionTrace;
+  execute: (selector: string) => Promise<unknown>;
+}): Promise<BrowserActionResult | null> {
+  if (!params.options?.intent || params.options.useActionMemory === false) {
+    params.trace.cacheStatus = 'disabled';
+    return null;
+  }
+
+  const activeSnapshot = await browserSnapshot(params.tabId, { mode: 'compact', maxElements: 1 });
+  const lookup = await findActionMemoryEntry({
+    actionKind: params.actionKind,
+    intent: params.options.intent,
+    url: activeSnapshot.url,
+  });
+  params.trace.cacheKey = lookup.cacheKey;
+  if (!lookup.entry?.target) {
+    params.trace.cacheStatus = 'miss';
+    return null;
+  }
+
+  params.trace.cacheStatus = 'hit';
+  params.trace.memoryEntryId = lookup.entry.id;
+  const resolved = await browserResolveMemoryTarget(params.tabId, lookup.entry.target, true);
+  params.trace.matchScore = resolved.matchScore;
+  params.trace.preconditions = resolved.preconditions;
+  params.trace.snapshotId = resolved.snapshotId;
+  params.trace.resolvedRef = resolved.ref;
+
+  if (!resolved.ok || !resolved.selector) {
+    params.trace.cacheStatus = 'stale';
+    params.trace.recoveryDecision = resolved.error ?? 'cached target could not be replayed';
+    return null;
+  }
+
+  const action = await params.execute(resolved.selector);
+  const snapshot = await snapshotAfterAction(params.tabId);
+  const postconditions = await evaluatePostconditions(params.tabId, snapshot, params.options.postconditions);
+  params.trace.execution = action as Record<string, unknown>;
+  params.trace.postconditions = postconditions;
+
+  if (!Boolean((action as any).ok) || !postconditionsPassed(postconditions)) {
+    params.trace.cacheStatus = 'stale';
+    params.trace.recoveryDecision = !Boolean((action as any).ok)
+      ? ((action as any).error ?? 'cached action execution failed')
+      : 'cached action postcondition failed';
+    return {
+      ok: false,
+      action,
+      snapshot,
+      cacheStatus: 'stale',
+      trace: completeTrace(params.trace),
+      postconditions,
+      repairNeeded: true,
+      error: params.trace.recoveryDecision,
+    };
+  }
+
+  return {
+    ok: true,
+    action,
+    snapshot,
+    resolved: {
+      ok: true,
+      ref: resolved.ref,
+      snapshotId: resolved.snapshotId,
+      selector: resolved.selector,
+      entry: resolved.entry,
+      matchScore: resolved.matchScore,
+      preconditions: resolved.preconditions,
+    },
+    cacheStatus: 'hit',
+    trace: completeTrace(params.trace),
+    postconditions,
+  };
+}
+
+async function rememberSingleTargetAction(params: {
+  actionKind: Exclude<BrowActionKind, 'fillForm'>;
+  options?: BrowserActionOptions;
+  snapshot: BrowserSnapshot;
+  resolved: BrowserRefResolution;
+  trace: BrowActionTrace;
+}): Promise<BrowActionCacheStatus> {
+  if (!params.options?.intent || params.options.useActionMemory === false || !params.resolved.entry) {
+    return 'store_skipped';
+  }
+
+  const saved = await upsertActionMemoryEntry({
+    actionKind: params.actionKind,
+    intent: params.options.intent,
+    url: params.snapshot.url,
+    target: memoryTargetFromElement(params.resolved.entry),
+  });
+  params.trace.cacheKey = saved.cacheKey ?? params.trace.cacheKey;
+  params.trace.memoryEntryId = saved.entry?.id ?? params.trace.memoryEntryId;
+  return saved.stored ? 'stored' : 'store_skipped';
+}
+
+export async function browserClick(
+  tabId: number,
+  ref: string,
+  snapshotId?: string,
+  options: BrowserActionOptions = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'click', options);
+  const replayed = await tryReplaySingleTargetAction({
+    tabId,
+    actionKind: 'click',
+    options,
+    trace,
+    execute: (selector) => tabsClick(tabId, selector),
+  });
+  if (replayed) return replayed;
+
+  await waitForTabSettled(tabId);
+  const resolved = await browserResolveRef(tabId, ref, snapshotId, true);
+  trace.resolvedRef = resolved.ref;
+  trace.originalRef = resolved.originalRef ?? ref;
+  trace.snapshotId = resolved.snapshotId;
+  trace.matchScore = resolved.matchScore;
+  trace.preconditions = resolved.preconditions;
+  if (!resolved.ok || !resolved.selector) {
+    trace.recoveryDecision = resolved.error ?? `Unable to resolve ref ${ref}`;
+    return { ok: false, resolved, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
+  }
+
+  const action = await tabsClick(tabId, resolved.selector);
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  const actionOk = Boolean((action as any).ok);
+  const postconditionsOk = postconditionsPassed(postconditions);
+  if (actionOk && postconditionsOk) {
+    const storedStatus = await rememberSingleTargetAction({
+      actionKind: 'click',
+      options,
+      snapshot,
+      resolved,
+      trace,
+    });
+    if (trace.cacheStatus !== 'disabled') trace.cacheStatus = storedStatus;
+  }
+  return {
+    ok: actionOk && postconditionsOk,
+    action,
+    resolved,
+    snapshot,
+    cacheStatus: trace.cacheStatus,
+    trace: completeTrace(trace),
+    postconditions,
+    repairNeeded: actionOk && !postconditionsOk,
+    error: actionOk
+      ? (postconditionsOk ? undefined : 'Click postcondition failed')
+      : ((action as any).error ?? 'Click failed'),
+  };
+}
+
+export async function browserHover(
+  tabId: number,
+  ref: string,
+  snapshotId?: string,
+  message?: string,
+  durationMs?: number,
+  options: BrowserActionOptions = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'hover', options);
+  const replayed = await tryReplaySingleTargetAction({
+    tabId,
+    actionKind: 'hover',
+    options,
+    trace,
+    execute: (selector) => tabsHover(tabId, selector, message, durationMs),
+  });
+  if (replayed) return replayed;
+
+  await waitForTabSettled(tabId);
+  const resolved = await browserResolveRef(tabId, ref, snapshotId, true);
+  trace.resolvedRef = resolved.ref;
+  trace.originalRef = resolved.originalRef ?? ref;
+  trace.snapshotId = resolved.snapshotId;
+  trace.matchScore = resolved.matchScore;
+  trace.preconditions = resolved.preconditions;
+  if (!resolved.ok || !resolved.selector) {
+    trace.recoveryDecision = resolved.error ?? `Unable to resolve ref ${ref}`;
+    return { ok: false, resolved, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
+  }
+
+  const action = await tabsHover(tabId, resolved.selector, message, durationMs);
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  const actionOk = Boolean((action as any).ok);
+  const postconditionsOk = postconditionsPassed(postconditions);
+  if (actionOk && postconditionsOk) {
+    const storedStatus = await rememberSingleTargetAction({
+      actionKind: 'hover',
+      options,
+      snapshot,
+      resolved,
+      trace,
+    });
+    if (trace.cacheStatus !== 'disabled') trace.cacheStatus = storedStatus;
+  }
+  return {
+    ok: actionOk && postconditionsOk,
+    action,
+    resolved,
+    snapshot,
+    cacheStatus: trace.cacheStatus,
+    trace: completeTrace(trace),
+    postconditions,
+    repairNeeded: actionOk && !postconditionsOk,
+    error: actionOk
+      ? (postconditionsOk ? undefined : 'Hover postcondition failed')
+      : ((action as any).error ?? 'Hover failed'),
+  };
+}
+
+export async function browserType(
+  tabId: number,
+  ref: string,
+  text: string,
+  submit = false,
+  snapshotId?: string,
+  options: BrowserActionOptions = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'type', options);
+  const replayed = await tryReplaySingleTargetAction({
+    tabId,
+    actionKind: 'type',
+    options,
+    trace,
+    execute: (selector) => tabsType(tabId, selector, text, submit),
+  });
+  if (replayed) return replayed;
+
+  await waitForTabSettled(tabId);
+  const resolved = await browserResolveRef(tabId, ref, snapshotId, false);
+  trace.resolvedRef = resolved.ref;
+  trace.originalRef = resolved.originalRef ?? ref;
+  trace.snapshotId = resolved.snapshotId;
+  trace.matchScore = resolved.matchScore;
+  trace.preconditions = resolved.preconditions;
+  if (!resolved.ok || !resolved.selector) {
+    trace.recoveryDecision = resolved.error ?? `Unable to resolve ref ${ref}`;
+    return { ok: false, resolved, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
+  }
+
+  const action = await tabsType(tabId, resolved.selector, text, submit);
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  trace.execution = { ok: (action as any).ok, typed: (action as any).typed, error: (action as any).error };
+  trace.postconditions = postconditions;
+  const actionOk = Boolean((action as any).ok);
+  const postconditionsOk = postconditionsPassed(postconditions);
+  if (actionOk && postconditionsOk) {
+    const storedStatus = await rememberSingleTargetAction({
+      actionKind: 'type',
+      options,
+      snapshot,
+      resolved,
+      trace,
+    });
+    if (trace.cacheStatus !== 'disabled') trace.cacheStatus = storedStatus;
+  }
+  return {
+    ok: actionOk && postconditionsOk,
+    action,
+    resolved,
+    snapshot,
+    cacheStatus: trace.cacheStatus,
+    trace: completeTrace(trace),
+    postconditions,
+    repairNeeded: actionOk && !postconditionsOk,
+    error: actionOk
+      ? (postconditionsOk ? undefined : 'Type postcondition failed')
+      : ((action as any).error ?? 'Type failed'),
+  };
+}
+
+export async function browserFillForm(
+  tabId: number,
+  fields: BrowserFormFillField[],
+  submit = false,
+  submitRef?: string,
+  snapshotId?: string,
+  options: BrowserActionOptions = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'fillForm', options);
+  if (options.intent && options.useActionMemory !== false) {
+    const activeSnapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 1 });
+    const lookup = await findActionMemoryEntry({
+      actionKind: 'fillForm',
+      intent: options.intent,
+      url: activeSnapshot.url,
+    });
+    trace.cacheKey = lookup.cacheKey;
+    if (lookup.entry?.fields && lookup.entry.fields.length === fields.length) {
+      trace.cacheStatus = 'hit';
+      trace.memoryEntryId = lookup.entry.id;
+      const replayFields: FormFillField[] = [];
+      const fieldResolutions: BrowserMemoryResolution[] = [];
+      let replayFailedBeforeExecution = false;
+
+      for (let index = 0; index < lookup.entry.fields.length; index += 1) {
+        const cachedField = lookup.entry.fields[index];
+        const resolved = await browserResolveMemoryTarget(tabId, cachedField, true);
+        fieldResolutions.push(resolved);
+        if (!resolved.ok || !resolved.selector) {
+          replayFailedBeforeExecution = true;
+          trace.cacheStatus = 'stale';
+          trace.recoveryDecision = resolved.error ?? 'cached form field could not be replayed';
+          break;
+        }
+        replayFields.push({
+          selector: resolved.selector,
+          value: fields[index].value,
+          mode: fields[index].mode ?? cachedField.mode,
+        });
+      }
+
+      if (!replayFailedBeforeExecution) {
+        let submitSelector: string | undefined;
+        let submitResolution: BrowserMemoryResolution | undefined;
+        if (lookup.entry.submitTarget) {
+          submitResolution = await browserResolveMemoryTarget(tabId, lookup.entry.submitTarget, true);
+          if (submitResolution.ok && submitResolution.selector) {
+            submitSelector = submitResolution.selector;
+          } else {
+            replayFailedBeforeExecution = true;
+            trace.cacheStatus = 'stale';
+            trace.recoveryDecision = submitResolution.error ?? 'cached submit target could not be replayed';
+          }
+        }
+
+        if (!replayFailedBeforeExecution) {
+          trace.matchScore = Math.min(
+            ...fieldResolutions.map((resolution) => resolution.matchScore ?? Number.POSITIVE_INFINITY),
+          );
+          trace.preconditions = {
+            fields: fieldResolutions.map((resolution) => resolution.preconditions),
+            submit: submitResolution?.preconditions,
+          };
+          const action = await tabsFillForm(tabId, replayFields, submit, submitSelector);
+          const snapshot = await snapshotAfterAction(tabId);
+          const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+          trace.execution = action as Record<string, unknown>;
+          trace.postconditions = postconditions;
+          const actionOk = Boolean((action as any).ok);
+          const postconditionsOk = postconditionsPassed(postconditions);
+          if (actionOk && postconditionsOk) {
+            return {
+              ok: true,
+              action,
+              snapshot,
+              cacheStatus: 'hit',
+              trace: completeTrace(trace),
+              postconditions,
+            };
+          }
+          trace.cacheStatus = 'stale';
+          trace.recoveryDecision = actionOk ? 'cached form postcondition failed' : ((action as any).error ?? 'cached form fill failed');
+          return {
+            ok: false,
+            action,
+            snapshot,
+            cacheStatus: 'stale',
+            trace: completeTrace(trace),
+            postconditions,
+            repairNeeded: true,
+            error: trace.recoveryDecision,
+          };
+        }
+      }
+    } else {
+      trace.cacheStatus = 'miss';
+    }
+  }
+
+  await waitForTabSettled(tabId);
+  const resolvedFields: FormFillField[] = [];
+  const resolutions: BrowserRefResolution[] = [];
+
+  for (const field of fields) {
+    const resolved = await browserResolveRef(tabId, field.ref, snapshotId, true);
+    resolutions.push(resolved);
+    if (!resolved.ok || !resolved.selector) {
+      trace.resolvedRef = resolved.ref;
+      trace.snapshotId = resolved.snapshotId;
+      trace.preconditions = resolved.preconditions;
+      trace.recoveryDecision = resolved.error ?? `Unable to resolve form field ref ${field.ref}`;
+      return {
+        ok: false,
+        resolved,
+        cacheStatus: trace.cacheStatus,
+        trace: completeTrace(trace),
+        error: trace.recoveryDecision,
+      };
+    }
+    resolvedFields.push({
+      selector: resolved.selector,
+      value: field.value,
+      mode: field.mode,
+    });
+  }
+
+  let submitSelector: string | undefined;
+  let submitResolution: BrowserRefResolution | undefined;
+  if (submitRef) {
+    submitResolution = await browserResolveRef(tabId, submitRef, snapshotId, true);
+    if (!submitResolution.ok || !submitResolution.selector) {
+      trace.resolvedRef = submitResolution.ref;
+      trace.snapshotId = submitResolution.snapshotId;
+      trace.preconditions = submitResolution.preconditions;
+      trace.recoveryDecision = submitResolution.error ?? `Unable to resolve submit ref ${submitRef}`;
+      return {
+        ok: false,
+        resolved: submitResolution,
+        cacheStatus: trace.cacheStatus,
+        trace: completeTrace(trace),
+        error: trace.recoveryDecision,
+      };
+    }
+    submitSelector = submitResolution.selector;
+  }
+
+  const action = await tabsFillForm(tabId, resolvedFields, submit, submitSelector);
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  trace.preconditions = {
+    fields: resolutions.map((resolution) => resolution.preconditions),
+    submit: submitResolution?.preconditions,
+  };
+  const actionOk = Boolean((action as any).ok);
+  const postconditionsOk = postconditionsPassed(postconditions);
+  if (actionOk && postconditionsOk && options.intent && options.useActionMemory !== false) {
+    const memoryFields: BrowActionMemoryField[] = resolutions
+      .map((resolution, index) =>
+        resolution.entry ? memoryFieldFromElement(resolution.entry, fields[index].mode) : null,
+      )
+      .filter((field): field is BrowActionMemoryField => Boolean(field));
+    const saved = await upsertActionMemoryEntry({
+      actionKind: 'fillForm',
+      intent: options.intent,
+      url: snapshot.url,
+      fields: memoryFields,
+      submitTarget: submitResolution?.entry ? memoryTargetFromElement(submitResolution.entry) : undefined,
+    });
+    trace.cacheKey = saved.cacheKey ?? trace.cacheKey;
+    trace.memoryEntryId = saved.entry?.id ?? trace.memoryEntryId;
+    trace.cacheStatus = saved.stored ? 'stored' : 'store_skipped';
+  }
+  return {
+    ok: actionOk && postconditionsOk,
+    action: {
+      ...action,
+      resolvedFields: resolutions,
+      submitResolution,
+    },
+    snapshot,
+    cacheStatus: trace.cacheStatus,
+    trace: completeTrace(trace),
+    postconditions,
+    repairNeeded: actionOk && !postconditionsOk,
+    error: actionOk
+      ? (postconditionsOk ? undefined : 'Form fill postcondition failed')
+      : ((action as any).error ?? 'Form fill failed'),
+  };
 }
