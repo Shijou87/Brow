@@ -11,12 +11,44 @@ import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 
 import type { WebMCPToolDescriptor } from '../shared/types';
+import {
+  invalidateBrowserContextSnapshotCache,
+  primeBrowserContextSnapshotCache,
+} from './agent-runtime/browser-context';
 import { jsonSchemaToZod } from '../shared/json-schema';
 import { buildToolSnapshotFields } from './agent-runtime/tool-result-snapshot';
 import { browserSnapshot, webmcpInvoke } from './tab-tools';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const READ_ONLY_NAME_RE = /^(get|list|read|fetch|find|search|query|inspect|check|status|describe|preview|peek|resolve)/i;
+const MUTATING_NAME_RE = /^(set|update|create|delete|remove|insert|submit|click|type|fill|open|close|toggle|select|choose|press|activate|navigate|scroll|drag|upload|download|login|logout|send|save)/i;
+const READ_ONLY_DESCRIPTION_RE = /\b(read|fetch|list|search|query|inspect|status|preview|describe)\b/i;
+const MUTATING_DESCRIPTION_RE = /\b(create|update|delete|remove|submit|click|type|fill|open|close|toggle|select|activate|navigate|scroll|drag|upload|download|login|logout|send|save)\b/i;
+
+export function isLikelyMutatingWebMCPTool(descriptor: WebMCPToolDescriptor): boolean {
+  if (MUTATING_NAME_RE.test(descriptor.name)) return true;
+  if (READ_ONLY_NAME_RE.test(descriptor.name)) return false;
+  if (MUTATING_DESCRIPTION_RE.test(descriptor.description)) return true;
+  if (READ_ONLY_DESCRIPTION_RE.test(descriptor.description)) return false;
+  return Boolean(descriptor.inputSchema && Object.keys(descriptor.inputSchema).length > 0);
+}
+
+export function shouldCaptureWebMCPAftermath(
+  descriptor: WebMCPToolDescriptor,
+  result: { ok?: boolean } | undefined,
+): boolean {
+  if (result?.ok === false) return false;
+  return isLikelyMutatingWebMCPTool(descriptor);
+}
+
+export function getWebMCPAftermathWaitMs(
+  descriptor: WebMCPToolDescriptor,
+  result: { ok?: boolean } | undefined,
+): number {
+  return shouldCaptureWebMCPAftermath(descriptor, result) ? 180 : 0;
 }
 
 // ─── Factory ───────────────────────────────────────────────────────────────
@@ -42,28 +74,45 @@ export function createWebMCPTools(
     if (typeof rawSchema === 'string') {
       try { rawSchema = JSON.parse(rawSchema); } catch { rawSchema = undefined; }
     }
-    const zodSchema = rawSchema
-      ? jsonSchemaToZod(rawSchema as Record<string, unknown>)
+    const zodSchema: z.ZodTypeAny = rawSchema
+      ? jsonSchemaToZod(rawSchema as Record<string, unknown>) as z.ZodTypeAny
       : z.object({});
 
     // Include tabId in tool name so tools from different tabs don't collide
     const langchainName = `webmcp_t${tabId}_${descriptor.name}`;
+    const invokeTool = async (args: Record<string, unknown>): Promise<string> => {
+      const result = await webmcpInvoke(tabId, descriptor.name, args);
+      const waitMs = getWebMCPAftermathWaitMs(descriptor, result);
+      if (waitMs > 0) {
+        await sleep(waitMs);
+      }
 
-    return tool(
-      async (args: Record<string, unknown>) => {
-        const result = await webmcpInvoke(tabId, descriptor.name, args);
-        await sleep(250);
-        const snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
-        return JSON.stringify({
-          ...result,
-          ...buildToolSnapshotFields(snapshot),
-        }, null, 2);
-      },
+      if (!shouldCaptureWebMCPAftermath(descriptor, result)) {
+        return JSON.stringify(result, null, 2);
+      }
+
+      invalidateBrowserContextSnapshotCache(tabId);
+      const snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
+      const snapshotFields = buildToolSnapshotFields(snapshot);
+      if (snapshot.ok) {
+        primeBrowserContextSnapshotCache(snapshot, snapshotFields.snapshotText);
+      }
+
+      return JSON.stringify({
+        ...result,
+        ...snapshotFields,
+      }, null, 2);
+    };
+
+    const createLangChainTool = tool as (...args: any[]) => unknown;
+
+    return createLangChainTool(
+      invokeTool,
       {
         name: langchainName,
         description: `[WebMCP · tab ${tabId}] ${descriptor.description}`,
         schema: zodSchema,
       },
-    ) as unknown as StructuredToolInterface;
+    ) as StructuredToolInterface;
   });
 }

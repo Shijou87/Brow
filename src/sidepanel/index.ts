@@ -5,33 +5,39 @@ import './style.scss';
 
 import { ChatView } from './chat-view';
 import type { ContextTabOption, SavedConversation } from './chat-view';
+import { loadDomainSkillRegistryEntries } from './chat-view/config-store';
 import { MCPAppHost } from './mcp-app-host';
 import {
+  buildToolContextCarryForwardMessage,
   type AutomationApprovalDecision,
   getAgentApi,
   configureAndRebuild,
   type AgentAPI,
   type ChatTurn,
+  type RequestBudgetEstimate,
   type ToolStepEvent,
 } from './agent';
 import {
-  SKILL_REGISTRY_STORAGE_KEY,
-  normalizeSkillRegistry,
   type SkillRegistryEntry,
 } from './skills-registry';
 import {
   DEFAULT_AGENT_RECURSION_LIMIT,
+  DEFAULT_CLAUDE_FIELDS,
+  DEFAULT_OPENAI_FIELDS,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_VLM_CONFIG,
+  normalizePreferredOpenAiModel,
+  type ProviderFields,
 } from '../shared/config';
 import {
   loadDisabledTools,
   loadSidepanelConfig,
   saveDisabledTools,
-  getStorageValue,
 } from '../shared/storage';
-import type { WebMCPRegistryEntry, DirectLLMConfig } from '../shared/types';
+import type { WebMCPRegistryEntry, DirectLLMConfig, SkillMention, WorkflowDemonstration } from '../shared/types';
 import { logInfo } from '../shared/logger';
+import { invalidateBrowserContextSnapshotCache } from './agent-runtime/browser-context';
+import { workflowRecordingStart, workflowRecordingStop } from './tab-tools/workflow-demonstrations';
 
 // ─── WebMCP registry (mirror of background SW registry) ────────────────────
 
@@ -56,9 +62,13 @@ const view = new ChatView(app, {
   onConversationLoad: handleConversationLoad,
   onConversationNew: handleConversationNew,
   onConversationDelete: handleConversationDelete,
+  onConversationDraftChange: handleConversationDraftChange,
+  onCopyContextDebug: handleCopyContextDebug,
   onMCPServerAdd: handleMCPServerAdd,
   onMCPServerRemove: handleMCPServerRemove,
   onMCPServerReconnect: handleMCPServerReconnect,
+  onWorkflowRecordingStart: handleWorkflowRecordingStart,
+  onWorkflowRecordingStop: handleWorkflowRecordingStop,
 });
 
 // Restore saved config on startup
@@ -71,12 +81,110 @@ view.enableInput();
 const agent = getAgentApi();
 const chatHistory: ChatTurn[] = [];
 const mcpAppHost = new MCPAppHost();
+const REQUEST_BUDGET_REFRESH_DELAY_MS = 180;
+
+type RequestContextDebugInput = {
+  query: string;
+  history: ChatTurn[];
+  contextTabIds: number[];
+  workflowDemonstrations: WorkflowDemonstration[];
+  skillMention: SkillMention | null;
+};
+
+let requestBudgetRefreshTimer: number | null = null;
+let requestBudgetRefreshSequence = 0;
+let latestRequestBudgetEstimate: RequestBudgetEstimate | null = null;
+let latestRequestContextDebugInput: RequestContextDebugInput | null = null;
+let activeRunBaseRequestBudget: RequestBudgetEstimate | null = null;
+let activeRunStreamTokenEstimate = 0;
+let activeRunToolContextTokenEstimate = 0;
+
+function estimateBudgetTextTokens(text: string | undefined): number {
+  const trimmed = text?.trim() ?? '';
+  if (!trimmed) return 0;
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  return Math.max(Math.ceil(trimmed.length / 4), Math.ceil(wordCount * 0.8));
+}
+
+function estimateToolContextTokens(steps: ToolStepEvent[]): number {
+  const toolContextMessage = buildToolContextCarryForwardMessage(steps);
+  const carryForwardTokens = toolContextMessage
+    ? 8 + estimateBudgetTextTokens('system') + estimateBudgetTextTokens(toolContextMessage)
+    : 0;
+  const inFlightTokens = steps
+    .filter((step) => step.status === 'running' || step.status === 'awaiting_approval')
+    .reduce((sum, step) => (
+      sum + 8 + estimateBudgetTextTokens(step.toolName) + estimateBudgetTextTokens(step.inputText)
+    ), 0);
+  return carryForwardTokens + inFlightTokens;
+}
+
+function updateActiveRunBudgetIndicator(): void {
+  if (!activeRunBaseRequestBudget) return;
+
+  const estimatedTokens = activeRunBaseRequestBudget.estimatedTokens + activeRunToolContextTokenEstimate + activeRunStreamTokenEstimate;
+  const usageRatio = estimatedTokens / activeRunBaseRequestBudget.contextWindow;
+  const nextEstimate: RequestBudgetEstimate = {
+    ...activeRunBaseRequestBudget,
+    estimatedTokens,
+    usageRatio,
+    usagePercent: Math.round(usageRatio * 100),
+  };
+
+  latestRequestBudgetEstimate = nextEstimate;
+  view.updateRequestBudget(nextEstimate);
+}
+
+function beginActiveRunBudgetTracking(baseEstimate: RequestBudgetEstimate): void {
+  activeRunBaseRequestBudget = baseEstimate;
+  activeRunStreamTokenEstimate = 0;
+  activeRunToolContextTokenEstimate = 0;
+  latestRequestBudgetEstimate = baseEstimate;
+  view.updateRequestBudget(baseEstimate);
+}
+
+function clearActiveRunBudgetTracking(): void {
+  activeRunBaseRequestBudget = null;
+  activeRunStreamTokenEstimate = 0;
+  activeRunToolContextTokenEstimate = 0;
+}
+
+function refreshActiveRunBudgetFromToolSteps(steps: ToolStepEvent[]): void {
+  if (!activeRunBaseRequestBudget) return;
+  activeRunToolContextTokenEstimate = estimateToolContextTokens(steps);
+  updateActiveRunBudgetIndicator();
+}
+
+function refreshActiveRunBudgetFromStreamText(text: string): void {
+  if (!activeRunBaseRequestBudget) return;
+  activeRunStreamTokenEstimate = estimateBudgetTextTokens(text);
+  updateActiveRunBudgetIndicator();
+}
 
 restoreSavedSkills();
 
-agent.onToolStep((steps: ToolStepEvent[]) => view.updateToolSteps(steps));
+agent.onToolStep((steps: ToolStepEvent[]) => {
+  view.updateToolSteps(steps);
+  refreshActiveRunBudgetFromToolSteps(steps);
+});
 agent.onMCPAppRender((request) => {
   void handleMCPAppRender(request);
+});
+agent.onRequestBudgetCompaction((event) => {
+  latestRequestBudgetEstimate = event.after;
+  if (activeRunBaseRequestBudget) {
+    activeRunBaseRequestBudget = event.after;
+  }
+  view.setRequestBudgetPending(false);
+  view.updateRequestBudget(event.before);
+  window.requestAnimationFrame(() => {
+    if (activeRunBaseRequestBudget) {
+      updateActiveRunBudgetIndicator();
+      return;
+    }
+    view.updateRequestBudget(event.after);
+  });
+  view.saveCurrentConversation(chatHistory, agent.getConversationCompactionState());
 });
 
 // Provide tool manifest to ChatView
@@ -99,28 +207,70 @@ void loadDisabledTools().then((saved) => {
 });
 
 agent.onStreamText((text: string) => {
-  // Each stream text callback delivers the full (latest) content.
-  // The ChatView already manages its own streaming — we just set it here.
+  refreshActiveRunBudgetFromStreamText(text);
 });
 
 // ─── Message handling ──────────────────────────────────────────────────────
 
-async function handleSendMessage(message: string, contextTabIds: number[]): Promise<void> {
+async function handleSendMessage(
+  message: string,
+  contextTabIds: number[],
+  workflowDemonstrations: WorkflowDemonstration[],
+  skillMention: SkillMention | null,
+): Promise<void> {
   if (agent.isBusy()) return;
 
-  view.addUserMessage(message);
+  const historyBeforeTurn = [...chatHistory];
+  view.addUserMessage(message, workflowDemonstrations.map((entry) => entry.id), skillMention);
   chatHistory.push({ role: 'user', content: message });
+  view.saveCurrentConversation(chatHistory, agent.getConversationCompactionState());
   view.setAgentBusy(true);
   view.showTypingIndicator();
 
+  const conversationWorkflowDemonstrations = view.getConversationWorkflowDemonstrations();
+  latestRequestContextDebugInput = {
+    query: message,
+    history: [...historyBeforeTurn],
+    contextTabIds: [...contextTabIds],
+    workflowDemonstrations: conversationWorkflowDemonstrations,
+    skillMention,
+  };
+
+  const activeRunEstimate = latestRequestBudgetEstimate ?? await agent.estimateRequestBudget(
+    message,
+    historyBeforeTurn,
+    contextTabIds,
+    conversationWorkflowDemonstrations,
+    skillMention,
+  ).catch((err: any) => {
+    console.warn('[sidepanel] Failed to seed active request budget estimate:', err?.message ?? err);
+    return null;
+  });
+
+  if (activeRunEstimate) {
+    beginActiveRunBudgetTracking(activeRunEstimate);
+    view.setRequestBudgetPending(true);
+  }
+
   try {
-    const response = await agent.query(message, chatHistory, contextTabIds);
+    const response = await agent.query(
+      message,
+      historyBeforeTurn,
+      contextTabIds,
+      conversationWorkflowDemonstrations,
+      skillMention,
+    );
     if (response === 'Agent turn was interrupted.') {
       view.hideTypingIndicator();
       view.finalizeToolSteps();
       view.addSystemMessage('Generation stopped.');
-      view.saveCurrentConversation(chatHistory);
+      view.saveCurrentConversation(chatHistory, agent.getConversationCompactionState());
       return;
+    }
+
+    const toolContextMessage = agent.getLastTurnToolContextMessage();
+    if (toolContextMessage) {
+      chatHistory.push({ role: 'system', content: toolContextMessage });
     }
 
     chatHistory.push({ role: 'assistant', content: response });
@@ -131,14 +281,129 @@ async function handleSendMessage(message: string, contextTabIds: number[]): Prom
     // Wait for streaming to finish then finalize and auto-save
     setTimeout(() => {
       view.finalizeStreaming();
-      view.saveCurrentConversation(chatHistory);
+      view.saveCurrentConversation(chatHistory, agent.getConversationCompactionState());
     }, Math.min(response.length * 35, 5000) + 500);
   } catch (err: any) {
     view.hideTypingIndicator();
     view.addSystemMessage(`Error: ${err.message ?? err}`);
   } finally {
     view.setAgentBusy(false);
+    clearActiveRunBudgetTracking();
+    scheduleRequestBudgetRefresh();
   }
+}
+
+function getWorkflowDemonstrationsForNextTurn(): WorkflowDemonstration[] {
+  const byId = new Map<string, WorkflowDemonstration>();
+  for (const demonstration of view.getConversationWorkflowDemonstrations()) {
+    byId.set(demonstration.id, demonstration);
+  }
+  for (const demonstration of view.getStagedWorkflowDemonstrations()) {
+    byId.set(demonstration.id, demonstration);
+  }
+  return [...byId.values()];
+}
+
+async function refreshRequestBudgetEstimate(sequence: number): Promise<void> {
+  const message = view.getComposerSubmissionText();
+
+  try {
+    const estimate = await agent.estimateRequestBudget(
+      message,
+      chatHistory,
+      view.getSelectedContextTabIds(),
+      getWorkflowDemonstrationsForNextTurn(),
+      view.getSelectedSkillMention(),
+    );
+
+    if (sequence !== requestBudgetRefreshSequence) return;
+    latestRequestBudgetEstimate = estimate;
+    if (!activeRunBaseRequestBudget) {
+      view.updateRequestBudget(estimate);
+    }
+  } catch (err: any) {
+    if (sequence !== requestBudgetRefreshSequence) return;
+    console.warn('[sidepanel] Failed to estimate request budget:', err?.message ?? err);
+    latestRequestBudgetEstimate = null;
+    view.updateRequestBudget(null);
+  } finally {
+    if (sequence === requestBudgetRefreshSequence) {
+      view.setRequestBudgetPending(false);
+    }
+  }
+}
+
+function scheduleRequestBudgetRefresh(): void {
+  requestBudgetRefreshSequence += 1;
+  const sequence = requestBudgetRefreshSequence;
+
+  if (requestBudgetRefreshTimer !== null) {
+    window.clearTimeout(requestBudgetRefreshTimer);
+    requestBudgetRefreshTimer = null;
+  }
+
+  if (agent.isBusy() && activeRunBaseRequestBudget) {
+    view.setRequestBudgetPending(true);
+    return;
+  }
+
+  view.setRequestBudgetPending(true);
+  requestBudgetRefreshTimer = window.setTimeout(() => {
+    requestBudgetRefreshTimer = null;
+    void refreshRequestBudgetEstimate(sequence);
+  }, REQUEST_BUDGET_REFRESH_DELAY_MS);
+}
+
+function handleConversationDraftChange(): void {
+  view.saveCurrentConversation(chatHistory, agent.getConversationCompactionState());
+  scheduleRequestBudgetRefresh();
+}
+
+async function handleCopyContextDebug(): Promise<string> {
+  const activeRequestContext = agent.getActiveRequestContextDebugText();
+  if (activeRequestContext) {
+    return activeRequestContext;
+  }
+
+  const draftQuery = view.getComposerSubmissionText();
+  if (draftQuery) {
+    return agent.buildRequestContextDebugText(
+      draftQuery,
+      chatHistory,
+      view.getSelectedContextTabIds(),
+      getWorkflowDemonstrationsForNextTurn(),
+      view.getSelectedSkillMention(),
+    );
+  }
+
+  if (latestRequestContextDebugInput) {
+    return agent.buildRequestContextDebugText(
+      latestRequestContextDebugInput.query,
+      latestRequestContextDebugInput.history,
+      latestRequestContextDebugInput.contextTabIds,
+      latestRequestContextDebugInput.workflowDemonstrations,
+      latestRequestContextDebugInput.skillMention,
+    );
+  }
+
+  return agent.buildRequestContextDebugText(
+    '[No draft message. Debugging carried conversation context only.]',
+    chatHistory,
+    view.getSelectedContextTabIds(),
+    getWorkflowDemonstrationsForNextTurn(),
+    view.getSelectedSkillMention(),
+  );
+}
+
+async function handleWorkflowRecordingStart(
+  tabId: number,
+  options?: { title?: string; captureTypedValues?: boolean },
+) {
+  return workflowRecordingStart(tabId, options);
+}
+
+async function handleWorkflowRecordingStop(tabId: number) {
+  return workflowRecordingStop(tabId);
 }
 
 function handleStopGeneration(): void {
@@ -217,15 +482,19 @@ async function refreshCurrentTabContext(tabId?: number): Promise<void> {
 
 function handleConfigApply(config: {
   mode: 'openai' | 'claude';
-  fields: Record<string, string>;
+  fields: ProviderFields;
   recursionLimit?: number;
   systemPrompt?: string;
 }): void {
+  const normalizedModel = config.mode === 'openai'
+    ? normalizePreferredOpenAiModel(config.fields.model) ?? DEFAULT_OPENAI_FIELDS.model
+    : config.fields.model;
   const llmConfig: DirectLLMConfig = {
     provider: 'direct',
-    baseUrl: config.fields.baseUrl ?? '',
-    apiKey: config.fields.apiKey ?? '',
-    model: config.fields.model ?? '',
+    baseUrl: config.fields.baseUrl,
+    apiKey: config.fields.apiKey,
+    model: normalizedModel,
+    contextWindow: config.fields.contextWindow,
   };
   configureAndRebuild(llmConfig);
   const agentApi = getAgentApi();
@@ -235,6 +504,7 @@ function handleConfigApply(config: {
   }
   const label = config.mode === 'openai' ? `OpenAI: ${llmConfig.model}` : `Claude: ${llmConfig.model}`;
   view.updateConnectionStatus(label);
+  scheduleRequestBudgetRefresh();
 }
 
 function handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: string }): void {
@@ -244,18 +514,18 @@ function handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: 
 
 function handleSystemPromptApply(prompt: string): void {
   agent.setSystemPrompt(prompt || DEFAULT_SYSTEM_PROMPT);
+  scheduleRequestBudgetRefresh();
 }
 
 function handleSkillRegistryApply(skills: SkillRegistryEntry[]): void {
   agent.setSkillRegistry(skills);
+  scheduleRequestBudgetRefresh();
 }
 
 const DEFAULT_CONFIG = {
   mode: 'openai' as const,
   fields: {
-    baseUrl: 'http://localhost:11434/v1',
-    apiKey: 'not-needed',
-    model: 'gpt-4o',
+      ...DEFAULT_OPENAI_FIELDS,
   },
   recursionLimit: DEFAULT_AGENT_RECURSION_LIMIT,
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -280,9 +550,9 @@ async function restoreSavedConfig(): Promise<void> {
 }
 
 function restoreSavedSkills(): void {
-  void getStorageValue<unknown>(SKILL_REGISTRY_STORAGE_KEY).then((value) => {
-    const skills = normalizeSkillRegistry(value);
+  void loadDomainSkillRegistryEntries().then((skills) => {
     agent.setSkillRegistry(skills);
+    scheduleRequestBudgetRefresh();
   });
 }
 
@@ -335,12 +605,14 @@ function handleToolToggle(toolName: string, enabled: boolean): void {
   agent.setToolEnabled(toolName, enabled);
   persistDisabledTools();
   logInfo('sidepanel', `Tool ${toolName} ${enabled ? 'enabled' : 'disabled'}`);
+  scheduleRequestBudgetRefresh();
 }
 
 function handleToolGroupToggle(toolNames: string[], enabled: boolean): void {
   agent.setToolsEnabled(toolNames, enabled);
   persistDisabledTools();
   logInfo('sidepanel', `${toolNames.length} tools ${enabled ? 'enabled' : 'disabled'}`);
+  scheduleRequestBudgetRefresh();
 }
 
 // ─── Conversation handling ─────────────────────────────────────────────────
@@ -350,19 +622,25 @@ function handleConversationLoad(conversation: SavedConversation): void {
   mcpAppHost.teardownAll();
   chatHistory.length = 0;
   chatHistory.push(...conversation.chatHistory as ChatTurn[]);
+  latestRequestContextDebugInput = null;
+  agent.setConversationCompactionState(conversation.compactionState);
   view.loadConversation(conversation);
   view.enableInput();
   logInfo('sidepanel', `Loaded conversation: ${conversation.title}`);
+  scheduleRequestBudgetRefresh();
 }
 
 function handleConversationNew(): void {
   // Clear current chat and start fresh
   mcpAppHost.teardownAll();
   chatHistory.length = 0;
+  latestRequestContextDebugInput = null;
+  agent.setConversationCompactionState(null);
   view.clearMessages();
   view.setCurrentConversationId(null);
   view.enableInput();
   logInfo('sidepanel', 'Started new conversation');
+  scheduleRequestBudgetRefresh();
 }
 
 function handleConversationDelete(id: string): void {
@@ -407,11 +685,15 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // Track active tab
 chrome.tabs.onActivated?.addListener(({ tabId }) => {
+  invalidateBrowserContextSnapshotCache(tabId);
   activeTabId = tabId;
   void refreshCurrentTabContext(tabId);
 });
 
 chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.title || changeInfo.url || changeInfo.status) {
+    invalidateBrowserContextSnapshotCache(tabId);
+  }
   if (tabId !== activeTabId) return;
   if (!changeInfo.title && !changeInfo.url && !changeInfo.status) return;
   void refreshCurrentTabContext(tab.id);
@@ -419,6 +701,7 @@ chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
 
 // When a tab is closed, remove its WebMCP tools from the agent and update annotation
 chrome.tabs.onRemoved?.addListener((tabId) => {
+  invalidateBrowserContextSnapshotCache(tabId);
   registry.delete(tabId);
   agent.removeWebMCPToolsForTab(tabId);
   view.removeContextTab(tabId);

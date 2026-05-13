@@ -1,12 +1,14 @@
 // ─── Side Panel Chat View ───────────────────────────────────────────────────
 // Gemini-like sidebar chat UI. Modeled after radiology-copilot-view.ts.
 
-import type { WebMCPRegistryEntry } from '../shared/types';
+import type { ConversationCompactionState, WebMCPRegistryEntry } from '../shared/types';
 import {
+  type RequestBudgetEstimate,
   type AutomationApprovalDecision,
   type ToolStepEvent,
   type ToolManifestEntry,
 } from './agent';
+import { buildWorkflowDemonstrationContext } from './agent-runtime/browser-context';
 import { getCategoryLabel } from './agent-runtime/tooling';
 import {
   DEFAULT_AGENT_RECURSION_LIMIT,
@@ -14,20 +16,23 @@ import {
   DEFAULT_OPENAI_FIELDS,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_VLM_CONFIG,
+  normalizeContextWindow,
+  type ProviderFields,
 } from '../shared/config';
 import {
   loadConfigEditorState,
   loadPromptEditorState,
   saveConfigEditorState,
-  saveSkillRegistryEntries,
+  saveDomainSkillRegistryEntries,
   saveSystemPrompt,
 } from './chat-view/config-store';
+import { saveDomainSkillProposalEntries } from './domain-skill-proposals';
 import {
   loadSavedConversations,
   removeSavedConversation,
   upsertSavedConversation,
 } from './chat-view/conversation-store';
-import type { ContextTabOption, SavedConversation } from './chat-view/types';
+import type { ContextTabOption, SavedConversation, SavedConversationMessage } from './chat-view/types';
 import {
   isToolVisibleToModel,
   type MCPAppRenderRequest,
@@ -36,21 +41,37 @@ import {
 } from './mcp-client';
 import type { MCPAppLoadedResource } from './mcp-app-host';
 import {
+  buildSkillMentionPickerOptions,
   formatSkillTagsInput,
   parseSkillTagsInput,
   parseSkillMarkdownImport,
   slugifySkillName,
+  toSkillMentionReference,
   type SkillDraft,
+  type SkillMentionPickerOption,
   type SkillRegistryEntry,
 } from './skills-registry';
+import type { WorkflowRecordingStartResult, WorkflowRecordingStopResult } from '../shared/messages';
+import type {
+  DomainSkillProposal,
+  InteractionSkillEntry,
+  SkillMention,
+  SkillMentionReference,
+  WorkflowDemonstration,
+} from '../shared/types';
 export type { SavedConversation, ContextTabOption } from './chat-view/types';
 
 export interface ChatViewCallbacks {
-  onSendMessage: (message: string, contextTabIds: number[]) => void;
+  onSendMessage: (
+    message: string,
+    contextTabIds: number[],
+    workflowDemonstrations: WorkflowDemonstration[],
+    skillMention: SkillMention | null,
+  ) => void;
   onStopGeneration: () => void;
   onConfigApply: (config: {
     mode: 'openai' | 'claude';
-    fields: Record<string, string>;
+    fields: ProviderFields;
     recursionLimit: number;
     systemPrompt?: string;
   }) => void;
@@ -64,9 +85,13 @@ export interface ChatViewCallbacks {
   onConversationLoad: (conversation: SavedConversation) => void;
   onConversationNew: () => void;
   onConversationDelete: (id: string) => void;
+  onConversationDraftChange: () => void;
+  onCopyContextDebug: () => Promise<string>;
   onMCPServerAdd: (name: string, url: string, authToken?: string) => Promise<MCPServerEntry>;
   onMCPServerRemove: (id: string) => void;
   onMCPServerReconnect: (id: string) => Promise<MCPServerEntry>;
+  onWorkflowRecordingStart: (tabId: number, options?: { title?: string; captureTypedValues?: boolean }) => Promise<WorkflowRecordingStartResult>;
+  onWorkflowRecordingStop: (tabId: number) => Promise<WorkflowRecordingStopResult>;
 }
 
 type SurfaceMode = 'chat' | 'tools' | 'mcp' | 'conversations' | 'prompt' | 'config';
@@ -81,11 +106,18 @@ export class ChatView {
   private messagesContainer!: HTMLElement;
   private inputContainer!: HTMLElement;
   private composerMainRow!: HTMLElement;
+  private requestBudgetIndicator!: HTMLElement;
+  private requestBudgetRingFill!: SVGCircleElement;
+  private requestBudgetValue!: HTMLElement;
+  private requestBudgetCopyButton!: HTMLButtonElement;
   private messageInput!: HTMLTextAreaElement;
+  private recordButton!: HTMLButtonElement;
   private sendButton!: HTMLButtonElement;
   private contextTabsContainer!: HTMLElement;
   private contextAddButton!: HTMLButtonElement;
   private contextPicker!: HTMLElement;
+  private skillMentionComposerSlot!: HTMLElement;
+  private workflowDemonstrationsDock!: HTMLElement;
   private webmcpIndicator!: HTMLElement;
   private newChatButton!: HTMLButtonElement;
   private bottomNav!: HTMLElement;
@@ -129,14 +161,25 @@ export class ChatView {
   private includeCurrentContextTab = true;
   private hasInitializedCurrentContext = false;
   private extraContextTabs: ContextTabOption[] = [];
-  private contextPickerMode: 'button' | 'mention' | null = null;
+  private contextPickerMode: 'button' | 'mention' | 'skill' | null = null;
   private contextPickerItems: ContextTabOption[] = [];
+  private skillPickerItems: SkillMentionPickerOption[] = [];
   private contextPickerHighlightIndex = 0;
   private contextPickerQuery = '';
   private mentionRange: { start: number; end: number } | null = null;
+  private skillMentionRange: { start: number; end: number } | null = null;
+  private conversationMessages: SavedConversationMessage[] = [];
+  private workflowDemonstrationsById = new Map<string, WorkflowDemonstration>();
+  private stagedWorkflowDemonstrationIds: string[] = [];
+  private selectedSkillMention: SkillMention | null = null;
+  private isWorkflowRecording = false;
+  private workflowRecordingTabId: number | null = null;
+  private draftChangeNotificationsEnabled = false;
 
   // Prompt skills registry
   private skillRegistry: SkillRegistryEntry[] = [];
+  private domainSkillProposals: DomainSkillProposal[] = [];
+  private interactionSkillRegistry: InteractionSkillEntry[] = [];
   private editingSkillId: string | null = null;
   private isSkillEditorOpen = false;
   private skillEditorSlugDirty = false;
@@ -145,6 +188,7 @@ export class ChatView {
     this.container = container;
     this.callbacks = callbacks;
     this.build();
+    this.draftChangeNotificationsEnabled = true;
   }
 
   // ─── Public API ─────────────────────────────────────────────────────────
@@ -207,32 +251,150 @@ export class ChatView {
     return ids;
   }
 
-  public addUserMessage(message: string): void {
-    const el = document.createElement('div');
-    el.className = 'message user-message';
-    el.innerHTML = `
-      <div class="message-content">${this.escapeHtml(message)}</div>
-      <div class="message-time">${new Date().toLocaleTimeString()}</div>`;
-    this.messagesContainer.appendChild(el);
-    this.scrollToBottom();
+  public getConversationWorkflowDemonstrations(): WorkflowDemonstration[] {
+    const seen = new Set<string>();
+    const items: WorkflowDemonstration[] = [];
+
+    for (const message of this.conversationMessages) {
+      for (const id of message.workflowDemonstrationIds ?? []) {
+        if (seen.has(id)) continue;
+        const demonstration = this.workflowDemonstrationsById.get(id);
+        if (!demonstration) continue;
+        seen.add(id);
+        items.push(demonstration);
+      }
+    }
+
+    return items;
+  }
+
+  public getStagedWorkflowDemonstrations(): WorkflowDemonstration[] {
+    return this.stagedWorkflowDemonstrationIds
+      .map((id) => this.workflowDemonstrationsById.get(id))
+      .filter((entry): entry is WorkflowDemonstration => Boolean(entry));
+  }
+
+  public getSelectedSkillMention(): SkillMention | null {
+    return this.selectedSkillMention;
+  }
+
+  public getComposerSubmissionText(): string {
+    const rawMessage = this.messageInput?.value.trim() ?? '';
+    const attachedWorkflowDemonstrations = this.getStagedWorkflowDemonstrations();
+    return rawMessage || (attachedWorkflowDemonstrations.length > 0
+      ? `Attached workflow demonstration${attachedWorkflowDemonstrations.length !== 1 ? 's' : ''}.`
+      : '');
+  }
+
+  private async copyRequestBudgetContext(): Promise<void> {
+    if (!this.requestBudgetCopyButton) return;
+
+    const originalLabel = this.requestBudgetCopyButton.textContent || 'Copy Context';
+    this.requestBudgetCopyButton.disabled = true;
+
+    try {
+      const contextText = await this.callbacks.onCopyContextDebug();
+      await navigator.clipboard.writeText(contextText);
+      this.requestBudgetCopyButton.textContent = 'Copied';
+    } catch (err) {
+      console.warn('[chat-view] Failed to copy request budget context:', err);
+      this.requestBudgetCopyButton.textContent = 'Copy failed';
+    }
+
+    window.setTimeout(() => {
+      this.requestBudgetCopyButton.disabled = false;
+      this.requestBudgetCopyButton.textContent = originalLabel;
+    }, 1800);
+  }
+
+  public updateRequestBudget(estimate: RequestBudgetEstimate | null): void {
+    if (!this.requestBudgetIndicator || !this.requestBudgetRingFill) return;
+
+    if (!estimate) {
+      this.requestBudgetIndicator.classList.remove('hidden');
+      this.requestBudgetIndicator.classList.remove('is-pending');
+      this.requestBudgetIndicator.title = 'Estimated Request Budget: 0%';
+      this.requestBudgetIndicator.setAttribute('aria-label', 'Estimated Request Budget: 0%');
+      this.requestBudgetValue.textContent = '0%';
+      this.requestBudgetRingFill.style.stroke = '#6a6870';
+      this.requestBudgetRingFill.style.strokeDasharray = '87.965';
+      this.requestBudgetRingFill.style.strokeDashoffset = '87.965';
+      return;
+    }
+
+    const clampedRatio = Math.max(0, Math.min(estimate.usageRatio, 1));
+    const circumference = 2 * Math.PI * 14;
+    const visualRatio = estimate.estimatedTokens > 0 ? Math.max(clampedRatio, 0.01) : 0;
+    const dashOffset = circumference * (1 - visualRatio);
+    const percent = estimate.usageRatio > 0 && estimate.usageRatio < 0.01
+      ? `${(estimate.usageRatio * 100).toFixed(1)}%`
+      : `${Math.max(0, Math.round(estimate.usageRatio * 100))}%`;
+    const strokeColor = this.getRequestBudgetColor(clampedRatio);
+    const tooltip = `Estimated Request Budget: ${percent} (${estimate.estimatedTokens.toLocaleString()} / ${estimate.contextWindow.toLocaleString()} tokens, approximate)`;
+
+    this.requestBudgetIndicator.classList.remove('hidden');
+  this.requestBudgetValue.textContent = percent;
+    this.requestBudgetRingFill.style.stroke = strokeColor;
+    this.requestBudgetRingFill.style.strokeDasharray = `${circumference.toFixed(3)}`;
+    this.requestBudgetRingFill.style.strokeDashoffset = dashOffset.toFixed(3);
+    this.requestBudgetIndicator.title = tooltip;
+    this.requestBudgetIndicator.setAttribute('aria-label', tooltip);
+  }
+
+  public setRequestBudgetPending(pending: boolean): void {
+    if (!this.requestBudgetIndicator) return;
+    if (pending) {
+      this.requestBudgetIndicator.classList.remove('hidden');
+      this.requestBudgetIndicator.title = 'Estimating Request Budget...';
+      this.requestBudgetIndicator.setAttribute('aria-label', 'Estimating Request Budget');
+      this.requestBudgetValue.textContent = '...';
+      this.requestBudgetRingFill.style.stroke = '#6a6870';
+      this.requestBudgetRingFill.style.strokeDasharray = '87.965';
+      this.requestBudgetRingFill.style.strokeDashoffset = '87.965';
+    }
+    this.requestBudgetIndicator.classList.toggle('is-pending', pending);
+  }
+
+  public addUserMessage(
+    message: string,
+    workflowDemonstrationIds: string[] = [],
+    skillMention: SkillMentionReference | null = null,
+  ): void {
+    const attachedIds = workflowDemonstrationIds.filter((id) => this.workflowDemonstrationsById.has(id));
+    if (attachedIds.length > 0) {
+      this.stagedWorkflowDemonstrationIds = this.stagedWorkflowDemonstrationIds.filter((id) => !attachedIds.includes(id));
+      this.renderStagedWorkflowDemonstrations();
+    }
+
+    const entry: SavedConversationMessage = {
+      role: 'user',
+      content: message,
+      time: new Date().toLocaleTimeString(),
+      ...(attachedIds.length > 0 ? { workflowDemonstrationIds: attachedIds } : {}),
+      ...(skillMention ? { skillMention: toSkillMentionReference(skillMention) } : {}),
+    };
+    this.conversationMessages.push(entry);
+    this.renderConversationMessage(entry);
   }
 
   public addAssistantMessage(message: string): void {
-    const el = document.createElement('div');
-    el.className = 'message assistant-message';
-    el.innerHTML = `
-      <div class="message-content">${this.formatMessage(message)}</div>
-      <div class="message-time">${new Date().toLocaleTimeString()}</div>`;
-    this.messagesContainer.appendChild(el);
-    this.scrollToBottom();
+    const entry: SavedConversationMessage = {
+      role: 'assistant',
+      content: message,
+      time: new Date().toLocaleTimeString(),
+    };
+    this.conversationMessages.push(entry);
+    this.renderConversationMessage(entry);
   }
 
   public addSystemMessage(text: string): void {
-    const el = document.createElement('div');
-    el.className = 'message system-message';
-    el.innerHTML = `<div class="message-content">${this.escapeHtml(text)}</div>`;
-    this.messagesContainer.appendChild(el);
-    this.scrollToBottom();
+    const entry: SavedConversationMessage = {
+      role: 'system',
+      content: text,
+      time: '',
+    };
+    this.conversationMessages.push(entry);
+    this.renderConversationMessage(entry);
   }
 
   public showTypingIndicator(): void {
@@ -264,6 +426,12 @@ export class ChatView {
       this.startStreamingWords();
       return;
     }
+
+    this.conversationMessages.push({
+      role: 'assistant',
+      content: message,
+      time: new Date().toLocaleTimeString(),
+    });
 
     const el = document.createElement('div');
     el.className = 'message assistant-message';
@@ -400,6 +568,109 @@ export class ChatView {
 
     this.scrollToolStepsToBottom();
     this.scrollToBottom();
+  }
+
+  private renderConversationMessage(message: SavedConversationMessage): void {
+    const el = document.createElement('div');
+    el.className = `message ${message.role}-message`;
+
+    const content = document.createElement('div');
+    content.className = 'message-content';
+    if (message.role === 'assistant') {
+      content.innerHTML = this.formatMessage(message.content);
+    } else {
+      if (message.role === 'user' && message.skillMention) {
+        content.classList.add('with-skill-mention');
+        content.appendChild(this.createSkillMentionChip(message.skillMention, 'message'));
+        const text = document.createElement('span');
+        text.className = 'message-text';
+        text.innerHTML = this.escapeHtml(message.content).replace(/\n/g, '<br>');
+        content.appendChild(text);
+      } else {
+        content.innerHTML = this.escapeHtml(message.content).replace(/\n/g, '<br>');
+      }
+    }
+    el.appendChild(content);
+
+    if (message.workflowDemonstrationIds?.length) {
+      const attachments = document.createElement('div');
+      attachments.className = 'message-workflow-demonstrations';
+      for (const workflowDemonstrationId of message.workflowDemonstrationIds) {
+        const demonstration = this.workflowDemonstrationsById.get(workflowDemonstrationId);
+        if (!demonstration) continue;
+        attachments.appendChild(this.createWorkflowDemonstrationMessageCard(demonstration));
+      }
+      if (attachments.childElementCount > 0) {
+        el.appendChild(attachments);
+      }
+    }
+
+    if (message.time) {
+      const time = document.createElement('div');
+      time.className = 'message-time';
+      time.textContent = message.time;
+      el.appendChild(time);
+    }
+
+    this.messagesContainer.appendChild(el);
+    this.scrollToBottom();
+  }
+
+  private createSkillMentionChip(
+    mention: SkillMentionReference,
+    placement: 'composer' | 'message',
+  ): HTMLElement {
+    const chip = document.createElement('span');
+    chip.className = `skill-mention-chip ${mention.kind === 'domain' ? 'domain' : 'interaction'} is-${placement}`;
+    chip.title = `${mention.kind === 'domain' ? 'Domain Skill' : 'Interaction Skill'}: ${mention.name}`;
+
+    const kind = document.createElement('span');
+    kind.className = 'skill-mention-kind';
+    kind.textContent = mention.kind === 'domain' ? 'D' : 'I';
+
+    const name = document.createElement('span');
+    name.className = 'skill-mention-name';
+    name.textContent = mention.name;
+
+    chip.appendChild(kind);
+    chip.appendChild(name);
+
+    if (placement === 'composer') {
+      const remove = document.createElement('button');
+      remove.className = 'skill-mention-remove';
+      remove.type = 'button';
+      remove.title = `Remove ${mention.name}`;
+      remove.setAttribute('aria-label', `Remove ${mention.name} skill mention`);
+      remove.textContent = '×';
+      remove.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.selectedSkillMention = null;
+        this.renderSelectedSkillMention();
+        this.refreshComposerState();
+        this.messageInput.focus();
+      });
+      chip.appendChild(remove);
+    }
+
+    return chip;
+  }
+
+  private createWorkflowDemonstrationMessageCard(demonstration: WorkflowDemonstration): HTMLElement {
+    const chip = document.createElement('div');
+    chip.className = 'context-tab-chip workflow-demonstration-chip message-chip';
+    chip.title = `${demonstration.title} · ${demonstration.steps.length} step${demonstration.steps.length !== 1 ? 's' : ''}`;
+    chip.tabIndex = 0;
+    chip.setAttribute('role', 'button');
+    chip.setAttribute('aria-label', `Show ${demonstration.title} workflow demonstration details`);
+
+    const title = document.createElement('span');
+    title.className = 'context-tab-title workflow-demonstration-chip-title';
+    title.textContent = demonstration.title;
+
+    chip.appendChild(title);
+    chip.appendChild(this.createWorkflowDemonstrationIcon());
+    this.bindWorkflowDemonstrationDetailsTrigger(chip, demonstration);
+    return chip;
   }
 
   /**
@@ -780,11 +1051,44 @@ export class ChatView {
         <line x1="5" y1="12" x2="19" y2="12"></line>
       </svg>`;
 
+    this.recordButton = document.createElement('button');
+    this.recordButton.id = 'record-button';
+    this.recordButton.type = 'button';
+    this.recordButton.disabled = true;
+    this.recordButton.innerHTML = this.getRecordButtonMarkup();
+
     contextBar.appendChild(this.contextTabsContainer);
+
+    this.workflowDemonstrationsDock = document.createElement('div');
+    this.workflowDemonstrationsDock.className = 'workflow-demonstrations-dock hidden';
+
+    contextBar.appendChild(this.workflowDemonstrationsDock);
     contextBar.appendChild(this.contextAddButton);
+    contextBar.appendChild(this.recordButton);
 
     this.composerMainRow = document.createElement('div');
     this.composerMainRow.className = 'chat-input-main';
+
+    this.requestBudgetIndicator = document.createElement('div');
+    this.requestBudgetIndicator.className = 'request-budget-indicator';
+    this.requestBudgetIndicator.innerHTML = `
+      <span class="request-budget-label">Request Budget</span>
+      <button class="request-budget-copy-btn" type="button">Copy Context</button>
+      <span class="request-budget-value">0%</span>
+      <span class="request-budget-ring" aria-hidden="true">
+        <svg viewBox="0 0 40 40" focusable="false">
+          <circle class="request-budget-ring-track" cx="20" cy="20" r="14"></circle>
+          <circle class="request-budget-ring-fill" cx="20" cy="20" r="14"></circle>
+        </svg>
+      </span>`;
+    this.requestBudgetIndicator.title = 'Estimated Request Budget: 0%';
+    this.requestBudgetIndicator.setAttribute('aria-label', 'Estimated Request Budget: 0%');
+    this.requestBudgetRingFill = this.requestBudgetIndicator.querySelector('.request-budget-ring-fill') as SVGCircleElement;
+    this.requestBudgetValue = this.requestBudgetIndicator.querySelector('.request-budget-value') as HTMLElement;
+    this.requestBudgetCopyButton = this.requestBudgetIndicator.querySelector('.request-budget-copy-btn') as HTMLButtonElement;
+    this.requestBudgetCopyButton.addEventListener('click', () => {
+      void this.copyRequestBudgetContext();
+    });
 
     this.messageInput = document.createElement('textarea');
     this.messageInput.id = 'chat-input';
@@ -793,11 +1097,15 @@ export class ChatView {
     this.messageInput.rows = 1;
     this.messageInput.spellcheck = true;
 
+    this.skillMentionComposerSlot = document.createElement('div');
+    this.skillMentionComposerSlot.className = 'skill-mention-composer-slot';
+
     this.sendButton = document.createElement('button');
     this.sendButton.id = 'send-button';
     this.sendButton.disabled = true;
     this.sendButton.innerHTML = this.getSendButtonMarkup();
 
+    this.composerMainRow.appendChild(this.skillMentionComposerSlot);
     this.composerMainRow.appendChild(this.messageInput);
     this.composerMainRow.appendChild(this.sendButton);
 
@@ -807,6 +1115,7 @@ export class ChatView {
     this.inputContainer.appendChild(contextBar);
     this.inputContainer.appendChild(this.contextPicker);
     this.inputContainer.appendChild(this.composerMainRow);
+    this.inputContainer.appendChild(this.requestBudgetIndicator);
 
     // Tools panel (hidden, sits between messages and input)
     this.toolsPanel = this.createToolsPanel();
@@ -877,7 +1186,9 @@ export class ChatView {
     // Event listeners
     this.setupEventListeners();
     this.setActiveSurface('chat');
+    this.refreshSkillMentionRegistries();
     this.renderContextTabs();
+    this.renderSelectedSkillMention();
     this.autoResizeMessageInput();
     this.refreshComposerState();
   }
@@ -889,20 +1200,32 @@ export class ChatView {
         return;
       }
 
-      const msg = this.messageInput.value.trim();
+      const attachedWorkflowDemonstrations = this.getStagedWorkflowDemonstrations();
+      const rawMessage = this.messageInput.value.trim();
+      const msg = rawMessage || (attachedWorkflowDemonstrations.length > 0
+        ? `Attached workflow demonstration${attachedWorkflowDemonstrations.length !== 1 ? 's' : ''}.`
+        : '');
       if (msg) {
-        this.callbacks.onSendMessage(msg, this.getSelectedContextTabIds());
+        const skillMention = this.selectedSkillMention;
+        this.callbacks.onSendMessage(msg, this.getSelectedContextTabIds(), attachedWorkflowDemonstrations, skillMention);
         this.messageInput.value = '';
+        this.selectedSkillMention = null;
+        this.renderSelectedSkillMention();
         this.autoResizeMessageInput();
         this.closeContextPicker();
         this.refreshComposerState();
+        this.notifyConversationDraftChange();
       }
     };
 
     this.sendButton.addEventListener('click', send);
+    this.recordButton.addEventListener('click', (e) => {
+      e.stopPropagation();
+      void this.toggleWorkflowRecording();
+    });
     this.contextAddButton.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (!this.isInputEnabled || this.isAgentBusy) return;
+      if (!this.isInputEnabled || this.isAgentBusy || this.isWorkflowRecording) return;
       if (this.contextPickerMode === 'button') {
         this.closeContextPicker();
         return;
@@ -911,6 +1234,7 @@ export class ChatView {
       this.contextPickerQuery = '';
       this.contextPickerHighlightIndex = 0;
       this.mentionRange = null;
+      this.skillMentionRange = null;
       await this.refreshContextPicker();
     });
 
@@ -918,6 +1242,7 @@ export class ChatView {
       this.autoResizeMessageInput();
       this.syncMentionPickerFromInput();
       this.refreshComposerState();
+      this.notifyConversationDraftChange();
     });
     this.messageInput.addEventListener('click', () => this.syncMentionPickerFromInput());
     this.messageInput.addEventListener('focus', () => this.syncMentionPickerFromInput());
@@ -926,19 +1251,20 @@ export class ChatView {
       e.stopPropagation();
       if (this.contextPickerMode && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
         e.preventDefault();
-        if (this.contextPickerItems.length === 0) return;
+        const itemCount = this.getActivePickerItemCount();
+        if (itemCount === 0) return;
         const direction = e.key === 'ArrowDown' ? 1 : -1;
         const nextIndex =
-          (this.contextPickerHighlightIndex + direction + this.contextPickerItems.length) %
-          this.contextPickerItems.length;
+          (this.contextPickerHighlightIndex + direction + itemCount) %
+          itemCount;
         this.contextPickerHighlightIndex = nextIndex;
         this.updateContextPickerHighlight();
         return;
       }
       if (this.contextPickerMode && ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab')) {
-        if (this.contextPickerItems.length > 0) {
+        if (this.getActivePickerItemCount() > 0) {
           e.preventDefault();
-          this.selectContextPickerItem(this.contextPickerItems[this.contextPickerHighlightIndex]);
+          this.selectActivePickerItem();
           return;
         }
       }
@@ -947,7 +1273,7 @@ export class ChatView {
         this.closeContextPicker();
         return;
       }
-      if (this.isAgentBusy) return;
+      if (this.isAgentBusy || this.isWorkflowRecording) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         send();
@@ -993,19 +1319,29 @@ export class ChatView {
   }
 
   private refreshComposerState(): void {
-    if (!this.messageInput || !this.sendButton) return;
+    if (!this.messageInput || !this.sendButton || !this.recordButton) return;
 
-    this.messageInput.disabled = !this.isInputEnabled || this.isAgentBusy;
-    this.contextAddButton.disabled = !this.isInputEnabled || this.isAgentBusy;
+    const recordingTarget = this.getPreferredRecordingTab();
+    const composerDisabled = !this.isInputEnabled || this.isAgentBusy || this.isWorkflowRecording;
+    const hasSendableContent = this.messageInput.value.trim().length > 0 || this.stagedWorkflowDemonstrationIds.length > 0;
+
+    this.messageInput.disabled = composerDisabled;
+    this.contextAddButton.disabled = composerDisabled;
     this.contextTabsContainer
       .querySelectorAll<HTMLButtonElement>('.context-tab-remove')
       .forEach((button) => {
-        button.disabled = !this.isInputEnabled || this.isAgentBusy;
+        button.disabled = composerDisabled;
       });
 
-    if (!this.isInputEnabled || this.isAgentBusy) {
+    if (!this.isInputEnabled || this.isAgentBusy || this.isWorkflowRecording) {
       this.closeContextPicker();
     }
+
+    this.recordButton.disabled = !this.isInputEnabled || this.isAgentBusy || (!this.isWorkflowRecording && !recordingTarget);
+    this.recordButton.classList.toggle('is-recording', this.isWorkflowRecording);
+    this.recordButton.innerHTML = this.isWorkflowRecording ? this.getStopRecordButtonMarkup() : this.getRecordButtonMarkup();
+    this.recordButton.title = this.isWorkflowRecording ? 'Stop recording a workflow demonstration' : 'Record a workflow demonstration';
+    this.recordButton.setAttribute('aria-label', this.recordButton.title);
 
     if (this.isAgentBusy) {
       this.sendButton.disabled = false;
@@ -1020,15 +1356,121 @@ export class ChatView {
     this.sendButton.innerHTML = this.getSendButtonMarkup();
     this.sendButton.title = 'Send message';
     this.sendButton.setAttribute('aria-label', 'Send message');
-    this.sendButton.disabled = !this.isInputEnabled || this.messageInput.value.trim().length === 0;
+    this.sendButton.disabled = !this.isInputEnabled || this.isWorkflowRecording || !hasSendableContent;
+  }
+
+  private renderSelectedSkillMention(): void {
+    if (!this.skillMentionComposerSlot) return;
+    this.skillMentionComposerSlot.innerHTML = '';
+    this.skillMentionComposerSlot.classList.toggle('hidden', !this.selectedSkillMention);
+    if (this.selectedSkillMention) {
+      this.skillMentionComposerSlot.appendChild(this.createSkillMentionChip(this.selectedSkillMention, 'composer'));
+    }
+    this.notifyConversationDraftChange();
+  }
+
+  private notifyConversationDraftChange(): void {
+    if (!this.draftChangeNotificationsEnabled) return;
+    this.callbacks.onConversationDraftChange();
+  }
+
+  private getRequestBudgetColor(usageRatio: number): string {
+    const clamped = Math.max(0, Math.min(usageRatio, 1));
+    const saturation = Math.round(clamped * 82);
+    const lightness = Math.round(58 - (clamped * 8));
+    return `hsl(0 ${saturation}% ${lightness}%)`;
   }
 
   private getSendButtonMarkup(): string {
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
   }
 
+  private getRecordButtonMarkup(): string {
+    return `<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="6"></circle></svg>`;
+  }
+
+  private getStopRecordButtonMarkup(): string {
+    return `<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true"><rect x="7" y="7" width="10" height="10"></rect></svg>`;
+  }
+
   private getStopButtonMarkup(): string {
     return `<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="1"></rect></svg>`;
+  }
+
+  private createWorkflowDemonstrationIcon(): HTMLElement {
+    const icon = document.createElement('span');
+    icon.className = 'workflow-demonstration-chip-icon';
+    icon.innerHTML = this.getRecordButtonMarkup();
+    icon.setAttribute('aria-hidden', 'true');
+    return icon;
+  }
+
+  private bindWorkflowDemonstrationDetailsTrigger(
+    element: HTMLElement,
+    demonstration: WorkflowDemonstration,
+  ): void {
+    const isNestedControl = (target: EventTarget | null) => (
+      target instanceof HTMLElement && Boolean(target.closest('button'))
+    );
+
+    element.addEventListener('click', (e) => {
+      if (isNestedControl(e.target)) return;
+      e.stopPropagation();
+      this.showWorkflowDemonstrationDetails(demonstration);
+    });
+    element.addEventListener('keydown', (e) => {
+      if (isNestedControl(e.target)) return;
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.showWorkflowDemonstrationDetails(demonstration);
+    });
+  }
+
+  private showWorkflowDemonstrationDetails(demonstration: WorkflowDemonstration): void {
+    this.container.querySelector('.workflow-demonstration-detail-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'workflow-demonstration-detail-overlay';
+
+    const panel = document.createElement('div');
+    panel.className = 'workflow-demonstration-detail-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', `${demonstration.title} workflow demonstration context`);
+
+    const header = document.createElement('div');
+    header.className = 'workflow-demonstration-detail-header';
+
+    const title = document.createElement('div');
+    title.className = 'workflow-demonstration-detail-title';
+    title.textContent = demonstration.title;
+
+    const closeButton = document.createElement('button');
+    closeButton.className = 'workflow-demonstration-detail-close';
+    closeButton.type = 'button';
+    closeButton.textContent = '×';
+    closeButton.title = 'Close workflow demonstration details';
+    closeButton.setAttribute('aria-label', 'Close workflow demonstration details');
+
+    const preview = document.createElement('pre');
+    preview.className = 'workflow-demonstration-detail-context';
+    preview.textContent = buildWorkflowDemonstrationContext([demonstration]);
+
+    const close = () => overlay.remove();
+    closeButton.addEventListener('click', close);
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close();
+    });
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    header.appendChild(title);
+    header.appendChild(closeButton);
+    panel.appendChild(header);
+    panel.appendChild(preview);
+    overlay.appendChild(panel);
+    this.container.appendChild(overlay);
+    closeButton.focus();
   }
 
   private autoResizeMessageInput(): void {
@@ -1066,6 +1508,7 @@ export class ChatView {
 
     this.refreshComposerState();
     this.scrollContextTabsToEnd();
+    this.notifyConversationDraftChange();
   }
 
   private createContextTabChip(tab: ContextTabOption, label: string, isCurrent: boolean): HTMLElement {
@@ -1116,8 +1559,18 @@ export class ChatView {
       return;
     }
 
+    if (this.contextPickerMode === 'skill') {
+      const options = this.getAvailableSkillMentionOptions(this.contextPickerQuery);
+      this.skillPickerItems = options;
+      this.contextPickerItems = [];
+      this.contextPickerHighlightIndex = Math.min(this.contextPickerHighlightIndex, Math.max(options.length - 1, 0));
+      this.renderSkillPickerList();
+      return;
+    }
+
     const tabs = await this.getAvailableContextTabs(this.contextPickerQuery);
     this.contextPickerItems = tabs;
+    this.skillPickerItems = [];
     this.contextPickerHighlightIndex = Math.min(this.contextPickerHighlightIndex, Math.max(tabs.length - 1, 0));
     this.renderContextPickerList();
   }
@@ -1126,6 +1579,10 @@ export class ChatView {
     if (!this.contextPicker) return;
     if (!this.contextPickerMode) {
       this.closeContextPicker();
+      return;
+    }
+    if (this.contextPickerMode === 'skill') {
+      this.renderSkillPickerList();
       return;
     }
 
@@ -1176,6 +1633,61 @@ export class ChatView {
     this.updateContextPickerHighlight();
   }
 
+  private renderSkillPickerList(): void {
+    if (!this.contextPicker || this.contextPickerMode !== 'skill') return;
+    const hint = 'Select a skill with /';
+
+    if (this.skillPickerItems.length === 0) {
+      this.contextPicker.innerHTML = `
+        <div class="context-picker-header">${this.escapeHtml(hint)}</div>
+        <div class="context-picker-empty">No matching skills</div>`;
+      this.contextPicker.classList.remove('hidden');
+      return;
+    }
+
+    const itemsHtml = this.skillPickerItems.map((option, index) => {
+      const mention = option.mention;
+      const title = this.escapeHtml(mention.name);
+      const slug = this.escapeHtml(mention.slug);
+      const description = this.escapeHtml(this.truncateText(mention.description || 'No description provided.', 100));
+      const kind = option.kind === 'domain' ? 'Domain Skill' : 'Interaction Skill';
+      const matched = option.matchedContext ? '<span class="skill-picker-match">Matched</span>' : '';
+      return `
+        <button class="context-picker-item skill-picker-item ${option.className}${index === this.contextPickerHighlightIndex ? ' active' : ''}" type="button">
+          <span class="skill-picker-row">
+            <span class="skill-picker-kind">${this.escapeHtml(kind)}</span>
+            ${matched}
+          </span>
+          <span class="context-picker-item-title">${title}</span>
+          <span class="context-picker-item-url">${slug} · ${description}</span>
+        </button>`;
+    }).join('');
+
+    this.contextPicker.innerHTML = `
+      <div class="context-picker-header">${this.escapeHtml(hint)}</div>
+      <div class="context-picker-list">${itemsHtml}</div>`;
+
+    this.contextPicker.querySelectorAll<HTMLButtonElement>('.context-picker-item').forEach((button, index) => {
+      button.addEventListener('mouseenter', () => {
+        this.contextPickerHighlightIndex = index;
+        this.updateContextPickerHighlight();
+      });
+      button.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const selected = this.skillPickerItems[index];
+        if (selected) this.selectSkillPickerItem(selected);
+      });
+      button.addEventListener('click', (e) => {
+        e.preventDefault();
+        const selected = this.skillPickerItems[index];
+        if (selected) this.selectSkillPickerItem(selected);
+      });
+    });
+
+    this.contextPicker.classList.remove('hidden');
+    this.updateContextPickerHighlight();
+  }
+
   private updateContextPickerHighlight(): void {
     if (!this.contextPicker) return;
     const items = this.contextPicker.querySelectorAll<HTMLButtonElement>('.context-picker-item');
@@ -1193,6 +1705,21 @@ export class ChatView {
     requestAnimationFrame(() => {
       this.contextTabsContainer.scrollLeft = this.contextTabsContainer.scrollWidth;
     });
+  }
+
+  private getActivePickerItemCount(): number {
+    if (this.contextPickerMode === 'skill') return this.skillPickerItems.length;
+    return this.contextPickerItems.length;
+  }
+
+  private selectActivePickerItem(): void {
+    if (this.contextPickerMode === 'skill') {
+      const selected = this.skillPickerItems[this.contextPickerHighlightIndex];
+      if (selected) this.selectSkillPickerItem(selected);
+      return;
+    }
+    const selected = this.contextPickerItems[this.contextPickerHighlightIndex];
+    if (selected) this.selectContextPickerItem(selected);
   }
 
   private async getAvailableContextTabs(query: string): Promise<ContextTabOption[]> {
@@ -1238,6 +1765,50 @@ export class ChatView {
     this.messageInput.focus();
   }
 
+  private getSkillMentionContext(): { url?: string; title?: string } {
+    if (this.includeCurrentContextTab && this.currentContextTab) {
+      return { url: this.currentContextTab.url, title: this.currentContextTab.title };
+    }
+    const extra = this.extraContextTabs[0];
+    if (extra) return { url: extra.url, title: extra.title };
+    if (this.currentContextTab) return { url: this.currentContextTab.url, title: this.currentContextTab.title };
+    return {};
+  }
+
+  private getAvailableSkillMentionOptions(query: string): SkillMentionPickerOption[] {
+    return buildSkillMentionPickerOptions({
+      domainSkills: this.skillRegistry,
+      interactionSkills: this.interactionSkillRegistry,
+      query,
+      context: this.getSkillMentionContext(),
+    });
+  }
+
+  private selectSkillPickerItem(option: SkillMentionPickerOption): void {
+    this.applySkillMentionSelection();
+    this.selectedSkillMention = option.mention;
+    this.renderSelectedSkillMention();
+    this.closeContextPicker();
+    this.autoResizeMessageInput();
+    this.refreshComposerState();
+    this.messageInput.focus();
+  }
+
+  private applySkillMentionSelection(): void {
+    const range = this.skillMentionRange ?? this.inferLeadingSlashRange();
+    if (!range) return;
+    const value = this.messageInput.value;
+    const after = value.slice(range.end).replace(/^\s+/, '');
+    this.messageInput.value = after;
+    this.messageInput.setSelectionRange(0, 0);
+  }
+
+  private inferLeadingSlashRange(): { start: number; end: number } | null {
+    const match = this.messageInput.value.match(/^\/[^\s]*/);
+    if (!match) return null;
+    return { start: 0, end: match[0].length };
+  }
+
   private applyMentionSelection(): void {
     if (!this.mentionRange) return;
     const { start, end } = this.mentionRange;
@@ -1263,6 +1834,8 @@ export class ChatView {
       return;
     }
 
+    if (this.syncSkillPickerFromInput()) return;
+
     const selectionStart = this.messageInput.selectionStart ?? this.messageInput.value.length;
     const beforeCaret = this.messageInput.value.slice(0, selectionStart);
     const match = beforeCaret.match(/(^|\s)@([^\s@]*)$/);
@@ -1277,19 +1850,198 @@ export class ChatView {
     this.contextPickerQuery = query;
     this.contextPickerHighlightIndex = 0;
     this.mentionRange = { start: tokenStart, end: selectionStart };
+    this.skillMentionRange = null;
     void this.refreshContextPicker();
+  }
+
+  private syncSkillPickerFromInput(): boolean {
+    if (this.selectedSkillMention) {
+      if (this.contextPickerMode === 'skill') this.closeContextPicker();
+      return false;
+    }
+
+    const value = this.messageInput.value;
+    const match = value.match(/^\/([^\s]*)/);
+    if (!match) {
+      if (this.contextPickerMode === 'skill') this.closeContextPicker();
+      return false;
+    }
+
+    const token = match[0];
+    const selectionStart = this.messageInput.selectionStart ?? value.length;
+    if (selectionStart > token.length) {
+      if (this.contextPickerMode === 'skill') this.closeContextPicker();
+      return false;
+    }
+
+    this.contextPickerMode = 'skill';
+    this.contextPickerQuery = match[1] ?? '';
+    this.contextPickerHighlightIndex = 0;
+    this.mentionRange = null;
+    this.skillMentionRange = { start: 0, end: token.length };
+    void this.refreshContextPicker();
+    return true;
   }
 
   private closeContextPicker(): void {
     this.contextPickerMode = null;
     this.contextPickerItems = [];
+    this.skillPickerItems = [];
     this.contextPickerQuery = '';
     this.contextPickerHighlightIndex = 0;
     this.mentionRange = null;
+    this.skillMentionRange = null;
     if (this.contextPicker) {
       this.contextPicker.classList.add('hidden');
       this.contextPicker.innerHTML = '';
     }
+  }
+
+  private getPreferredRecordingTab(): ContextTabOption | null {
+    return this.currentContextTab ?? this.extraContextTabs[0] ?? null;
+  }
+
+  private async toggleWorkflowRecording(): Promise<void> {
+    if (!this.isInputEnabled || this.isAgentBusy) return;
+
+    if (this.isWorkflowRecording) {
+      const tabId = this.workflowRecordingTabId ?? this.getPreferredRecordingTab()?.tabId;
+      if (tabId == null) {
+        this.isWorkflowRecording = false;
+        this.workflowRecordingTabId = null;
+        this.refreshComposerState();
+        return;
+      }
+
+      const result = await this.callbacks.onWorkflowRecordingStop(tabId);
+      this.isWorkflowRecording = false;
+      this.workflowRecordingTabId = null;
+      this.refreshComposerState();
+
+      if (!result.ok || !result.workflowDemonstration) {
+        this.addSystemMessage(`Could not stop workflow recording: ${result.error ?? 'unknown error'}`);
+        return;
+      }
+
+      this.workflowDemonstrationsById.set(result.workflowDemonstration.id, result.workflowDemonstration);
+      if (!this.stagedWorkflowDemonstrationIds.includes(result.workflowDemonstration.id)) {
+        this.stagedWorkflowDemonstrationIds.push(result.workflowDemonstration.id);
+      }
+      this.ensureWorkflowDemonstrationContextTab(result.workflowDemonstration);
+      this.renderStagedWorkflowDemonstrations();
+      return;
+    }
+
+    const targetTab = this.getPreferredRecordingTab();
+    if (!targetTab) {
+      this.addSystemMessage('No browser tab is available to record right now.');
+      return;
+    }
+
+    const result = await this.callbacks.onWorkflowRecordingStart(targetTab.tabId, {
+      title: this.buildWorkflowDemonstrationDefaultTitle(),
+      captureTypedValues: true,
+    });
+
+    if (!result.ok) {
+      this.addSystemMessage(`Could not start workflow recording: ${result.error ?? 'unknown error'}`);
+      return;
+    }
+
+    this.isWorkflowRecording = true;
+    this.workflowRecordingTabId = targetTab.tabId;
+    this.refreshComposerState();
+  }
+
+  private buildWorkflowDemonstrationDefaultTitle(): string {
+    const usedNumbers = new Set<number>();
+
+    for (const demonstration of this.workflowDemonstrationsById.values()) {
+      const match = /^demo(\d+)$/i.exec(demonstration.title.trim());
+      if (!match) continue;
+      const number = Number(match[1]);
+      if (Number.isInteger(number) && number > 0) {
+        usedNumbers.add(number);
+      }
+    }
+
+    let nextNumber = 1;
+    while (usedNumbers.has(nextNumber)) nextNumber += 1;
+    return `demo${nextNumber}`;
+  }
+
+  private ensureWorkflowDemonstrationContextTab(demonstration: WorkflowDemonstration): void {
+    const tabId = demonstration.demonstratedTab.tabId;
+    if (tabId == null || tabId < 0) return;
+
+    if (this.currentContextTab?.tabId === tabId) {
+      this.includeCurrentContextTab = true;
+      this.renderContextTabs();
+      return;
+    }
+
+    if (!this.extraContextTabs.some((tab) => tab.tabId === tabId)) {
+      this.extraContextTabs.push({
+        tabId,
+        title: demonstration.demonstratedTab.title ?? demonstration.title,
+        url: demonstration.demonstratedTab.url,
+        active: false,
+      });
+      this.renderContextTabs();
+    }
+  }
+
+  private renderStagedWorkflowDemonstrations(): void {
+    if (!this.workflowDemonstrationsDock) return;
+
+    this.workflowDemonstrationsDock.innerHTML = '';
+    const demonstrations = this.getStagedWorkflowDemonstrations();
+    this.workflowDemonstrationsDock.classList.toggle('hidden', demonstrations.length === 0);
+
+    for (const demonstration of demonstrations) {
+      this.workflowDemonstrationsDock.appendChild(this.createStagedWorkflowDemonstrationCard(demonstration));
+    }
+
+    this.refreshComposerState();
+    this.notifyConversationDraftChange();
+  }
+
+  private createStagedWorkflowDemonstrationCard(demonstration: WorkflowDemonstration): HTMLElement {
+    const chip = document.createElement('div');
+    chip.className = 'context-tab-chip workflow-demonstration-chip staged-chip';
+    chip.title = `${demonstration.title} · ${demonstration.steps.length} step${demonstration.steps.length !== 1 ? 's' : ''}`;
+    chip.tabIndex = 0;
+    chip.setAttribute('role', 'button');
+    chip.setAttribute('aria-label', `Show ${demonstration.title} workflow demonstration details`);
+
+    const title = document.createElement('span');
+    title.className = 'context-tab-title workflow-demonstration-chip-title';
+    title.textContent = demonstration.title;
+
+    const removeButton = document.createElement('button');
+    removeButton.className = 'context-tab-remove workflow-demonstration-chip-remove';
+    removeButton.type = 'button';
+    removeButton.textContent = '×';
+    removeButton.title = `Remove ${demonstration.title}`;
+    removeButton.setAttribute('aria-label', `Remove ${demonstration.title}`);
+    removeButton.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.discardWorkflowDemonstrationDraft(demonstration.id);
+    });
+
+    chip.appendChild(title);
+    chip.appendChild(this.createWorkflowDemonstrationIcon());
+    chip.appendChild(removeButton);
+    this.bindWorkflowDemonstrationDetailsTrigger(chip, demonstration);
+    return chip;
+  }
+
+  private discardWorkflowDemonstrationDraft(id: string): void {
+    this.stagedWorkflowDemonstrationIds = this.stagedWorkflowDemonstrationIds.filter((entry) => entry !== id);
+    if (!this.conversationMessages.some((message) => message.workflowDemonstrationIds?.includes(id))) {
+      this.workflowDemonstrationsById.delete(id);
+    }
+    this.renderStagedWorkflowDemonstrations();
   }
 
   private startNewConversation(): void {
@@ -1965,19 +2717,15 @@ export class ChatView {
   }
 
   /** Save current conversation to storage */
-  public saveCurrentConversation(chatHistory: Array<{ role: string; content: string }>): void {
-    // Collect messages from DOM
-    const messages: SavedConversation['messages'] = [];
-    const msgEls = this.messagesContainer.querySelectorAll('.message');
-    msgEls.forEach(el => {
-      let role: 'user' | 'assistant' | 'system' = 'system';
-      if (el.classList.contains('user-message')) role = 'user';
-      else if (el.classList.contains('assistant-message') && !el.classList.contains('typing-indicator')) role = 'assistant';
-
-      const content = el.querySelector('.message-content')?.textContent ?? '';
-      const time = el.querySelector('.message-time')?.textContent ?? '';
-      if (content) messages.push({ role, content, time });
-    });
+  public saveCurrentConversation(
+    chatHistory: Array<{ role: string; content: string }>,
+    compactionState: ConversationCompactionState | null = null,
+  ): void {
+    const messages: SavedConversation['messages'] = this.conversationMessages.map((message) => (
+      message.workflowDemonstrationIds?.length
+        ? { ...message, workflowDemonstrationIds: [...message.workflowDemonstrationIds] }
+        : { ...message }
+    ));
 
     if (messages.length === 0) return;
 
@@ -1994,6 +2742,9 @@ export class ChatView {
       updatedAt: now,
       messages,
       chatHistory: [...chatHistory],
+      workflowDemonstrations: Array.from(this.workflowDemonstrationsById.values()),
+      stagedWorkflowDemonstrationIds: [...this.stagedWorkflowDemonstrationIds],
+      compactionState,
     };
 
     this.currentConversationId = convo.id;
@@ -2004,24 +2755,36 @@ export class ChatView {
   public loadConversation(convo: SavedConversation): void {
     this.clearMessages();
     this.currentConversationId = convo.id;
+    this.conversationMessages = convo.messages.map((message) => (
+      message.workflowDemonstrationIds?.length
+        ? { ...message, workflowDemonstrationIds: [...message.workflowDemonstrationIds] }
+        : { ...message }
+    ));
+    this.workflowDemonstrationsById = new Map(convo.workflowDemonstrations.map((entry) => [entry.id, entry]));
+    this.stagedWorkflowDemonstrationIds = convo.stagedWorkflowDemonstrationIds.filter((id) => this.workflowDemonstrationsById.has(id));
+    this.selectedSkillMention = null;
+    this.renderSelectedSkillMention();
 
-    for (const msg of convo.messages) {
-      if (msg.role === 'user') {
-        this.addUserMessage(msg.content);
-      } else if (msg.role === 'assistant') {
-        this.addAssistantMessage(msg.content);
-      } else {
-        this.addSystemMessage(msg.content);
-      }
+    for (const msg of this.conversationMessages) {
+      this.renderConversationMessage(msg);
     }
+
+    this.renderStagedWorkflowDemonstrations();
   }
 
   /** Clear all messages from the view */
   public clearMessages(): void {
     this.messagesContainer.innerHTML = '';
+    this.conversationMessages = [];
+    this.workflowDemonstrationsById.clear();
+    this.stagedWorkflowDemonstrationIds = [];
+    this.selectedSkillMention = null;
+    this.isWorkflowRecording = false;
+    this.workflowRecordingTabId = null;
     this.currentToolStepsContainer = null;
     this.toolStepsCollapsed = false;
     this.expandedToolStepDetails.clear();
+    this.renderSelectedSkillMention();
     this.streamingElement = null;
     if (this.streamingTimer !== null) {
       clearInterval(this.streamingTimer);
@@ -2029,6 +2792,7 @@ export class ChatView {
     }
     this.streamingAccumulated = '';
     this.streamingWordQueue = [];
+    this.renderStagedWorkflowDemonstrations();
   }
 
   /** Delete a conversation from storage */
@@ -2106,6 +2870,10 @@ export class ChatView {
             <label>Model</label>
             <input type="text" id="llm-config-model" placeholder="gpt-4o" autocomplete="off" />
           </div>
+          <div class="config-field">
+            <label for="llm-config-context-window">Context Window</label>
+            <input type="number" id="llm-config-context-window" min="1024" step="1" placeholder="128000" autocomplete="off" />
+          </div>
         </div>
 
         <div class="config-fields config-claude-fields" style="display: none;">
@@ -2120,6 +2888,10 @@ export class ChatView {
           <div class="config-field">
             <label for="claude-config-model">Model</label>
             <input type="text" id="claude-config-model" placeholder="claude-opus-4-5" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="claude-config-context-window">Context Window</label>
+            <input type="number" id="claude-config-context-window" min="1024" step="1" placeholder="200000" autocomplete="off" />
           </div>
         </div>
 
@@ -2200,13 +2972,22 @@ export class ChatView {
 
     panel.innerHTML = `
       <div class="config-panel-inner prompt-panel-inner">
-        <p class="prompt-panel-note">Active skills inject their name and description at runtime. The agent can inspect full skill details later with the <code>skills_load</code> tool.</p>
+        <p class="prompt-panel-note">Domain Skills are user-managed site knowledge. Interaction Skills are Brow-built cross-site mechanics. Agent-generated Domain Skill proposals stay pending until you approve them here. The agent can inspect active skills later with the <code>skills_load</code> tool.</p>
         <div class="skills-registry-header">
           <div class="skills-registry-heading">
-            <h3 class="config-section-title">Skills Registry</h3>
-            <p class="skills-registry-subtitle">Reusable SKILL.md-style helpers. Enable a skill to inject its name and description into the agent prompt.</p>
+            <h3 class="config-section-title">Pending Domain Skill Proposals</h3>
+            <p class="skills-registry-subtitle">Agent-generated suggestions for reusable site knowledge. Approve one to save it into the Domain Skill registry.</p>
           </div>
-          <button class="skills-new-btn" type="button">New Skill</button>
+        </div>
+        <div class="domain-skill-proposals-count">0 pending proposal(s)</div>
+        <div class="domain-skill-proposals-list"></div>
+        <hr class="config-divider" />
+        <div class="skills-registry-header">
+          <div class="skills-registry-heading">
+            <h3 class="config-section-title">Domain Skills</h3>
+            <p class="skills-registry-subtitle">User-managed reusable site knowledge. Enable a Domain Skill to inject its name and description into the agent prompt.</p>
+          </div>
+          <button class="skills-new-btn" type="button">New Domain Skill</button>
         </div>
         <div class="skills-import-toolbar">
           <div class="skills-import-url-row">
@@ -2218,11 +2999,11 @@ export class ChatView {
             <input type="file" class="skills-file-input" accept=".md,text/markdown" />
         </div>
         </div>
-        <div class="skills-registry-count">0 skill(s)</div>
+        <div class="skills-registry-count">0 domain skill(s)</div>
         <div class="skill-editor-dock">
           <div class="skill-editor-panel" style="display: none;">
             <div class="skill-editor-header">
-              <h4 class="skill-editor-title">New Skill</h4>
+              <h4 class="skill-editor-title">New Domain Skill</h4>
               <div class="config-editor-toggle" role="tablist" aria-label="Skill content view">
                 <button type="button" class="config-editor-btn active" data-skill-view="edit">Edit</button>
                 <button type="button" class="config-editor-btn" data-skill-view="preview">Preview</button>
@@ -2246,18 +3027,39 @@ export class ChatView {
                 <input type="text" id="skill-tags" placeholder="debugging, testing, performance" autocomplete="off" />
               </div>
               <div class="config-field">
+                <label for="skill-match-domain">Match Domain</label>
+                <input type="text" id="skill-match-domain" placeholder="github.com" autocomplete="off" />
+              </div>
+              <div class="config-field">
+                <label for="skill-match-paths">Path Patterns</label>
+                <input type="text" id="skill-match-paths" placeholder="/owner/repo/*, /owner/repo/pull/*" autocomplete="off" />
+              </div>
+              <div class="config-field">
+                <label for="skill-match-pages">Page Patterns</label>
+                <input type="text" id="skill-match-pages" placeholder="pull request, settings" autocomplete="off" />
+              </div>
+              <div class="config-field">
                 <label for="skill-content">Skill Content (Markdown)</label>
                 <textarea id="skill-content" class="skill-content-input" spellcheck="false" placeholder="# My Skill&#10;&#10;Paste or type the full SKILL.md content here..."></textarea>
                 <div id="skill-content-preview" class="config-system-prompt-preview skill-content-preview" style="display: none;"></div>
               </div>
             </div>
             <div class="skill-editor-actions">
-              <button class="config-apply-btn skill-save-btn" type="button">Save Skill</button>
+              <button class="config-apply-btn skill-save-btn" type="button">Save Domain Skill</button>
               <button class="skill-cancel-btn" type="button">Cancel</button>
             </div>
           </div>
         </div>
         <div class="skills-registry-list"></div>
+        <hr class="config-divider" />
+        <div class="skills-registry-header">
+          <div class="skills-registry-heading">
+            <h3 class="config-section-title">Interaction Skills</h3>
+            <p class="skills-registry-subtitle">Built-in cross-site browser mechanics. These are read-only and always available to Brow.</p>
+          </div>
+        </div>
+        <div class="interaction-skills-count">0 interaction skill(s)</div>
+        <div class="interaction-skills-list"></div>
         <div class="config-fields config-prompt-fields">
           <h3 class="config-section-title">System Prompt</h3>
           <div class="config-field config-system-prompt-field">
@@ -2279,7 +3081,7 @@ export class ChatView {
     const systemPromptInput = panel.querySelector('#llm-config-system-prompt') as HTMLTextAreaElement | null;
     systemPromptInput?.addEventListener('input', () => this.refreshSystemPromptPreview(panel));
 
-    panel.querySelectorAll('.config-editor-btn').forEach((btn) => {
+    panel.querySelectorAll('.config-editor-btn[data-view]').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const view = (btn as HTMLElement).dataset.view as 'edit' | 'preview';
@@ -2386,8 +3188,10 @@ export class ChatView {
   }
 
   private populatePromptFields(): void {
-    void loadPromptEditorState().then(({ systemPrompt, skills }) => {
-      this.skillRegistry = skills;
+    void loadPromptEditorState().then(({ systemPrompt, domainSkills, domainSkillProposals, interactionSkills }) => {
+      this.skillRegistry = domainSkills;
+      this.domainSkillProposals = domainSkillProposals;
+      this.interactionSkillRegistry = interactionSkills;
       this.setPromptInput('llm-config-system-prompt', systemPrompt || DEFAULT_SYSTEM_PROMPT);
       this.refreshSystemPromptPreview(this.promptPanel);
       this.setSystemPromptPreviewMode(this.systemPromptPreviewMode, this.promptPanel);
@@ -2411,15 +3215,32 @@ export class ChatView {
     }, 900);
   }
 
+  private refreshSkillMentionRegistries(): void {
+    void loadPromptEditorState().then(({ domainSkills, interactionSkills }) => {
+      this.skillRegistry = domainSkills;
+      this.interactionSkillRegistry = interactionSkills;
+      if (this.contextPickerMode === 'skill') {
+        void this.refreshContextPicker();
+      }
+    });
+  }
+
   private renderSkillRegistry(): void {
+    const proposalList = this.promptPanel.querySelector('.domain-skill-proposals-list') as HTMLElement | null;
+    const proposalCount = this.promptPanel.querySelector('.domain-skill-proposals-count') as HTMLElement | null;
     const list = this.promptPanel.querySelector('.skills-registry-list') as HTMLElement | null;
     const count = this.promptPanel.querySelector('.skills-registry-count') as HTMLElement | null;
+    const interactionList = this.promptPanel.querySelector('.interaction-skills-list') as HTMLElement | null;
+    const interactionCount = this.promptPanel.querySelector('.interaction-skills-count') as HTMLElement | null;
     const dock = this.promptPanel.querySelector('.skill-editor-dock') as HTMLElement | null;
     const editorPanel = this.promptPanel.querySelector('.skill-editor-panel') as HTMLElement | null;
-    if (!list || !count || !dock || !editorPanel) return;
+    if (!proposalList || !proposalCount || !list || !count || !interactionList || !interactionCount || !dock || !editorPanel) return;
 
-    count.textContent = `${this.skillRegistry.length} skill${this.skillRegistry.length !== 1 ? 's' : ''}`;
+    this.renderDomainSkillProposalRegistry(proposalList, proposalCount);
+    count.textContent = `${this.skillRegistry.length} domain skill${this.skillRegistry.length !== 1 ? 's' : ''}`;
     list.innerHTML = '';
+    interactionCount.textContent = `${this.interactionSkillRegistry.length} interaction skill${this.interactionSkillRegistry.length !== 1 ? 's' : ''}`;
+    interactionList.innerHTML = '';
     let editorPlaced = false;
 
     if (!this.isSkillEditorOpen || !this.editingSkillId) {
@@ -2434,20 +3255,16 @@ export class ChatView {
       }
       const empty = document.createElement('div');
       empty.className = 'skills-empty-state';
-      empty.textContent = 'No skills yet. Create one to make reusable guidance available to Brow.';
+      empty.textContent = 'No Domain Skills yet. Create one to make reusable site guidance available to Brow.';
       list.appendChild(empty);
-      return;
-    }
+    } else {
+      for (const skill of this.skillRegistry) {
+        const card = document.createElement('div');
+        const isEditing = this.isSkillEditorOpen && this.editingSkillId === skill.id;
+        card.className = `skill-card${skill.enabled ? ' enabled' : ' disabled'}${isEditing ? ' is-editing' : ''}`;
+        const tags = this.renderSkillTagHtml(skill.tags, skill.matcher);
 
-    for (const skill of this.skillRegistry) {
-      const card = document.createElement('div');
-      const isEditing = this.isSkillEditorOpen && this.editingSkillId === skill.id;
-      card.className = `skill-card${skill.enabled ? ' enabled' : ' disabled'}${isEditing ? ' is-editing' : ''}`;
-      const tags = skill.tags.length > 0
-        ? `<div class="skill-card-tags">${skill.tags.map((tag) => `<span class="skill-tag">${this.escapeHtml(tag)}</span>`).join('')}</div>`
-        : '';
-
-      card.innerHTML = `
+        card.innerHTML = `
         <div class="skill-card-header">
           <div class="skill-card-title-group">
             <div class="skill-card-title">${this.escapeHtml(skill.name)}</div>
@@ -2465,36 +3282,63 @@ export class ChatView {
           </div>
         </div>`;
 
-      card.querySelector('.skill-toggle-btn')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.skillRegistry = this.skillRegistry.map((entry) =>
-          entry.id === skill.id ? { ...entry, enabled: !entry.enabled, updatedAt: Date.now() } : entry,
-        );
-        this.persistSkillRegistry(skill.enabled ? 'Skill disabled.' : 'Skill enabled.');
-      });
+        card.querySelector('.skill-toggle-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.skillRegistry = this.skillRegistry.map((entry) =>
+            entry.id === skill.id ? { ...entry, enabled: !entry.enabled, updatedAt: Date.now() } : entry,
+          );
+          this.persistSkillRegistry(skill.enabled ? 'Domain Skill disabled.' : 'Domain Skill enabled.');
+        });
 
-      card.querySelector('.skill-edit-btn')?.addEventListener('click', (e) => {
-        e.stopPropagation();
+        card.querySelector('.skill-edit-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (isEditing) {
+            this.closeSkillEditor();
+            return;
+          }
+          this.openSkillEditor(skill);
+        });
+
+        card.querySelector('.skill-remove-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.removeSkill(skill.id);
+        });
+
+        list.appendChild(card);
+
         if (isEditing) {
-          this.closeSkillEditor();
-          return;
+          const inlineEditor = document.createElement('div');
+          inlineEditor.className = 'skill-card-inline-editor';
+          inlineEditor.appendChild(editorPanel);
+          editorPlaced = true;
+          list.appendChild(inlineEditor);
         }
-        this.openSkillEditor(skill);
-      });
+      }
+    }
 
-      card.querySelector('.skill-remove-btn')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this.removeSkill(skill.id);
-      });
-
-      list.appendChild(card);
-
-      if (isEditing) {
-        const inlineEditor = document.createElement('div');
-        inlineEditor.className = 'skill-card-inline-editor';
-        inlineEditor.appendChild(editorPanel);
-        editorPlaced = true;
-        list.appendChild(inlineEditor);
+    if (this.interactionSkillRegistry.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'skills-empty-state';
+      empty.textContent = 'No Interaction Skills are packaged yet.';
+      interactionList.appendChild(empty);
+    } else {
+      for (const skill of this.interactionSkillRegistry) {
+        const card = document.createElement('div');
+        const tags = this.renderSkillTagHtml(skill.tags);
+        card.className = 'skill-card enabled';
+        card.innerHTML = `
+        <div class="skill-card-header">
+          <div class="skill-card-title-group">
+            <div class="skill-card-title">${this.escapeHtml(skill.name)}</div>
+            <div class="skill-card-slug">${this.escapeHtml(skill.slug)}</div>
+          </div>
+        </div>
+        <div class="skill-card-description">${this.escapeHtml(skill.description || 'No description provided.')}</div>
+        ${tags}
+        <div class="skill-card-footer">
+          <div class="skill-card-meta">Built-in interaction skill</div>
+        </div>`;
+        interactionList.appendChild(card);
       }
     }
 
@@ -2503,12 +3347,99 @@ export class ChatView {
     }
   }
 
+  private renderDomainSkillProposalRegistry(list: HTMLElement, count: HTMLElement): void {
+    const pendingProposals = this.domainSkillProposals.filter((proposal) => proposal.status === 'pending');
+    count.textContent = `${pendingProposals.length} pending proposal${pendingProposals.length !== 1 ? 's' : ''}`;
+    list.innerHTML = '';
+
+    if (pendingProposals.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'skills-empty-state';
+      empty.textContent = 'No pending Domain Skill proposals.';
+      list.appendChild(empty);
+      return;
+    }
+
+    for (const proposal of pendingProposals) {
+      const card = document.createElement('div');
+      const tags = this.renderSkillTagHtml(proposal.tags, proposal.matcher);
+      const evidence = proposal.evidence?.length
+        ? `<div class="skill-card-tags">${proposal.evidence.map((item) => `<span class="skill-tag">${this.escapeHtml(item)}</span>`).join('')}</div>`
+        : '';
+      const summary = proposal.summary
+        ? `<div class="skill-card-meta">${this.escapeHtml(proposal.summary)}</div>`
+        : '';
+
+      card.className = 'skill-card enabled';
+      card.innerHTML = `
+        <div class="skill-card-header">
+          <div class="skill-card-title-group">
+            <div class="skill-card-title">${this.escapeHtml(proposal.name)}</div>
+            <div class="skill-card-slug">${this.escapeHtml(proposal.slug)}</div>
+          </div>
+        </div>
+        <div class="skill-card-description">${this.escapeHtml(proposal.description || 'No description provided.')}</div>
+        ${summary}
+        ${tags}
+        ${evidence}
+        <div class="skill-card-footer">
+          <div class="skill-card-meta">Proposed ${this.formatRelativeTime(new Date(proposal.updatedAt))}</div>
+          <div class="skill-card-actions">
+            <button class="skill-toggle-btn is-enabled" type="button">Approve</button>
+            <button class="skill-edit-btn" type="button">Edit Draft</button>
+            <button class="skill-proposal-reject-btn" type="button">Reject</button>
+          </div>
+        </div>`;
+
+      card.querySelector('.skill-toggle-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.approveDomainSkillProposal(proposal.id);
+      });
+      card.querySelector('.skill-edit-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.editDomainSkillProposal(proposal.id);
+      });
+      card.querySelector('.skill-proposal-reject-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.rejectDomainSkillProposal(proposal.id);
+      });
+
+      list.appendChild(card);
+    }
+  }
+
+  private renderSkillTagHtml(
+    tags: string[],
+    matcher?: SkillRegistryEntry['matcher'],
+  ): string {
+    const entries = [...tags];
+    if (matcher?.domain) entries.push(`domain:${matcher.domain}`);
+    if (matcher?.pathPatterns) {
+      for (const pattern of matcher.pathPatterns) entries.push(`path:${pattern}`);
+    }
+    if (matcher?.pagePatterns) {
+      for (const pattern of matcher.pagePatterns) entries.push(`page:${pattern}`);
+    }
+    if (entries.length === 0) return '';
+
+    return `<div class="skill-card-tags">${entries.map((tag) => `<span class="skill-tag">${this.escapeHtml(tag)}</span>`).join('')}</div>`;
+  }
+
+  private parseSkillMatcherInput(value: string): string[] | undefined {
+    const normalized = parseSkillTagsInput(value);
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  private formatSkillMatcherInput(values?: string[]): string {
+    return values?.join(', ') ?? '';
+  }
+
   private async importSkillFromUrl(): Promise<void> {
     const urlInput = this.promptPanel.querySelector('.skills-import-url') as HTMLInputElement | null;
     const importButton = this.promptPanel.querySelector('.skills-import-url-btn') as HTMLButtonElement | null;
     const rawUrl = urlInput?.value.trim() ?? '';
     if (!rawUrl) {
-      this.setPromptStatus('Enter a skill URL first.', 'error');
+      this.setPromptStatus('Enter a Domain Skill URL first.', 'error');
       return;
     }
 
@@ -2516,12 +3447,12 @@ export class ChatView {
     try {
       url = new URL(rawUrl);
     } catch {
-      this.setPromptStatus('Skill URL is not valid.', 'error');
+      this.setPromptStatus('Domain Skill URL is not valid.', 'error');
       return;
     }
 
     if (importButton) importButton.disabled = true;
-    this.setPromptStatus('Loading skill from URL…');
+    this.setPromptStatus('Loading Domain Skill from URL…');
 
     try {
       const response = await fetch(url.toString());
@@ -2531,9 +3462,9 @@ export class ChatView {
       const markdown = await response.text();
       const sourceName = url.pathname.split('/').pop() || url.hostname;
       this.prefillSkillEditorFromMarkdown(markdown, sourceName);
-      this.setPromptStatus('Skill imported from URL. Review and save it.', 'success');
+      this.setPromptStatus('Domain Skill imported from URL. Review and save it.', 'success');
     } catch (err: any) {
-      this.setPromptStatus(`Could not load skill from URL: ${err.message ?? err}`, 'error');
+      this.setPromptStatus(`Could not load Domain Skill from URL: ${err.message ?? err}`, 'error');
     } finally {
       if (importButton) importButton.disabled = false;
     }
@@ -2542,14 +3473,14 @@ export class ChatView {
   private async importSkillFromFile(file: File): Promise<void> {
     const fileName = file.name || 'skill.md';
     if (!/\.md$/i.test(fileName) && file.type && file.type !== 'text/markdown' && file.type !== 'text/plain') {
-      this.setPromptStatus('Only markdown skill files are supported.', 'error');
+      this.setPromptStatus('Only markdown Domain Skill files are supported.', 'error');
       return;
     }
 
     try {
       const markdown = await file.text();
       this.prefillSkillEditorFromMarkdown(markdown, fileName);
-      this.setPromptStatus(`Imported ${fileName}. Review and save it.`, 'success');
+      this.setPromptStatus(`Imported ${fileName}. Review and save the Domain Skill.`, 'success');
     } catch (err: any) {
       this.setPromptStatus(`Could not read ${fileName}: ${err.message ?? err}`, 'error');
     }
@@ -2567,19 +3498,25 @@ export class ChatView {
     const slugInput = this.promptPanel.querySelector('#skill-slug') as HTMLInputElement | null;
     const descriptionInput = this.promptPanel.querySelector('#skill-description') as HTMLInputElement | null;
     const tagsInput = this.promptPanel.querySelector('#skill-tags') as HTMLInputElement | null;
+    const matchDomainInput = this.promptPanel.querySelector('#skill-match-domain') as HTMLInputElement | null;
+    const matchPathsInput = this.promptPanel.querySelector('#skill-match-paths') as HTMLInputElement | null;
+    const matchPagesInput = this.promptPanel.querySelector('#skill-match-pages') as HTMLInputElement | null;
     const contentInput = this.promptPanel.querySelector('#skill-content') as HTMLTextAreaElement | null;
     const saveButton = this.promptPanel.querySelector('.skill-save-btn') as HTMLButtonElement | null;
-    if (!panel || !title || !nameInput || !slugInput || !descriptionInput || !tagsInput || !contentInput || !saveButton) return;
+    if (!panel || !title || !nameInput || !slugInput || !descriptionInput || !tagsInput || !matchDomainInput || !matchPathsInput || !matchPagesInput || !contentInput || !saveButton) return;
 
     this.isSkillEditorOpen = true;
     this.editingSkillId = skill?.id ?? null;
     this.skillEditorSlugDirty = Boolean(skill);
-    title.textContent = skill ? 'Edit Skill' : 'New Skill';
-    saveButton.textContent = skill ? 'Update Skill' : 'Create Skill';
+    title.textContent = skill ? 'Edit Domain Skill' : 'New Domain Skill';
+    saveButton.textContent = skill ? 'Update Domain Skill' : 'Create Domain Skill';
     nameInput.value = skill?.name ?? draft?.name ?? '';
     slugInput.value = skill?.slug ?? draft?.slug ?? '';
     descriptionInput.value = skill?.description ?? draft?.description ?? '';
     tagsInput.value = skill ? formatSkillTagsInput(skill.tags) : formatSkillTagsInput(draft?.tags ?? []);
+    matchDomainInput.value = skill?.matcher?.domain ?? draft?.matcher?.domain ?? '';
+    matchPathsInput.value = this.formatSkillMatcherInput(skill?.matcher?.pathPatterns ?? draft?.matcher?.pathPatterns);
+    matchPagesInput.value = this.formatSkillMatcherInput(skill?.matcher?.pagePatterns ?? draft?.matcher?.pagePatterns);
     contentInput.value = skill?.content ?? draft?.content ?? '';
     panel.style.display = 'flex';
     this.setSkillContentPreviewMode('edit');
@@ -2612,7 +3549,100 @@ export class ChatView {
     if (this.editingSkillId === skillId) {
       this.closeSkillEditor(false);
     }
-    this.persistSkillRegistry(`Skill "${removedSkill.name}" removed.`);
+    this.persistSkillRegistry(`Domain Skill "${removedSkill.name}" removed.`);
+  }
+
+  private findSkillForProposal(proposal: DomainSkillProposal): SkillRegistryEntry | undefined {
+    return (proposal.domainSkillId
+      ? this.skillRegistry.find((skill) => skill.id === proposal.domainSkillId)
+      : undefined)
+      ?? this.skillRegistry.find((skill) => skill.slug === proposal.slug);
+  }
+
+  private editDomainSkillProposal(proposalId: string): void {
+    const proposal = this.domainSkillProposals.find((entry) => entry.id === proposalId && entry.status === 'pending');
+    if (!proposal) return;
+
+    this.openSkillEditor(undefined, {
+      name: proposal.name,
+      slug: proposal.slug,
+      description: proposal.description,
+      tags: proposal.tags,
+      content: proposal.content,
+      matcher: proposal.matcher,
+    });
+    this.setPromptStatus('Domain Skill proposal loaded into the editor. Saving the skill does not change proposal status automatically.', 'success');
+  }
+
+  private approveDomainSkillProposal(proposalId: string): void {
+    const proposal = this.domainSkillProposals.find((entry) => entry.id === proposalId && entry.status === 'pending');
+    if (!proposal) return;
+
+    const now = Date.now();
+    const existing = this.findSkillForProposal(proposal);
+    const nextSkill: SkillRegistryEntry = existing
+      ? {
+        ...existing,
+        name: proposal.name,
+        slug: proposal.slug,
+        description: proposal.description,
+        tags: [...proposal.tags],
+        content: proposal.content,
+        matcher: proposal.matcher,
+        updatedAt: now,
+      }
+      : {
+        id: proposal.domainSkillId ?? this.generateId(),
+        name: proposal.name,
+        slug: proposal.slug,
+        description: proposal.description,
+        tags: [...proposal.tags],
+        content: proposal.content,
+        matcher: proposal.matcher,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now,
+      };
+    const nextSkills = [
+      nextSkill,
+      ...this.skillRegistry.filter((skill) => skill.id !== nextSkill.id),
+    ];
+    const nextProposals: DomainSkillProposal[] = this.domainSkillProposals.map((entry) =>
+      entry.id === proposal.id
+        ? { ...entry, domainSkillId: nextSkill.id, status: 'approved' as const, updatedAt: now }
+        : entry,
+    );
+
+    void Promise.all([
+      saveDomainSkillRegistryEntries(nextSkills),
+      saveDomainSkillProposalEntries(nextProposals),
+    ]).then(([skills, proposals]) => {
+      this.skillRegistry = skills;
+      this.domainSkillProposals = proposals;
+      this.callbacks.onSkillRegistryApply(this.skillRegistry);
+      this.renderSkillRegistry();
+      this.setPromptStatus(existing
+        ? `Domain Skill proposal applied to "${nextSkill.name}".`
+        : `Domain Skill proposal approved as "${nextSkill.name}".`, 'success');
+    });
+  }
+
+  private rejectDomainSkillProposal(proposalId: string): void {
+    const proposal = this.domainSkillProposals.find((entry) => entry.id === proposalId && entry.status === 'pending');
+    if (!proposal) return;
+
+    const now = Date.now();
+    const nextProposals: DomainSkillProposal[] = this.domainSkillProposals.map((entry) =>
+      entry.id === proposal.id
+        ? { ...entry, status: 'rejected' as const, updatedAt: now }
+        : entry,
+    );
+
+    void saveDomainSkillProposalEntries(nextProposals).then((proposals) => {
+      this.domainSkillProposals = proposals;
+      this.renderSkillRegistry();
+      this.setPromptStatus(`Domain Skill proposal "${proposal.name}" rejected.`, 'success');
+    });
   }
 
   private saveSkillFromEditor(): void {
@@ -2620,17 +3650,26 @@ export class ChatView {
     const slugInput = this.promptPanel.querySelector('#skill-slug') as HTMLInputElement | null;
     const descriptionInput = this.promptPanel.querySelector('#skill-description') as HTMLInputElement | null;
     const tagsInput = this.promptPanel.querySelector('#skill-tags') as HTMLInputElement | null;
+    const matchDomainInput = this.promptPanel.querySelector('#skill-match-domain') as HTMLInputElement | null;
+    const matchPathsInput = this.promptPanel.querySelector('#skill-match-paths') as HTMLInputElement | null;
+    const matchPagesInput = this.promptPanel.querySelector('#skill-match-pages') as HTMLInputElement | null;
     const contentInput = this.promptPanel.querySelector('#skill-content') as HTMLTextAreaElement | null;
-    if (!nameInput || !slugInput || !descriptionInput || !tagsInput || !contentInput) return;
+    if (!nameInput || !slugInput || !descriptionInput || !tagsInput || !matchDomainInput || !matchPathsInput || !matchPagesInput || !contentInput) return;
 
     const name = nameInput.value.trim();
     const slug = slugifySkillName(slugInput.value || name);
     const description = descriptionInput.value.trim();
     const content = contentInput.value.trim();
     const tags = parseSkillTagsInput(tagsInput.value);
+    const matcher = {
+      domain: matchDomainInput.value.trim().toLowerCase() || undefined,
+      pathPatterns: this.parseSkillMatcherInput(matchPathsInput.value),
+      pagePatterns: this.parseSkillMatcherInput(matchPagesInput.value),
+    };
+    const normalizedMatcher = matcher.domain || matcher.pathPatterns || matcher.pagePatterns ? matcher : undefined;
 
     if (!name || !description || !content) {
-      this.setPromptStatus('Name, description, and content are required for a skill.', 'error');
+      this.setPromptStatus('Name, description, and content are required for a Domain Skill.', 'error');
       return;
     }
 
@@ -2638,7 +3677,7 @@ export class ChatView {
       skill.slug === slug && skill.id !== this.editingSkillId,
     );
     if (duplicate) {
-      this.setPromptStatus(`Slug "${slug}" is already used by another skill.`, 'error');
+      this.setPromptStatus(`Slug "${slug}" is already used by another Domain Skill.`, 'error');
       return;
     }
 
@@ -2652,6 +3691,7 @@ export class ChatView {
         description,
         tags,
         content,
+        matcher: normalizedMatcher,
         updatedAt: now,
       }
       : {
@@ -2661,6 +3701,7 @@ export class ChatView {
         description,
         tags,
         content,
+        matcher: normalizedMatcher,
         enabled: true,
         createdAt: now,
         updatedAt: now,
@@ -2670,7 +3711,7 @@ export class ChatView {
       nextSkill,
       ...this.skillRegistry.filter((skill) => skill.id !== nextSkill.id),
     ];
-    this.persistSkillRegistry(existing ? 'Skill updated.' : 'Skill created.');
+    this.persistSkillRegistry(existing ? 'Domain Skill updated.' : 'Domain Skill created.');
     this.closeSkillEditor();
   }
 
@@ -2700,7 +3741,7 @@ export class ChatView {
   }
 
   private persistSkillRegistry(message?: string): void {
-    void saveSkillRegistryEntries(this.skillRegistry).then((skills) => {
+    void saveDomainSkillRegistryEntries(this.skillRegistry).then((skills) => {
       this.skillRegistry = skills;
       this.callbacks.onSkillRegistryApply(this.skillRegistry);
       this.renderSkillRegistry();
@@ -2726,9 +3767,11 @@ export class ChatView {
       this.setInput('llm-config-endpoint', openai.baseUrl);
       this.setInput('llm-config-api-key', openai.apiKey);
       this.setInput('llm-config-model', openai.model);
+      this.setInput('llm-config-context-window', String(openai.contextWindow));
       this.setInput('claude-config-endpoint', claude.baseUrl);
       this.setInput('claude-config-api-key', claude.apiKey);
       this.setInput('claude-config-model', claude.model);
+      this.setInput('claude-config-context-window', String(claude.contextWindow));
       this.setInput(
         'llm-config-recursion-limit',
         String(Number(saved.runtime.recursionLimit) || DEFAULT_AGENT_RECURSION_LIMIT),
@@ -2751,7 +3794,7 @@ export class ChatView {
 
   private applyConfig(): void {
     const statusEl = this.configPanel.querySelector('.config-status') as HTMLElement;
-    const fields: Record<string, string> = {};
+    let fields: ProviderFields;
     const recursionLimitRaw = this.getInput('llm-config-recursion-limit');
     const recursionLimit = Number(recursionLimitRaw || DEFAULT_AGENT_RECURSION_LIMIT);
 
@@ -2764,30 +3807,64 @@ export class ChatView {
     }
 
     if (this.configMode === 'openai') {
-      fields.baseUrl = this.getInput('llm-config-endpoint');
-      fields.apiKey = this.getInput('llm-config-api-key');
+      const baseUrl = this.getInput('llm-config-endpoint');
+      const apiKey = this.getInput('llm-config-api-key');
       const select = this.configPanel.querySelector('#llm-config-model-select') as HTMLSelectElement;
-      fields.model = select ? select.value : this.getInput('llm-config-model');
+      const model = select ? select.value : this.getInput('llm-config-model');
+      const contextWindowRaw = this.getInput('llm-config-context-window');
 
-      if (!fields.baseUrl || !fields.model) {
+      if (!baseUrl || !model) {
         if (statusEl) {
           statusEl.textContent = 'Base URL and model are required.';
           statusEl.className = 'config-status error';
         }
         return;
       }
-    } else {
-      fields.baseUrl = this.getInput('claude-config-endpoint') || 'https://api.anthropic.com/v1';
-      fields.apiKey = this.getInput('claude-config-api-key');
-      fields.model = this.getInput('claude-config-model');
 
-      if (!fields.apiKey || !fields.model) {
+      const parsedContextWindow = Number(contextWindowRaw);
+      if (contextWindowRaw && (!Number.isFinite(parsedContextWindow) || parsedContextWindow < 1024 || !Number.isInteger(parsedContextWindow))) {
+        if (statusEl) {
+          statusEl.textContent = 'Context window must be an integer of at least 1024.';
+          statusEl.className = 'config-status error';
+        }
+        return;
+      }
+
+      fields = {
+        baseUrl,
+        apiKey,
+        model,
+        contextWindow: normalizeContextWindow(contextWindowRaw, DEFAULT_OPENAI_FIELDS.contextWindow),
+      };
+    } else {
+      const baseUrl = this.getInput('claude-config-endpoint') || DEFAULT_CLAUDE_FIELDS.baseUrl;
+      const apiKey = this.getInput('claude-config-api-key');
+      const model = this.getInput('claude-config-model');
+      const contextWindowRaw = this.getInput('claude-config-context-window');
+
+      if (!apiKey || !model) {
         if (statusEl) {
           statusEl.textContent = 'Anthropic API key and model are required.';
           statusEl.className = 'config-status error';
         }
         return;
       }
+
+      const parsedContextWindow = Number(contextWindowRaw);
+      if (contextWindowRaw && (!Number.isFinite(parsedContextWindow) || parsedContextWindow < 1024 || !Number.isInteger(parsedContextWindow))) {
+        if (statusEl) {
+          statusEl.textContent = 'Context window must be an integer of at least 1024.';
+          statusEl.className = 'config-status error';
+        }
+        return;
+      }
+
+      fields = {
+        baseUrl,
+        apiKey,
+        model,
+        contextWindow: normalizeContextWindow(contextWindowRaw, DEFAULT_CLAUDE_FIELDS.contextWindow),
+      };
     }
 
     void saveConfigEditorState({

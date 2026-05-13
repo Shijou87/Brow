@@ -1,29 +1,56 @@
 import { DEFAULT_SYSTEM_PROMPT } from '../../shared/config';
 import {
-  SKILL_REGISTRY_STORAGE_KEY,
+  DOMAIN_SKILL_REGISTRY_STORAGE_KEY,
+  LEGACY_SKILL_REGISTRY_STORAGE_KEY,
   getStorageValue,
+  getStorageValues,
   loadSidepanelConfig,
   saveSidepanelConfig,
   setStorageValues,
   type SidepanelConfigRecord,
 } from '../../shared/storage';
+import type { ProviderFields } from '../../shared/config';
+import { getInteractionSkillRegistry } from '../interaction-skills';
 import {
   normalizeSkillRegistry,
   type SkillRegistryEntry,
 } from '../skills-registry';
+import { loadDomainSkillProposalEntries } from '../domain-skill-proposals';
+import type { InteractionSkillEntry } from '../../shared/types';
+import type { DomainSkillProposal } from '../../shared/types';
+
+export async function loadDomainSkillRegistryEntries(): Promise<SkillRegistryEntry[]> {
+  const values = await getStorageValues([
+    DOMAIN_SKILL_REGISTRY_STORAGE_KEY,
+    LEGACY_SKILL_REGISTRY_STORAGE_KEY,
+  ]);
+  const storedDomainSkills = normalizeSkillRegistry(values[DOMAIN_SKILL_REGISTRY_STORAGE_KEY]);
+  if (storedDomainSkills.length > 0) return storedDomainSkills;
+
+  const legacySkills = normalizeSkillRegistry(values[LEGACY_SKILL_REGISTRY_STORAGE_KEY]);
+  if (legacySkills.length > 0) {
+    await setStorageValues({ [DOMAIN_SKILL_REGISTRY_STORAGE_KEY]: legacySkills });
+  }
+  return legacySkills;
+}
 
 export async function loadPromptEditorState(): Promise<{
   systemPrompt: string;
-  skills: SkillRegistryEntry[];
+  domainSkills: SkillRegistryEntry[];
+  domainSkillProposals: DomainSkillProposal[];
+  interactionSkills: InteractionSkillEntry[];
 }> {
-  const [config, rawSkills] = await Promise.all([
+  const [config, domainSkills, domainSkillProposals] = await Promise.all([
     loadSidepanelConfig(),
-    getStorageValue<unknown>(SKILL_REGISTRY_STORAGE_KEY),
+    loadDomainSkillRegistryEntries(),
+    loadDomainSkillProposalEntries(),
   ]);
 
   return {
     systemPrompt: config.runtime.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-    skills: normalizeSkillRegistry(rawSkills),
+    domainSkills,
+    domainSkillProposals,
+    interactionSkills: getInteractionSkillRegistry(),
   };
 }
 
@@ -42,7 +69,7 @@ export async function loadConfigEditorState(): Promise<SidepanelConfigRecord> {
 
 export async function saveConfigEditorState(params: {
   mode: 'openai' | 'claude';
-  fields: Record<string, string>;
+  fields: ProviderFields;
   recursionLimit: number;
   vlm: {
     baseUrl: string;
@@ -74,8 +101,10 @@ export async function saveConfigEditorState(params: {
   await saveSidepanelConfig(config);
 }
 
-export async function saveSkillRegistryEntries(skills: SkillRegistryEntry[]): Promise<SkillRegistryEntry[]> {
+export async function saveDomainSkillRegistryEntries(skills: SkillRegistryEntry[]): Promise<SkillRegistryEntry[]> {
   const normalized = normalizeSkillRegistry(skills);
-  await setStorageValues({ [SKILL_REGISTRY_STORAGE_KEY]: normalized });
+  await setStorageValues({ [DOMAIN_SKILL_REGISTRY_STORAGE_KEY]: normalized });
   return normalized;
 }
+
+export const saveSkillRegistryEntries = saveDomainSkillRegistryEntries;

@@ -3,11 +3,11 @@
 // content scripts, relays results to the side panel, and manages the
 // per-tab WebMCP registry.
 
-import { logDiscovery, logInfo, logError } from '../shared/logger';
+import { logDiscovery, logInfo } from '../shared/logger';
 import {
   isRuntimeMessageType,
 } from '../shared/messages';
-import { clearDiscoveryState, runDiscovery, scheduleDiscovery, shouldRefreshDiscovery } from './discovery';
+import { clearDiscoveryState, ensureBridgeScripts, runDiscovery, scheduleDiscovery, shouldRefreshDiscovery } from './discovery';
 import { getRegistrySnapshot } from './webmcp-registry';
 import type { WebMCPRegistryEntry } from '../shared/types';
 
@@ -99,6 +99,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       chrome.tabs.sendMessage(tabId, { type: 'WEBMCP_INVOKE', payload: { toolName, args } })
         .then((result) => sendResponse(result))
         .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
+    }
+  }
+
+  if (isRuntimeMessageType(message, 'BROWSER_SNAPSHOT_OPERATION')) {
+    const tabId = message.payload?.tabId;
+    if (tabId !== undefined) {
+      ensureBridgeScripts(tabId, { strict: true })
+        .then(() => chrome.tabs.sendMessage(tabId, message))
+        .then((result) => sendResponse(result ?? { ok: false, error: 'No response from content script' }))
+        .catch((err) => sendResponse({ ok: false, error: err?.message ?? 'Browser Snapshot operation failed' }));
+      return true;
+    }
+  }
+
+  if (
+    isRuntimeMessageType(message, 'WORKFLOW_RECORDING_START')
+    || isRuntimeMessageType(message, 'WORKFLOW_RECORDING_STOP')
+    || isRuntimeMessageType(message, 'WORKFLOW_RECORDING_STATUS')
+  ) {
+    const tabId = message.payload?.tabId;
+    if (tabId !== undefined) {
+      ensureBridgeScripts(tabId)
+        .then(() => chrome.tabs.sendMessage(tabId, message))
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, active: false, error: err.message }));
       return true;
     }
   }

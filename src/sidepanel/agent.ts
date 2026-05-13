@@ -11,8 +11,25 @@ import { tool, type StructuredToolInterface } from '@langchain/core/tools';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 
 import { createBuiltinTools } from './agent-tools/builtin-tools';
-import { buildBrowserContextSnapshot, stripToolCallJson } from './agent-runtime/browser-context';
-import { buildSystemPrompt } from './agent-runtime/prompt';
+import {
+  buildBrowserContextSnapshotResult,
+  buildWorkflowDemonstrationContext,
+  stripToolCallJson,
+  type BrowserContextSnapshotMetrics,
+} from './agent-runtime/browser-context';
+import { getEffectiveContextTabIds } from './agent-runtime/context-tab-selection';
+import { buildSelectedSkillMentionContext, buildSystemPrompt } from './agent-runtime/prompt';
+import {
+  formatRequestContextDebugText,
+  type RequestContextDebugEntry,
+  type RequestContextDebugMessage,
+  type RequestContextDebugShape,
+  type RequestContextDebugSnapshot,
+  type RequestContextDebugTimings,
+} from './agent-runtime/request-context-debug';
+import { buildToolContextCarryForwardMessage } from './agent-runtime/tool-context-carry-forward';
+import { createRepeatedToolFailureTracker } from './agent-runtime/repeated-tool-failure';
+import { submitDomainSkillProposal } from './domain-skill-proposals';
 import {
   DEFAULT_DISABLED_TOOL_NAMES,
   buildToolManifest,
@@ -30,6 +47,7 @@ import {
 import {
   ensureLlm,
   getLlmSync,
+  getRuntimeLlmConfig,
   reconfigureLlm,
   resetLlm,
   type ChatOpenAIInstance,
@@ -47,23 +65,45 @@ import {
   type MCPServerEntry,
 } from './mcp-client';
 import {
+  formatDomainSkillMatcherSummary,
+  matchesDomainSkillContext,
   type SkillRegistryEntry,
   normalizeSkillRegistry,
 } from './skills-registry';
+import { getInteractionSkillRegistry } from './interaction-skills';
+import { tabsGetActive, tabsList } from './tab-tools';
 import {
+  DEFAULT_OPENAI_FIELDS,
   DEFAULT_AGENT_RECURSION_LIMIT,
   DEFAULT_SYSTEM_PROMPT,
   normalizeRecursionLimit,
 } from '../shared/config';
-import type { VLMConfig, WebMCPToolDescriptor } from '../shared/types';
+import { logInfo } from '../shared/logger';
+import type {
+  ConversationCompactionState,
+  InteractionSkillEntry,
+  SkillMention,
+  VLMConfig,
+  WebMCPToolDescriptor,
+  WorkflowDemonstration,
+} from '../shared/types';
+import type { DomainSkillProposalDraft } from '../shared/types';
 
 export { DEFAULT_AGENT_RECURSION_LIMIT, DEFAULT_SYSTEM_PROMPT } from '../shared/config';
+export { buildToolContextCarryForwardMessage } from './agent-runtime/tool-context-carry-forward';
 export type { ToolManifestEntry } from './agent-runtime/tooling';
+
+const AUTOMATION_TOOL_TIMEOUT_MS = 30_000;
+const REQUEST_BUDGET_COMPACTION_THRESHOLD = 0.9;
+const REQUEST_BUDGET_COMPACTION_TARGET = 0.75;
+const MIN_VERBATIM_TURNS_AFTER_COMPACTION = 4;
+const MIN_COMPACTION_SUMMARY_TOKENS = 96;
+const COMPACTION_SUMMARY_TOKEN_RATIO = 0.18;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface ChatTurn {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
@@ -86,8 +126,55 @@ export type StreamTextCallback = (text: string) => void;
 export type MCPAppRenderCallback = (request: MCPAppRenderRequest) => void;
 export type AutomationApprovalDecision = 'allow' | 'allow_all' | 'skip';
 
+type AgentMessage = {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+};
+
+interface AssembledQueryContext {
+  systemPrompt: string;
+  messages: AgentMessage[];
+  augmentedUserQuery: string;
+  browserContext: string;
+  browserContextMetrics: BrowserContextSnapshotMetrics;
+  workflowDemonstrationContext: string;
+  matchedDomainSkills: string;
+  selectedSkillMentionContext: string;
+}
+
+export interface RequestBudgetEstimate {
+  estimatedTokens: number;
+  contextWindow: number;
+  usageRatio: number;
+  usagePercent: number;
+  messageCount: number;
+}
+
+export interface RequestBudgetCompactionEvent {
+  before: RequestBudgetEstimate;
+  after: RequestBudgetEstimate;
+  compactionState: ConversationCompactionState;
+}
+
+export type RequestBudgetCompactionCallback = (event: RequestBudgetCompactionEvent) => void;
+
 export interface AgentAPI {
-  query: (query: string, history?: ChatTurn[], contextTabIds?: number[]) => Promise<string>;
+  query: (
+    query: string,
+    history?: ChatTurn[],
+    contextTabIds?: number[],
+    workflowDemonstrations?: WorkflowDemonstration[],
+    skillMention?: SkillMention | null,
+  ) => Promise<string>;
+  estimateRequestBudget: (
+    query: string,
+    history?: ChatTurn[],
+    contextTabIds?: number[],
+    workflowDemonstrations?: WorkflowDemonstration[],
+    skillMention?: SkillMention | null,
+  ) => Promise<RequestBudgetEstimate>;
+  onRequestBudgetCompaction: (callback: RequestBudgetCompactionCallback) => void;
+  offRequestBudgetCompaction: (callback: RequestBudgetCompactionCallback) => void;
   onToolStep: (callback: ToolStepCallback) => void;
   offToolStep: (callback: ToolStepCallback) => void;
   onStreamText: (callback: StreamTextCallback) => void;
@@ -122,6 +209,17 @@ export interface AgentAPI {
   getSystemPrompt: () => string;
   setSkillRegistry: (skills: SkillRegistryEntry[]) => void;
   getSkillRegistry: () => SkillRegistryEntry[];
+  setConversationCompactionState: (state: ConversationCompactionState | null) => void;
+  getConversationCompactionState: () => ConversationCompactionState | null;
+  getLastTurnToolContextMessage: () => string | null;
+  getActiveRequestContextDebugText: () => string | null;
+  buildRequestContextDebugText: (
+    query: string,
+    history?: ChatTurn[],
+    contextTabIds?: number[],
+    workflowDemonstrations?: WorkflowDemonstration[],
+    skillMention?: SkillMention | null,
+  ) => Promise<string>;
 }
 
 type ReactAgent = {
@@ -155,6 +253,142 @@ function formatToolPayload(value: unknown): string | undefined {
   } catch {
     return String(value);
   }
+}
+
+function estimateTextTokens(text: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  const charEstimate = Math.ceil(trimmed.length / 4);
+  const wordEstimate = Math.ceil(wordCount * 0.8);
+  return Math.max(charEstimate, wordEstimate);
+}
+
+function estimateMessageTokens(message: AgentMessage): number {
+  return 8 + estimateTextTokens(message.role) + estimateTextTokens(message.content);
+}
+
+function estimateConversationTokens(systemPrompt: string, messages: AgentMessage[]): number {
+  return 16 + estimateMessageTokens({ role: 'system', content: systemPrompt })
+    + messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+}
+
+function sumMessageContentChars(messages: RequestContextDebugMessage[]): number {
+  return messages.reduce((sum, message) => sum + message.content.length, 0);
+}
+
+function countCarriedForwardToolSummaryChars(messages: RequestContextDebugMessage[]): number {
+  return messages.reduce((sum, message) => {
+    return message.content.startsWith('Previous turn tool-result summary.')
+      ? sum + message.content.length
+      : sum;
+  }, 0);
+}
+
+function buildRequestContextDebugShape(params: {
+  history: ChatTurn[];
+  assembled: AssembledQueryContext;
+  exactPromptMessages: RequestContextDebugMessage[];
+}): RequestContextDebugShape {
+  return {
+    rawHistoryMessageCount: params.history.length,
+    rawHistoryChars: params.history.reduce((sum, turn) => sum + turn.content.length, 0),
+    exactPromptMessageCount: params.exactPromptMessages.length,
+    exactPromptChars: sumMessageContentChars(params.exactPromptMessages),
+    systemPromptChars: params.assembled.systemPrompt.length,
+    browserContextChars: params.assembled.browserContext.length,
+    browserContextFrameChars: params.assembled.browserContextMetrics.frameChars,
+    browserContextOpenTabsChars: params.assembled.browserContextMetrics.openTabsSectionChars,
+    browserContextActiveTabChars: params.assembled.browserContextMetrics.activeTabSectionChars,
+    browserContextAttachedSnapshotsChars: params.assembled.browserContextMetrics.attachedSnapshotsSectionChars,
+    workflowDemonstrationChars: params.assembled.workflowDemonstrationContext.length,
+    matchedDomainSkillsChars: params.assembled.matchedDomainSkills.length,
+    selectedSkillMentionChars: params.assembled.selectedSkillMentionContext.length,
+    carriedForwardToolSummaryChars: countCarriedForwardToolSummaryChars(params.exactPromptMessages),
+    selectedContextTabCount: params.assembled.browserContextMetrics.selectedTabCount,
+    attachedContextTabCount: params.assembled.browserContextMetrics.attachedTabCount,
+    attachedSnapshotCount: params.assembled.browserContextMetrics.attachedSnapshotCount,
+  };
+}
+
+function buildRequestContextDebugSnapshot(params: {
+  query: string;
+  history: ChatTurn[];
+  assembled: AssembledQueryContext;
+  contextWindow: number;
+  timings?: RequestContextDebugTimings;
+  liveUpdates?: RequestContextDebugEntry[];
+}): RequestContextDebugSnapshot {
+  const exactPromptMessages: RequestContextDebugMessage[] = [
+    { role: 'system', content: params.assembled.systemPrompt },
+    ...params.assembled.messages,
+  ];
+
+  return {
+    query: params.query,
+    estimatedTokens: estimateConversationTokens(params.assembled.systemPrompt, params.assembled.messages),
+    contextWindow: params.contextWindow,
+    rawHistory: params.history.map((turn) => ({ role: turn.role, content: turn.content })),
+    exactPromptMessages,
+    requestShape: buildRequestContextDebugShape({
+      history: params.history,
+      assembled: params.assembled,
+      exactPromptMessages,
+    }),
+    timings: params.timings,
+    liveUpdates: params.liveUpdates,
+  };
+}
+
+function formatActiveDebugMessageContent(message: any): string | null {
+  const sections: string[] = [];
+  const content = formatToolPayload(message?.content)?.trim();
+  if (content) sections.push(content);
+
+  if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+    const calls = message.tool_calls.map((call: any) => ({
+      id: call?.id,
+      name: call?.name ?? call?.tool ?? call?.function?.name,
+      input: extractToolCallInput(call),
+    }));
+    sections.push(`tool_calls:\n${JSON.stringify(calls, null, 2)}`);
+  }
+
+  return sections.length > 0 ? sections.join('\n\n') : null;
+}
+
+function formatToolDebugMessageContent(toolMessage: any): string | null {
+  const parts: string[] = [];
+  if (toolMessage?.name) parts.push(`Tool: ${toolMessage.name}`);
+  if (toolMessage?.tool_call_id) parts.push(`Tool call id: ${toolMessage.tool_call_id}`);
+  const payload = formatToolPayload(toolMessage?.content)?.trim();
+  if (payload) parts.push(payload);
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
+function estimateHistoryTurnTokens(turns: ChatTurn[]): number {
+  return turns.reduce((sum, turn) => sum + estimateMessageTokens({ role: turn.role, content: turn.content }), 0);
+}
+
+function extractLlmText(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object' && typeof (item as any).text === 'string') {
+          return (item as any).text as string;
+        }
+        return '';
+      })
+      .join('\n')
+      .trim();
+  }
+  if (value && typeof value === 'object' && typeof (value as any).content !== 'undefined') {
+    return extractLlmText((value as any).content);
+  }
+  return '';
 }
 
 function extractToolCallInput(call: unknown): string | undefined {
@@ -233,12 +467,14 @@ export class Agent implements AgentAPI {
   private toolStepCallbacks: ToolStepCallback[] = [];
   private streamTextCallbacks: StreamTextCallback[] = [];
   private mcpAppRenderCallbacks: MCPAppRenderCallback[] = [];
+  private requestBudgetCompactionCallbacks: RequestBudgetCompactionCallback[] = [];
   private queryAbortController: AbortController | null = null;
   private paused = false;
   private pauseResolve: (() => void) | null = null;
   private recursionLimit = DEFAULT_AGENT_RECURSION_LIMIT;
   private systemPrompt = DEFAULT_SYSTEM_PROMPT;
-  private skillRegistry: SkillRegistryEntry[] = [];
+  private domainSkillRegistry: SkillRegistryEntry[] = [];
+  private interactionSkillRegistry: InteractionSkillEntry[] = getInteractionSkillRegistry();
   private activeToolSteps: ToolStepEvent[] = [];
   private activePendingTools = new Map<string, ToolStepEvent>();
   private pendingAutomationApprovals = new Map<string, {
@@ -246,11 +482,311 @@ export class Agent implements AgentAPI {
     stepIndex?: number;
   }>();
   private allowAutomationForSession = false;
+  private conversationCompactionState: ConversationCompactionState | null = null;
+  private lastTurnToolContextMessage: string | null = null;
+  private activeRequestContextDebugSnapshot: RequestContextDebugSnapshot | null = null;
+  private compiledSystemPromptCache: string | null = null;
+
+  private appendActiveRequestDebugEntry(roleLabel: string, content: string): void {
+    if (!this.activeRequestContextDebugSnapshot) return;
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    const liveUpdates = this.activeRequestContextDebugSnapshot.liveUpdates ?? [];
+    const previous = liveUpdates[liveUpdates.length - 1];
+    if (previous?.content === trimmed && previous.label.endsWith(roleLabel)) return;
+    liveUpdates.push({
+      label: `[LIVE ${liveUpdates.length + 1}] ${roleLabel}`,
+      content: trimmed,
+    });
+    this.activeRequestContextDebugSnapshot.liveUpdates = liveUpdates;
+  }
+
+  private mergeActiveRequestDebugTimings(partial: Partial<RequestContextDebugTimings>): void {
+    if (!this.activeRequestContextDebugSnapshot) return;
+    this.activeRequestContextDebugSnapshot.timings = {
+      ...(this.activeRequestContextDebugSnapshot.timings ?? {}),
+      ...partial,
+    };
+  }
+
+  private buildCompiledSystemPrompt(): string {
+    if (this.compiledSystemPromptCache) {
+      return this.compiledSystemPromptCache;
+    }
+
+    this.compiledSystemPromptCache = buildSystemPrompt({
+      basePrompt: this.systemPrompt,
+      domainSkillRegistry: this.domainSkillRegistry,
+      interactionSkillRegistry: this.interactionSkillRegistry,
+      disabledTools: this.disabledTools,
+      webmcpByTab: this.webmcpByTab,
+      mcpServers: this.mcpServers.values(),
+    });
+
+    return this.compiledSystemPromptCache;
+  }
+
+  private invalidateCompiledSystemPrompt(): void {
+    this.compiledSystemPromptCache = null;
+  }
+
+  private getConfiguredContextWindow(): number {
+    return getRuntimeLlmConfig()?.contextWindow ?? DEFAULT_OPENAI_FIELDS.contextWindow;
+  }
+
+  private emitRequestBudgetCompaction(event: RequestBudgetCompactionEvent): void {
+    for (const callback of this.requestBudgetCompactionCallbacks) {
+      callback(event);
+    }
+  }
+
+  private getEffectiveConversationCompactionState(history: ChatTurn[]): ConversationCompactionState | null {
+    if (!this.conversationCompactionState?.summary.trim()) return null;
+    const compactedTurnCount = Math.min(this.conversationCompactionState.compactedTurnCount, history.length);
+    if (compactedTurnCount <= 0) return null;
+    return {
+      ...this.conversationCompactionState,
+      compactedTurnCount,
+    };
+  }
+
+  private buildCompactionSummaryMessage(state: ConversationCompactionState): AgentMessage {
+    return {
+      role: 'system',
+      content: [
+        `Earlier conversation summary replacing the first ${state.compactedTurnCount} chat turns:`,
+        state.summary.trim(),
+        'Treat this summary as the authoritative context for the compacted earlier conversation.',
+      ].join('\n\n'),
+    };
+  }
+
+  private buildEffectiveHistoryMessages(history: ChatTurn[]): AgentMessage[] {
+    const compactionState = this.getEffectiveConversationCompactionState(history);
+    const effectiveHistory = compactionState
+      ? history.slice(compactionState.compactedTurnCount)
+      : history;
+
+    return [
+      ...(compactionState ? [this.buildCompactionSummaryMessage(compactionState)] : []),
+      ...effectiveHistory.map((turn) => ({ role: turn.role, content: turn.content })),
+    ];
+  }
+
+  private estimateProjectedSummaryTokens(history: ChatTurn[], compactedTurnCount: number): number {
+    const sourceTokens = estimateHistoryTurnTokens(history.slice(0, compactedTurnCount));
+    return Math.max(MIN_COMPACTION_SUMMARY_TOKENS, Math.ceil(sourceTokens * COMPACTION_SUMMARY_TOKEN_RATIO));
+  }
+
+  private getNextCompactionTargetTurnCount(
+    history: ChatTurn[],
+    estimate: RequestBudgetEstimate,
+  ): number {
+    const maxCompactedTurnCount = Math.max(0, history.length - Math.min(history.length, MIN_VERBATIM_TURNS_AFTER_COMPACTION));
+    const currentState = this.getEffectiveConversationCompactionState(history);
+    const currentCompactedTurnCount = currentState?.compactedTurnCount ?? 0;
+
+    if (maxCompactedTurnCount <= currentCompactedTurnCount) {
+      return currentCompactedTurnCount;
+    }
+
+    const currentSummaryTokens = currentState
+      ? estimateMessageTokens(this.buildCompactionSummaryMessage(currentState))
+      : 0;
+
+    let targetTurnCount = currentCompactedTurnCount;
+    while (targetTurnCount < maxCompactedTurnCount) {
+      const increment = maxCompactedTurnCount - targetTurnCount === 1 ? 1 : 2;
+      targetTurnCount = Math.min(maxCompactedTurnCount, targetTurnCount + increment);
+
+      const projectedSummaryTokens = this.estimateProjectedSummaryTokens(history, targetTurnCount);
+      const newlyCompactedTokens = estimateHistoryTurnTokens(history.slice(currentCompactedTurnCount, targetTurnCount));
+      const projectedTokens = estimate.estimatedTokens - currentSummaryTokens - newlyCompactedTokens + projectedSummaryTokens;
+
+      if ((projectedTokens / estimate.contextWindow) <= REQUEST_BUDGET_COMPACTION_TARGET) {
+        break;
+      }
+    }
+
+    return targetTurnCount;
+  }
+
+  private async generateCompactionSummary(history: ChatTurn[], compactedTurnCount: number): Promise<string> {
+    const llm = await ensureLlm();
+    const existingSummary = this.conversationCompactionState?.summary.trim();
+    const transcript = history
+      .slice(0, compactedTurnCount)
+      .map((turn, index) => `Turn ${index + 1} (${turn.role}):\n${turn.content}`)
+      .join('\n\n');
+    const response = await (llm as any).invoke([
+      {
+        role: 'system',
+        content: [
+          'You are compacting earlier conversation turns for a browser automation agent.',
+          'Produce a concise running summary for future turns.',
+          'Preserve durable user goals, chosen constraints, important browser findings, workflow-demonstration facts, completed decisions, and unresolved work.',
+          'Omit filler, politeness, and token-budget discussion.',
+          'Respond with short bullet lines only.',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: [
+          existingSummary
+            ? `Existing running summary:\n${existingSummary}`
+            : 'There is no existing running summary yet.',
+          `Update the running summary so it accurately replaces the first ${compactedTurnCount} chat turns.`,
+          'Conversation to compact:',
+          transcript,
+        ].join('\n\n'),
+      },
+    ]);
+    const summary = extractLlmText(response).trim();
+    if (!summary) {
+      throw new Error('Compaction summary was empty.');
+    }
+    return summary;
+  }
+
+  private async compactConversationIfNeeded(
+    userQuery: string,
+    history: ChatTurn[] = [],
+    contextTabIds?: number[],
+    workflowDemonstrations: WorkflowDemonstration[] = [],
+    skillMention: SkillMention | null = null,
+  ): Promise<void> {
+    let before = await this.estimateRequestBudget(
+      userQuery,
+      history,
+      contextTabIds,
+      workflowDemonstrations,
+      skillMention,
+    );
+
+    while (before.usageRatio > REQUEST_BUDGET_COMPACTION_THRESHOLD) {
+      const targetTurnCount = this.getNextCompactionTargetTurnCount(history, before);
+      const currentCompactedTurnCount = this.getEffectiveConversationCompactionState(history)?.compactedTurnCount ?? 0;
+
+      if (targetTurnCount <= currentCompactedTurnCount) {
+        return;
+      }
+
+      try {
+        const summary = await this.generateCompactionSummary(history, targetTurnCount);
+        this.conversationCompactionState = {
+          summary,
+          compactedTurnCount: targetTurnCount,
+          updatedAt: Date.now(),
+        };
+      } catch (err: any) {
+        console.warn('[agent] Failed to compact conversation:', err?.message ?? err);
+        return;
+      }
+
+      const after = await this.estimateRequestBudget(
+        userQuery,
+        history,
+        contextTabIds,
+        workflowDemonstrations,
+        skillMention,
+      );
+
+      this.emitRequestBudgetCompaction({
+        before,
+        after,
+        compactionState: { ...this.conversationCompactionState },
+      });
+
+      if (after.usageRatio <= REQUEST_BUDGET_COMPACTION_TARGET) {
+        return;
+      }
+
+      before = after;
+    }
+  }
+
+  private async assembleQueryContext(
+    userQuery: string,
+    history: ChatTurn[] = [],
+    contextTabIds?: number[],
+    workflowDemonstrations: WorkflowDemonstration[] = [],
+    skillMention: SkillMention | null = null,
+  ): Promise<AssembledQueryContext> {
+    const browserContextResult = await buildBrowserContextSnapshotResult(contextTabIds).catch((err: any) => {
+      console.warn('[agent] Failed to build browser context snapshot:', err?.message ?? err);
+      return {
+        text: 'Browser context snapshot: unavailable.',
+        metrics: {
+          openTabCount: 0,
+          listedTabCount: 0,
+          extraTabCount: 0,
+          selectedTabCount: 0,
+          attachedTabCount: 0,
+          omittedAttachedTabCount: 0,
+          attachedSnapshotCount: 0,
+          frameChars: 0,
+          openTabsSectionChars: 0,
+          activeTabSectionChars: 0,
+          attachedSnapshotsSectionChars: 0,
+        },
+      };
+    });
+    const browserContext = browserContextResult.text;
+    const workflowDemonstrationContext = buildWorkflowDemonstrationContext(workflowDemonstrations);
+    const matchedDomainSkills = await this.buildMatchedDomainSkillContext(contextTabIds).catch((err: any) => {
+      console.warn('[agent] Failed to resolve matched Domain Skills:', err?.message ?? err);
+      return '';
+    });
+    const selectedSkillMentionContext = skillMention
+      ? buildSelectedSkillMentionContext(skillMention)
+      : '';
+
+    const augmentedUserQuery = workflowDemonstrationContext
+      ? [
+        '[IMPORTANT: Follow the attached Workflow Demonstration EXECUTION PLAN step by step.',
+        'Rules:',
+        '- Use the SAME interaction pattern as the demo (if the demo clicks calendar day buttons, you must click calendar day buttons — do NOT type dates as text instead).',
+        '- Substitute my values below for the demo\'s recorded values.',
+        '- Pass each step\'s targetEvidence JSON into the tool call.',
+        '- If a button/element is not visible in the compact snapshot, use browser_snapshot with mode="full" to find it before clicking something else.',
+        '- Do NOT click "Reset"/"Réinitialiser" unless instructed.]\n',
+        userQuery,
+      ].join('\n')
+      : userQuery;
+
+    const messages: AgentMessage[] = [
+      ...this.buildEffectiveHistoryMessages(history),
+      { role: 'system', content: browserContext },
+    ];
+
+    if (workflowDemonstrationContext) {
+      messages.push({ role: 'system', content: workflowDemonstrationContext });
+    }
+    if (matchedDomainSkills) {
+      messages.push({ role: 'system', content: matchedDomainSkills });
+    }
+    if (selectedSkillMentionContext) {
+      messages.push({ role: 'system', content: selectedSkillMentionContext });
+    }
+    messages.push({ role: 'user', content: augmentedUserQuery });
+
+    return {
+      systemPrompt: this.buildCompiledSystemPrompt(),
+      messages,
+      augmentedUserQuery,
+      browserContext,
+      browserContextMetrics: browserContextResult.metrics,
+      workflowDemonstrationContext,
+      matchedDomainSkills,
+      selectedSkillMentionContext,
+    };
+  }
 
   constructor() {
     this.builtinTools = createBuiltinTools({
       getVLMConfig: () => this.vlmConfig,
       findSkill: (identifier) => this.findSkill(identifier),
+      submitDomainSkillProposal: (draft) => this.submitDomainSkillProposal(draft),
     }).map((builtinTool) => this.wrapAutomationToolWithApproval(builtinTool));
 
     void ensureLlm()
@@ -264,6 +800,7 @@ export class Agent implements AgentAPI {
     this.webmcpByTab.set(tabId, { descriptors, tools, url, title });
     registerWebMCPToolDisplayLabels(tabId, descriptors);
     console.log('[agent] WebMCP tools updated for tab', tabId, ':', descriptors.map((tool) => tool.name));
+    this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
 
@@ -271,11 +808,13 @@ export class Agent implements AgentAPI {
     if (!this.webmcpByTab.has(tabId)) return;
     this.webmcpByTab.delete(tabId);
     console.log('[agent] Removed WebMCP tools for tab', tabId);
+    this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
 
   clearWebMCPTools(): void {
     this.webmcpByTab.clear();
+    this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
 
@@ -295,6 +834,7 @@ export class Agent implements AgentAPI {
   setToolEnabled(toolName: string, enabled: boolean): void {
     if (enabled) this.disabledTools.delete(toolName);
     else this.disabledTools.add(toolName);
+    this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
 
@@ -303,6 +843,7 @@ export class Agent implements AgentAPI {
       if (enabled) this.disabledTools.delete(toolName);
       else this.disabledTools.add(toolName);
     }
+    this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
 
@@ -312,6 +853,7 @@ export class Agent implements AgentAPI {
 
   setDisabledTools(names: string[]): void {
     this.disabledTools = new Set(names);
+    this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
 
@@ -334,6 +876,7 @@ export class Agent implements AgentAPI {
         onAppToolResult: (request) => this.emitMCPAppRender(request),
       });
       registerMCPToolDisplayLabels(config.id, config.name, tools);
+      this.invalidateCompiledSystemPrompt();
       this.rebuildAgent();
       this.persistMCPServers();
       console.log(`[agent] MCP server "${name}" connected with ${tools.length} tools`);
@@ -352,6 +895,7 @@ export class Agent implements AgentAPI {
 
     removeMCPToolDisplayLabels(id, entry.tools);
     this.mcpServers.delete(id);
+    this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
     this.persistMCPServers();
     console.log(`[agent] MCP server "${entry.name}" removed`);
@@ -376,6 +920,7 @@ export class Agent implements AgentAPI {
         onAppToolResult: (request) => this.emitMCPAppRender(request),
       });
       registerMCPToolDisplayLabels(id, entry.name, tools);
+      this.invalidateCompiledSystemPrompt();
       this.rebuildAgent();
       console.log(`[agent] MCP server "${entry.name}" reconnected with ${tools.length} tools`);
     } catch (err: any) {
@@ -428,6 +973,7 @@ export class Agent implements AgentAPI {
   setSystemPrompt(prompt: string): void {
     const normalized = prompt.trim() || DEFAULT_SYSTEM_PROMPT;
     this.systemPrompt = normalized;
+    this.invalidateCompiledSystemPrompt();
     if (this.currentAgent) {
       this.rebuildAgent();
     }
@@ -439,21 +985,75 @@ export class Agent implements AgentAPI {
   }
 
   setSkillRegistry(skills: SkillRegistryEntry[]): void {
-    this.skillRegistry = normalizeSkillRegistry(skills);
+    this.domainSkillRegistry = normalizeSkillRegistry(skills);
+    this.invalidateCompiledSystemPrompt();
     if (this.currentAgent) {
       this.rebuildAgent();
     }
-    console.log('[agent] Skill registry updated:', this.skillRegistry.length, 'skills');
+    console.log('[agent] Domain skill registry updated:', this.domainSkillRegistry.length, 'skills');
   }
 
   getSkillRegistry(): SkillRegistryEntry[] {
-    return [...this.skillRegistry];
+    return [...this.domainSkillRegistry];
   }
 
-  findSkill(identifier: string): SkillRegistryEntry | null {
+  setConversationCompactionState(state: ConversationCompactionState | null): void {
+    if (!state?.summary.trim() || state.compactedTurnCount <= 0) {
+      this.conversationCompactionState = null;
+      return;
+    }
+
+    this.conversationCompactionState = {
+      summary: state.summary,
+      compactedTurnCount: Math.max(0, Math.floor(state.compactedTurnCount)),
+      updatedAt: state.updatedAt,
+    };
+  }
+
+  getConversationCompactionState(): ConversationCompactionState | null {
+    return this.conversationCompactionState
+      ? { ...this.conversationCompactionState }
+      : null;
+  }
+
+  getLastTurnToolContextMessage(): string | null {
+    return this.lastTurnToolContextMessage;
+  }
+
+  getActiveRequestContextDebugText(): string | null {
+    return this.activeRequestContextDebugSnapshot
+      ? formatRequestContextDebugText(this.activeRequestContextDebugSnapshot)
+      : null;
+  }
+
+  async buildRequestContextDebugText(
+    query: string,
+    history: ChatTurn[] = [],
+    contextTabIds?: number[],
+    workflowDemonstrations: WorkflowDemonstration[] = [],
+    skillMention: SkillMention | null = null,
+  ): Promise<string> {
+    const assembled = await this.assembleQueryContext(
+      query,
+      history,
+      contextTabIds,
+      workflowDemonstrations,
+      skillMention,
+    );
+    return formatRequestContextDebugText(buildRequestContextDebugSnapshot({
+      query,
+      history,
+      assembled,
+      contextWindow: this.getConfiguredContextWindow(),
+    }));
+  }
+
+  findSkill(identifier: string): SkillRegistryEntry | InteractionSkillEntry | null {
     const normalized = identifier.trim().toLowerCase();
     if (!normalized) return null;
-    return this.skillRegistry.find((skill) =>
+    return this.domainSkillRegistry.find((skill) =>
+      skill.slug.toLowerCase() === normalized || skill.name.toLowerCase() === normalized,
+    ) ?? this.interactionSkillRegistry.find((skill) =>
       skill.slug.toLowerCase() === normalized || skill.name.toLowerCase() === normalized,
     ) ?? null;
   }
@@ -480,6 +1080,14 @@ export class Agent implements AgentAPI {
 
   offMCPAppRender(callback: MCPAppRenderCallback): void {
     this.mcpAppRenderCallbacks = this.mcpAppRenderCallbacks.filter((cb) => cb !== callback);
+  }
+
+  onRequestBudgetCompaction(callback: RequestBudgetCompactionCallback): void {
+    this.requestBudgetCompactionCallbacks.push(callback);
+  }
+
+  offRequestBudgetCompaction(callback: RequestBudgetCompactionCallback): void {
+    this.requestBudgetCompactionCallbacks = this.requestBudgetCompactionCallbacks.filter((cb) => cb !== callback);
   }
 
   resolveAutomationApproval(requestId: string, decision: AutomationApprovalDecision): void {
@@ -563,7 +1171,8 @@ export class Agent implements AgentAPI {
 
     const wrapped = tool(
       async (input: unknown) => {
-        const decision = await this.waitForAutomationApproval((originalTool as any).name as string, input);
+        const toolName = (originalTool as any).name as string;
+        const decision = await this.waitForAutomationApproval(toolName, input);
         if (decision === 'skip') {
           return JSON.stringify({
             ok: false,
@@ -571,7 +1180,7 @@ export class Agent implements AgentAPI {
             skippedByUser: true,
           }, null, 2);
         }
-        return await (originalTool as any).invoke(input);
+        return await this.invokeAutomationToolWithTimeout(originalTool, input, toolName);
       },
       {
         name: (originalTool as any).name as string,
@@ -588,6 +1197,35 @@ export class Agent implements AgentAPI {
     }
 
     return wrapped;
+  }
+
+  private async invokeAutomationToolWithTimeout(
+    originalTool: StructuredToolInterface,
+    input: unknown,
+    toolName: string,
+  ): Promise<unknown> {
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+    const timeout = new Promise<string>((resolve) => {
+      timeoutId = globalThis.setTimeout(() => {
+        resolve(JSON.stringify({
+          ok: false,
+          timedOut: true,
+          timeoutMs: AUTOMATION_TOOL_TIMEOUT_MS,
+          error: `Automation tool "${toolName}" timed out after ${AUTOMATION_TOOL_TIMEOUT_MS}ms. Stop waiting on this call, take a fresh browser_snapshot if needed, and try a smaller or more explicit action.`,
+        }, null, 2));
+      }, AUTOMATION_TOOL_TIMEOUT_MS);
+    });
+
+    try {
+      return await Promise.race([
+        (originalTool as any).invoke(input),
+        timeout,
+      ]);
+    } finally {
+      if (timeoutId !== undefined) {
+        globalThis.clearTimeout(timeoutId);
+      }
+    }
   }
 
   abort(): void {
@@ -629,6 +1267,7 @@ export class Agent implements AgentAPI {
   }
 
   private isToolEnabled(tool: StructuredToolInterface): boolean {
+    if ((tool as any).__hidden) return false;
     const name = (tool as any).name as string;
     const aliasOf = (tool as any).__aliasOf as string | undefined;
     if (this.disabledTools.has(name)) return false;
@@ -696,7 +1335,61 @@ export class Agent implements AgentAPI {
     });
   }
 
-  async query(userQuery: string, history: ChatTurn[] = [], contextTabIds?: number[]): Promise<string> {
+  private async submitDomainSkillProposal(draft: DomainSkillProposalDraft) {
+    return submitDomainSkillProposal(draft);
+  }
+
+  private async buildMatchedDomainSkillContext(contextTabIds?: number[]): Promise<string> {
+    const [tabs, activeTab] = await Promise.all([
+      tabsList().catch(() => []),
+      tabsGetActive().catch(() => null),
+    ]);
+
+    const selectedTabIds = getEffectiveContextTabIds(contextTabIds, activeTab?.tabId);
+    if (selectedTabIds.length === 0) return '';
+
+    const tabsById = new Map<number, (typeof tabs)[number]>();
+    for (const tab of tabs) {
+      tabsById.set(tab.tabId, tab);
+    }
+
+    const selectedTabs = selectedTabIds
+      .map((tabId) => tabsById.get(tabId) ?? (activeTab?.tabId === tabId ? activeTab : undefined))
+      .filter((tab): tab is NonNullable<typeof activeTab> => Boolean(tab));
+
+    if (selectedTabs.length === 0) return '';
+
+    const matchedSkills = this.domainSkillRegistry.filter((skill) =>
+      skill.enabled && selectedTabs.some((tab) => matchesDomainSkillContext(skill, {
+        url: tab.url,
+        title: tab.title,
+      })),
+    );
+
+    if (matchedSkills.length === 0) return '';
+
+    return [
+      'Matched Domain Skills for the selected browser context:',
+      ...matchedSkills.map((skill) => {
+        const description = skill.description || 'No description provided.';
+        const tags = skill.tags.length > 0 ? ` — tags: ${skill.tags.join(', ')}` : '';
+        const matcher = formatDomainSkillMatcherSummary(skill.matcher);
+        const scope = matcher ? ` — scope: ${matcher}` : '';
+        return `- ${skill.name} (slug: ${skill.slug}) — ${description}${tags}${scope}`;
+      }),
+      'If one of these matched Domain Skills seems relevant, call skills_load with its slug or name before relying on the full guidance.',
+    ].join('\n');
+  }
+
+  async query(
+    userQuery: string,
+    history: ChatTurn[] = [],
+    contextTabIds?: number[],
+    workflowDemonstrations: WorkflowDemonstration[] = [],
+    skillMention: SkillMention | null = null,
+  ): Promise<string> {
+    const turnStartedAt = Date.now();
+
     if (this.currentAgent == null) {
       try {
         await ensureLlm();
@@ -709,27 +1402,59 @@ export class Agent implements AgentAPI {
       }
     }
 
-    const browserContext = await buildBrowserContextSnapshot(contextTabIds).catch((err: any) => {
-      console.warn('[agent] Failed to build browser context snapshot:', err?.message ?? err);
-      return 'Browser context snapshot: unavailable.';
-    });
+    const compactionStartedAt = Date.now();
+    await this.compactConversationIfNeeded(
+      userQuery,
+      history,
+      contextTabIds,
+      workflowDemonstrations,
+      skillMention,
+    );
+    const compactionMs = Date.now() - compactionStartedAt;
 
-    const messages = [
-      ...history.map((turn) => ({ role: turn.role, content: turn.content })),
-      { role: 'system', content: browserContext },
-      { role: 'user', content: userQuery },
-    ];
+    const requestAssemblyStartedAt = Date.now();
+    const assembled = await this.assembleQueryContext(
+      userQuery,
+      history,
+      contextTabIds,
+      workflowDemonstrations,
+      skillMention,
+    );
+    const requestAssemblyMs = Date.now() - requestAssemblyStartedAt;
+    const messages = assembled.messages;
     let finalContent = '';
 
+    this.activeRequestContextDebugSnapshot = buildRequestContextDebugSnapshot({
+      query: userQuery,
+      history,
+      assembled,
+      contextWindow: this.getConfiguredContextWindow(),
+      timings: {
+        compactionMs,
+        requestAssemblyMs,
+      },
+      liveUpdates: [],
+    });
+
+    this.lastTurnToolContextMessage = null;
     this.activeToolSteps = [];
     this.activePendingTools = new Map<string, ToolStepEvent>();
     this.clearPendingAutomationApprovals('skip');
     const toolSteps = this.activeToolSteps;
     const pendingTools = this.activePendingTools;
     let stepCounter = 0;
+    let repeatedToolFailureMessage: string | undefined;
+    const repeatedToolFailures = createRepeatedToolFailureTracker();
 
     this.queryAbortController = new AbortController();
-    const abortSignal = this.queryAbortController.signal;
+    const abortController = this.queryAbortController;
+    const abortSignal = abortController.signal;
+    const agentStreamStartedAt = Date.now();
+    let firstAgentUpdateMs: number | undefined;
+    let firstToolCallMs: number | undefined;
+    let firstAssistantTextMs: number | undefined;
+    let firstToolStartedAt: number | undefined;
+    let lastToolCompletedAt: number | undefined;
 
     async function* abortableStream<T>(
       stream: AsyncIterable<T>,
@@ -770,6 +1495,11 @@ export class Agent implements AgentAPI {
       for await (const chunk of abortableStream(rawStream, abortSignal)) {
         await this.waitIfPaused();
 
+        if (firstAgentUpdateMs == null) {
+          firstAgentUpdateMs = Date.now() - agentStreamStartedAt;
+          this.mergeActiveRequestDebugTimings({ firstAgentUpdateMs });
+        }
+
         if (abortSignal.aborted) {
           console.log('[agent] Query aborted, breaking stream');
           break;
@@ -777,6 +1507,14 @@ export class Agent implements AgentAPI {
 
         if (chunk.agent?.messages) {
           for (const message of chunk.agent.messages) {
+            const debugContent = formatActiveDebugMessageContent(message);
+            if (debugContent) {
+              const roleLabel = typeof (message as any)?.role === 'string'
+                ? String((message as any).role).toUpperCase()
+                : 'ASSISTANT';
+              this.appendActiveRequestDebugEntry(roleLabel, debugContent);
+            }
+
             if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
               console.log('[agent] tool calls', message.tool_calls);
               for (const call of message.tool_calls) {
@@ -796,6 +1534,13 @@ export class Agent implements AgentAPI {
                   startTime: Date.now(),
                   inputText: extractToolCallInput(call),
                 };
+                if (firstToolCallMs == null) {
+                  firstToolCallMs = step.startTime - agentStreamStartedAt;
+                  this.mergeActiveRequestDebugTimings({ firstToolCallMs });
+                }
+                if (firstToolStartedAt == null) {
+                  firstToolStartedAt = step.startTime;
+                }
                 toolSteps.push(step);
                 pendingTools.set(callId, step);
                 this.emitToolSteps(toolSteps);
@@ -803,6 +1548,10 @@ export class Agent implements AgentAPI {
             }
 
             if (message.content && typeof message.content === 'string' && !message.tool_calls?.length) {
+              if (firstAssistantTextMs == null) {
+                firstAssistantTextMs = Date.now() - agentStreamStartedAt;
+                this.mergeActiveRequestDebugTimings({ firstAssistantTextMs });
+              }
               finalContent = message.content;
               this.emitStreamText(message.content);
             }
@@ -811,6 +1560,11 @@ export class Agent implements AgentAPI {
 
         if (chunk.tools?.messages) {
           for (const toolMessage of chunk.tools.messages) {
+            const debugContent = formatToolDebugMessageContent(toolMessage);
+            if (debugContent) {
+              this.appendActiveRequestDebugEntry('TOOL', debugContent);
+            }
+
             const toolCallId = (toolMessage as any)?.tool_call_id;
             const toolName = (toolMessage as any)?.name;
             const resultContent = (toolMessage as any)?.content;
@@ -833,10 +1587,25 @@ export class Agent implements AgentAPI {
               const outcome = analyzeToolOutcome(step.toolName, resultContent);
               step.status = outcome.status;
               step.durationMs = Date.now() - step.startTime;
+              lastToolCompletedAt = step.startTime + step.durationMs;
               step.description = outcome.description;
               step.resultText = outcome.resultText;
               step.errorText = outcome.errorText;
               this.emitToolSteps(toolSteps);
+              if (outcome.status === 'error') {
+                const failureDecision = repeatedToolFailures.recordFailure({
+                  toolName: step.toolName,
+                  inputText: step.inputText,
+                  errorText: outcome.errorText,
+                  description: outcome.description,
+                });
+                if (failureDecision.shouldAbort && !abortSignal.aborted) {
+                  repeatedToolFailureMessage = failureDecision.message;
+                  abortController.abort();
+                }
+              } else {
+                repeatedToolFailures.reset();
+              }
             }
           }
         }
@@ -866,18 +1635,80 @@ export class Agent implements AgentAPI {
       this.emitToolSteps(toolSteps);
     }
 
+    const turnFinishedAt = Date.now();
+    const totalToolDurationMs = toolSteps.reduce((sum, step) => sum + (step.durationMs ?? 0), 0);
+    const toolWallTimeMs = firstToolStartedAt != null && lastToolCompletedAt != null
+      ? Math.max(0, lastToolCompletedAt - firstToolStartedAt)
+      : undefined;
+    const postToolFollowUpMs = lastToolCompletedAt != null
+      ? Math.max(0, turnFinishedAt - lastToolCompletedAt)
+      : undefined;
+    const finalTimings: RequestContextDebugTimings = {
+      compactionMs,
+      requestAssemblyMs,
+      firstAgentUpdateMs,
+      firstToolCallMs,
+      firstAssistantTextMs,
+      agentStreamMs: turnFinishedAt - agentStreamStartedAt,
+      toolCount: toolSteps.length,
+      totalToolDurationMs,
+      toolWallTimeMs,
+      postToolFollowUpMs,
+      turnTotalMs: turnFinishedAt - turnStartedAt,
+    };
+    this.mergeActiveRequestDebugTimings(finalTimings);
+
+    if (this.activeRequestContextDebugSnapshot?.requestShape) {
+      const shape = this.activeRequestContextDebugSnapshot.requestShape;
+      logInfo(
+        'agent-turn',
+        `tokens=${this.activeRequestContextDebugSnapshot.estimatedTokens} turn=${finalTimings.turnTotalMs ?? 0}ms assembly=${requestAssemblyMs}ms firstUpdate=${firstAgentUpdateMs ?? 'n/a'}ms stream=${finalTimings.agentStreamMs ?? 0}ms tools=${toolSteps.length} toolTotal=${totalToolDurationMs}ms toolWall=${toolWallTimeMs ?? 'n/a'}ms postTool=${postToolFollowUpMs ?? 'n/a'}ms promptChars=${shape.exactPromptChars} browserContextChars=${shape.browserContextChars}`,
+      );
+    }
+
+    this.lastTurnToolContextMessage = buildToolContextCarryForwardMessage(toolSteps);
+
     this.clearPendingAutomationApprovals('skip');
     this.queryAbortController = null;
     this.paused = false;
     this.pauseResolve = null;
     this.activePendingTools = new Map<string, ToolStepEvent>();
     this.activeToolSteps = [];
+    this.activeRequestContextDebugSnapshot = null;
 
     if (abortSignal.aborted) {
+      if (repeatedToolFailureMessage) return repeatedToolFailureMessage;
       return 'Agent turn was interrupted.';
     }
 
     return stripToolCallJson(finalContent) || 'No response from agent.';
+  }
+
+  async estimateRequestBudget(
+    userQuery: string,
+    history: ChatTurn[] = [],
+    contextTabIds?: number[],
+    workflowDemonstrations: WorkflowDemonstration[] = [],
+    skillMention: SkillMention | null = null,
+  ): Promise<RequestBudgetEstimate> {
+    const assembled = await this.assembleQueryContext(
+      userQuery,
+      history,
+      contextTabIds,
+      workflowDemonstrations,
+      skillMention,
+    );
+    const estimatedTokens = estimateConversationTokens(assembled.systemPrompt, assembled.messages);
+    const contextWindow = this.getConfiguredContextWindow();
+    const usageRatio = estimatedTokens / contextWindow;
+
+    return {
+      estimatedTokens,
+      contextWindow,
+      usageRatio,
+      usagePercent: Math.round(usageRatio * 100),
+      messageCount: assembled.messages.length + 1,
+    };
   }
 
   private rebuildAgent(): void {
@@ -905,13 +1736,7 @@ export class Agent implements AgentAPI {
       .filter((tool) => this.isToolEnabled(tool));
     console.log('[agent] Rebuilding agent graph with tools:', tools.map((tool: any) => tool.name));
 
-    const prompt = buildSystemPrompt({
-      basePrompt: this.systemPrompt,
-      skillRegistry: this.skillRegistry,
-      disabledTools: this.disabledTools,
-      webmcpByTab: this.webmcpByTab,
-      mcpServers: this.mcpServers.values(),
-    });
+    const prompt = this.buildCompiledSystemPrompt();
 
     this.currentAgent = createReactAgent({
       llm: llm as any,

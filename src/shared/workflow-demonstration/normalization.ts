@@ -1,10 +1,6 @@
-import { CONVERSATIONS_STORAGE_KEY, getStorageValue, setStorageValues } from '../../shared/storage';
-import { normalizeWorkflowDemonstration as normalizeWorkflowDemonstrationFromShared } from '../../shared/workflow-demonstration';
 import type {
   BrowElementSignature,
   BrowserViewportRect,
-  ConversationCompactionState,
-  SkillMentionReference,
   WorkflowDemonstration,
   WorkflowDemonstrationKeyboardEvidence,
   WorkflowDemonstrationPointer,
@@ -17,8 +13,7 @@ import type {
   WorkflowDemonstrationTarget,
   WorkflowDemonstrationTraceEvidence,
   WorkflowDemonstrationValue,
-} from '../../shared/types';
-import type { SavedConversation } from './types';
+} from '../types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -51,65 +46,6 @@ function normalizeViewportRect(raw: unknown): BrowserViewportRect | undefined {
     return undefined;
   }
   return { x, y, left, top, right, bottom, width, height };
-}
-
-function normalizeMessageRole(value: unknown): SavedConversation['messages'][number]['role'] | undefined {
-  if (value === 'user' || value === 'assistant' || value === 'system') return value;
-  return undefined;
-}
-
-function normalizeSkillMentionReference(raw: unknown): SkillMentionReference | undefined {
-  if (!isRecord(raw)) return undefined;
-  if (raw.kind !== 'domain' && raw.kind !== 'interaction') return undefined;
-  if (
-    typeof raw.id !== 'string'
-    || typeof raw.slug !== 'string'
-    || typeof raw.name !== 'string'
-    || !raw.id.trim()
-    || !raw.slug.trim()
-    || !raw.name.trim()
-  ) {
-    return undefined;
-  }
-  return {
-    kind: raw.kind,
-    id: raw.id,
-    slug: raw.slug,
-    name: raw.name,
-  };
-}
-
-function normalizeSavedConversationMessage(raw: unknown): SavedConversation['messages'][number] | undefined {
-  if (!isRecord(raw)) return undefined;
-  const role = normalizeMessageRole(raw.role);
-  if (!role || typeof raw.content !== 'string' || typeof raw.time !== 'string') return undefined;
-  const workflowDemonstrationIds = normalizeStringArray(raw.workflowDemonstrationIds);
-  const skillMention = normalizeSkillMentionReference(raw.skillMention);
-  return {
-    role,
-    content: raw.content,
-    time: raw.time,
-    ...(workflowDemonstrationIds.length > 0 ? { workflowDemonstrationIds } : {}),
-    ...(skillMention ? { skillMention } : {}),
-  };
-}
-
-function normalizeConversationCompactionState(raw: unknown): ConversationCompactionState | null {
-  if (!isRecord(raw)) return null;
-  if (typeof raw.summary !== 'string') return null;
-  if (typeof raw.compactedTurnCount !== 'number' || !Number.isInteger(raw.compactedTurnCount) || raw.compactedTurnCount < 0) {
-    return null;
-  }
-  return {
-    summary: raw.summary,
-    compactedTurnCount: raw.compactedTurnCount,
-    updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
-  };
-}
-
-function normalizeChatHistoryEntry(raw: unknown): SavedConversation['chatHistory'][number] | undefined {
-  if (!isRecord(raw) || typeof raw.role !== 'string' || typeof raw.content !== 'string') return undefined;
-  return { role: raw.role, content: raw.content };
 }
 
 function normalizeWorkflowDemonstrationTabContext(raw: unknown): WorkflowDemonstrationTabContext | undefined {
@@ -286,65 +222,22 @@ function normalizeWorkflowDemonstrationStep(raw: unknown): WorkflowDemonstration
   };
 }
 
-function normalizeWorkflowDemonstration(raw: unknown): WorkflowDemonstration | undefined {
-  return normalizeWorkflowDemonstrationFromShared(raw);
-}
-
-function normalizeSavedConversation(raw: unknown): SavedConversation | undefined {
+export function normalizeWorkflowDemonstration(raw: unknown): WorkflowDemonstration | undefined {
   if (!isRecord(raw)) return undefined;
-  if (typeof raw.id !== 'string' || typeof raw.title !== 'string' || !Array.isArray(raw.messages) || !Array.isArray(raw.chatHistory)) {
+  const demonstratedTab = normalizeWorkflowDemonstrationTabContext(raw.demonstratedTab);
+  if (!demonstratedTab || typeof raw.id !== 'string' || typeof raw.title !== 'string' || typeof raw.createdAt !== 'number' || typeof raw.updatedAt !== 'number' || !Array.isArray(raw.steps)) {
     return undefined;
   }
 
-  const createdAt = typeof raw.createdAt === 'number' ? raw.createdAt : Date.now();
-  const updatedAt = typeof raw.updatedAt === 'number' ? raw.updatedAt : createdAt;
   return {
     id: raw.id,
     title: raw.title,
-    createdAt,
-    updatedAt,
-    messages: raw.messages
-      .map((message) => normalizeSavedConversationMessage(message))
-      .filter((message): message is SavedConversation['messages'][number] => Boolean(message)),
-    chatHistory: raw.chatHistory
-      .map((entry) => normalizeChatHistoryEntry(entry))
-      .filter((entry): entry is SavedConversation['chatHistory'][number] => Boolean(entry)),
-    workflowDemonstrations: Array.isArray(raw.workflowDemonstrations)
-      ? raw.workflowDemonstrations
-        .map((entry) => normalizeWorkflowDemonstration(entry))
-        .filter((entry): entry is SavedConversation['workflowDemonstrations'][number] => Boolean(entry))
-      : [],
-    stagedWorkflowDemonstrationIds: normalizeStringArray(raw.stagedWorkflowDemonstrationIds),
-    compactionState: normalizeConversationCompactionState(raw.compactionState),
+    note: typeof raw.note === 'string' ? raw.note : undefined,
+    demonstratedTab,
+    steps: raw.steps
+      .map((step) => normalizeWorkflowDemonstrationStep(step))
+      .filter((step): step is WorkflowDemonstration['steps'][number] => Boolean(step)),
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
   };
-}
-
-function normalizeConversations(raw: unknown): SavedConversation[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((item) => normalizeSavedConversation(item))
-    .filter((item): item is SavedConversation => Boolean(item));
-}
-
-export async function loadSavedConversations(): Promise<SavedConversation[]> {
-  return normalizeConversations(await getStorageValue<unknown>(CONVERSATIONS_STORAGE_KEY));
-}
-
-export async function upsertSavedConversation(nextConversation: SavedConversation): Promise<void> {
-  const conversations = await loadSavedConversations();
-  const existingIndex = conversations.findIndex((conversation) => conversation.id === nextConversation.id);
-  if (existingIndex >= 0) {
-    nextConversation.createdAt = conversations[existingIndex].createdAt;
-    conversations[existingIndex] = nextConversation;
-  } else {
-    conversations.push(nextConversation);
-  }
-  await setStorageValues({ [CONVERSATIONS_STORAGE_KEY]: conversations });
-}
-
-export async function removeSavedConversation(id: string): Promise<void> {
-  const conversations = await loadSavedConversations();
-  await setStorageValues({
-    [CONVERSATIONS_STORAGE_KEY]: conversations.filter((conversation) => conversation.id !== id),
-  });
 }

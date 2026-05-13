@@ -1,23 +1,46 @@
 import { browserSnapshot, tabsGetActive, tabsList } from '../tab-tools';
-import type { BrowserSnapshot } from '../../shared/types';
+import type { BrowserSnapshot, WorkflowDemonstration } from '../../shared/types';
+import { getEffectiveContextTabIds } from './context-tab-selection';
+import {
+  buildWorkflowDemonstrationContext as buildWorkflowDemonstrationContextFromShared,
+  formatWorkflowDemonstrationForContext as formatWorkflowDemonstrationForContextFromShared,
+} from '../../shared/workflow-demonstration';
+import { buildBrowserContextSnapshotLayout } from './browser-context-layout';
 import { formatBrowserSnapshot } from './tool-result-snapshot';
+import {
+  invalidateBrowserContextSnapshotCache,
+  primeBrowserContextSnapshotCache,
+  readBrowserContextSnapshotCache,
+} from './browser-context-cache';
 
 export { formatBrowserSnapshot } from './tool-result-snapshot';
+export {
+  invalidateBrowserContextSnapshotCache,
+  primeBrowserContextSnapshotCache,
+  readBrowserContextSnapshotCache,
+} from './browser-context-cache';
+
+export interface BrowserContextSnapshotMetrics {
+  openTabCount: number;
+  listedTabCount: number;
+  extraTabCount: number;
+  selectedTabCount: number;
+  attachedTabCount: number;
+  omittedAttachedTabCount: number;
+  attachedSnapshotCount: number;
+  frameChars: number;
+  openTabsSectionChars: number;
+  activeTabSectionChars: number;
+  attachedSnapshotsSectionChars: number;
+}
+
+export interface BrowserContextSnapshotResult {
+  text: string;
+  metrics: BrowserContextSnapshotMetrics;
+}
 
 const QUERY_CONTEXT_TAB_LIMIT = 40;
-const QUERY_CONTEXT_TITLE_LIMIT = 120;
-const QUERY_CONTEXT_URL_LIMIT = 160;
 const QUERY_CONTEXT_SELECTED_TAB_LIMIT = 8;
-
-function normalizeInlineText(text: string | undefined | null): string {
-  return (text ?? '').replace(/\s+/g, ' ').trim();
-}
-
-function truncateInline(text: string | undefined | null, max: number): string {
-  const normalized = normalizeInlineText(text);
-  if (normalized.length <= max) return normalized;
-  return `${normalized.slice(0, max)}…`;
-}
 
 export function stripToolCallJson(text: string): string {
   return text
@@ -25,7 +48,50 @@ export function stripToolCallJson(text: string): string {
     .trim();
 }
 
-export async function buildBrowserContextSnapshot(contextTabIds?: number[]): Promise<string> {
+export function formatWorkflowDemonstrationForContext(
+  demonstration: WorkflowDemonstration,
+  index = 1,
+): string {
+  return formatWorkflowDemonstrationForContextFromShared(demonstration, index);
+}
+
+export function buildWorkflowDemonstrationContext(workflowDemonstrations: WorkflowDemonstration[] = []): string {
+  return buildWorkflowDemonstrationContextFromShared(workflowDemonstrations);
+}
+
+async function getAttachedSnapshotText(
+  tabId: number,
+  tab: { url?: string; title?: string } | undefined,
+): Promise<string> {
+  const cached = readBrowserContextSnapshotCache(tabId, {
+    url: tab?.url,
+    title: tab?.title,
+  });
+  if (cached) return cached.snapshotText;
+
+  const snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 70 }).catch((err: any): BrowserSnapshot => ({
+    ok: false,
+    snapshotId: '',
+    tabId,
+    url: tab?.url ?? '',
+    title: tab?.title ?? '',
+    generatedAt: Date.now(),
+    viewport: { width: 0, height: 0, scrollX: 0, scrollY: 0, devicePixelRatio: 1 },
+    elements: [],
+    visibleElementCount: 0,
+    displayedElementCount: 0,
+    omittedElementCount: 0,
+    error: err?.message ?? 'Failed to capture browser snapshot',
+  }));
+
+  const snapshotText = formatBrowserSnapshot(snapshot);
+  if (snapshot.ok) {
+    primeBrowserContextSnapshotCache(snapshot, snapshotText);
+  }
+  return snapshotText;
+}
+
+export async function buildBrowserContextSnapshotResult(contextTabIds?: number[]): Promise<BrowserContextSnapshotResult> {
   const [tabs, activeTab] = await Promise.all([
     tabsList().catch(() => []),
     tabsGetActive().catch(() => null),
@@ -34,14 +100,7 @@ export async function buildBrowserContextSnapshot(contextTabIds?: number[]): Pro
   const visibleTabId = activeTab?.tabId;
   const listedTabs = tabs.slice(0, QUERY_CONTEXT_TAB_LIMIT);
   const extraTabCount = Math.max(tabs.length - listedTabs.length, 0);
-  const selectedTabIds = Array.from(
-    new Set(
-      (contextTabIds === undefined
-        ? (activeTab?.tabId !== undefined ? [activeTab.tabId] : [])
-        : contextTabIds
-      ).filter((tabId): tabId is number => Number.isInteger(tabId) && tabId >= 0),
-    ),
-  );
+  const selectedTabIds = getEffectiveContextTabIds(contextTabIds, activeTab?.tabId);
   const attachedTabIds = selectedTabIds.slice(0, QUERY_CONTEXT_SELECTED_TAB_LIMIT);
   const omittedAttachedTabCount = Math.max(selectedTabIds.length - attachedTabIds.length, 0);
   const tabsById = new Map<number, (typeof tabs)[number]>();
@@ -49,75 +108,48 @@ export async function buildBrowserContextSnapshot(contextTabIds?: number[]): Pro
     tabsById.set(tab.tabId, tab);
   }
 
-  const tabLines = listedTabs.length > 0
-    ? listedTabs.map((tab, index) => {
-      const markers = [
-        tab.tabId === visibleTabId ? 'ACTIVE' : null,
-        tab.active ? 'SELECTED' : null,
-      ].filter(Boolean).join(', ');
-      const markerPrefix = markers ? `[${markers}] ` : '';
-      const title = truncateInline(tab.title || '(untitled tab)', QUERY_CONTEXT_TITLE_LIMIT);
-      const url = truncateInline(tab.url || '', QUERY_CONTEXT_URL_LIMIT);
-      return `${index + 1}. ${markerPrefix}tabId=${tab.tabId} title="${title}" url=${url}`;
-    }).join('\n')
-    : 'No open tabs found.';
-
-  const activeSection = activeTab
-    ? [
-      'Current visible/selected tab:',
-      `tabId=${activeTab.tabId}`,
-      `title="${truncateInline(activeTab.title || '(untitled tab)', QUERY_CONTEXT_TITLE_LIMIT)}"`,
-      `url=${truncateInline(activeTab.url || '', QUERY_CONTEXT_URL_LIMIT)}`,
-      `status=${activeTab.status}`,
-    ].join('\n')
-    : 'Current visible/selected tab: unavailable.';
-
   const attachedSnapshotBlocks = await Promise.all(attachedTabIds.map(async (tabId, index) => {
     const tab = tabsById.get(tabId) ?? (activeTab?.tabId === tabId ? activeTab : undefined);
-    const snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 70 }).catch((err: any): BrowserSnapshot => ({
-      ok: false,
-      snapshotId: '',
+    const snapshotText = await getAttachedSnapshotText(tabId, tab);
+
+    return {
       tabId,
-      url: tab?.url ?? '',
-      title: tab?.title ?? '',
-      generatedAt: Date.now(),
-      viewport: { width: 0, height: 0, scrollX: 0, scrollY: 0, devicePixelRatio: 1 },
-      elements: [],
-      visibleElementCount: 0,
-      displayedElementCount: 0,
-      omittedElementCount: 0,
-      error: err?.message ?? 'Failed to capture browser snapshot',
-    }));
-
-    const markers = [
-      tabId === visibleTabId ? 'ACTIVE' : null,
-      tab?.active ? 'SELECTED' : null,
-    ].filter(Boolean).join(', ');
-    const markerPrefix = markers ? `[${markers}] ` : '';
-    const header = `${index + 1}. ${markerPrefix}tabId=${tabId} title="${truncateInline(tab?.title || '(untitled tab)', QUERY_CONTEXT_TITLE_LIMIT)}" url=${truncateInline(tab?.url || '', QUERY_CONTEXT_URL_LIMIT)}`;
-
-    return `${header}\n${formatBrowserSnapshot(snapshot)}`;
+      title: tab?.title,
+      url: tab?.url,
+      active: tab?.active,
+      snapshotText,
+    };
   }));
 
-  const attachedTabsSection = attachedSnapshotBlocks.length > 0
-    ? [
-      `Attached tab ref snapshots (${selectedTabIds.length} selected${omittedAttachedTabCount > 0 ? `, showing first ${attachedSnapshotBlocks.length}` : ''}):`,
-      attachedSnapshotBlocks.join('\n\n'),
-      omittedAttachedTabCount > 0 ? `...and ${omittedAttachedTabCount} more attached tabs not shown.` : '',
-    ].filter(Boolean).join('\n')
-    : 'Attached tab ref snapshots: none selected for this message.';
+  const layoutResult = buildBrowserContextSnapshotLayout({
+    totalTabCount: tabs.length,
+    listedTabs,
+    extraTabCount,
+    visibleTabId,
+    activeTab,
+    selectedTabCount: selectedTabIds.length,
+    omittedAttachedTabCount,
+    attachedSnapshotBlocks,
+  });
 
-  return [
-    'Browser context snapshot:',
-    '',
-    `Open tabs (${tabs.length} total${extraTabCount > 0 ? `, showing first ${listedTabs.length}` : ''}):`,
-    tabLines,
-    extraTabCount > 0 ? `...and ${extraTabCount} more tabs not shown.` : '',
-    '',
-    activeSection,
-    '',
-    attachedTabsSection,
-  ]
-    .filter(Boolean)
-    .join('\n');
+  return {
+    text: layoutResult.text,
+    metrics: {
+      extraTabCount,
+      selectedTabCount: selectedTabIds.length,
+      openTabCount: tabs.length,
+      listedTabCount: listedTabs.length,
+      attachedTabCount: attachedTabIds.length,
+      omittedAttachedTabCount,
+      attachedSnapshotCount: attachedSnapshotBlocks.length,
+      frameChars: layoutResult.metrics.frameChars,
+      openTabsSectionChars: layoutResult.metrics.openTabsSectionChars,
+      activeTabSectionChars: layoutResult.metrics.activeTabSectionChars,
+      attachedSnapshotsSectionChars: layoutResult.metrics.attachedSnapshotsSectionChars,
+    },
+  };
+}
+
+export async function buildBrowserContextSnapshot(contextTabIds?: number[]): Promise<string> {
+  return (await buildBrowserContextSnapshotResult(contextTabIds)).text;
 }

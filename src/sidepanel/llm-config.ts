@@ -82,6 +82,10 @@ export function getLlmSync(): ChatOpenAIInstance {
   return baseLlm;
 }
 
+function shouldOmitTemperature(model: string): boolean {
+  return /^gpt-5(?:$|[-.])/.test(model);
+}
+
 /**
  * Create a ChatOpenAI instance for the given configuration.
  */
@@ -90,7 +94,7 @@ export async function createLlm(config: LLMConfigUnion): Promise<ChatOpenAIInsta
   return new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey || 'not-needed',
-    temperature: 0,
+    ...(shouldOmitTemperature(config.model) ? {} : { temperature: 0 }),
     configuration: {
       baseURL: config.baseUrl,
     },

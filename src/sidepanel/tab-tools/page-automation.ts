@@ -1,11 +1,17 @@
 import { ensureTabIsActive } from './tabs';
 import type {
+  BrowserFormSnapshot,
+  BrowserFormSnapshotOptions,
+  BrowserRefResolution,
   BrowserSnapshot,
   BrowserSnapshotElement,
+  BrowserSnapshotOperation,
+  BrowserSnapshotOperationResult,
   BrowserSnapshotOptions,
-  BrowserViewportInfo,
   BrowserViewportRect,
-  BrowserVisualRegion,
+  BrowActionRepairCandidate,
+  BrowAutomationBackend,
+  BrowBackendPreference,
   BrowActionCacheStatus,
   BrowActionKind,
   BrowActionMemoryField,
@@ -14,13 +20,32 @@ import type {
   BrowActionTrace,
   BrowElementSignature,
   BrowPostconditionResult,
+  BrowReplayTargetEvidence,
 } from '../../shared/types';
+import { shouldRequireActionableClickResolution } from '../../shared/browser-snapshot-selection';
 import {
   findActionMemoryEntry,
   memoryFieldFromElement,
   memoryTargetFromElement,
   upsertActionMemoryEntry,
 } from './action-memory';
+import {
+  getUnsafePromotedClickResolutionError,
+  getUnsafeEditableClickIntentError,
+  isIntentRecoveryEntryAllowed,
+  shouldRepairForSatisfiedValuePostconditions,
+  shouldSkipActionForSatisfiedPostconditions,
+} from './click-intent-guards';
+import { shouldRetryBodyMediaKey } from './browser-key-retry';
+import type { BrowserSnapshotOperationMessageResult } from '../../shared/messages';
+
+export {
+  isGenericSnapshotLabel,
+  selectSnapshotEntriesForDisplay,
+  shouldRequireActionableClickResolution,
+} from '../../shared/browser-snapshot-selection';
+
+export type { BrowserRefResolution } from '../../shared/types';
 
 export interface InteractiveElementInfo {
   selector: string;
@@ -32,6 +57,12 @@ export interface InteractiveElementInfo {
   id?: string;
   href?: string;
   placeholder?: string;
+}
+
+export interface BrowserClickPoint {
+  origin: 'target' | 'targetFraction' | 'viewport';
+  x: number;
+  y: number;
 }
 
 interface ClickPoint {
@@ -55,22 +86,54 @@ interface ClickPlan {
   dispatchMode: 'synthetic' | 'programmatic';
 }
 
+type ClickDispatchMode = 'programmatic';
+
 export interface BrowserActionOptions {
   intent?: string;
   postconditions?: BrowActionPostcondition[];
   useActionMemory?: boolean;
+  clickPoint?: BrowserClickPoint;
+  targetEvidence?: BrowReplayTargetEvidence;
+  backendPreference?: BrowBackendPreference;
 }
 
-interface BrowserMemoryResolution {
-  ok: boolean;
-  selector?: string;
-  ref?: string;
-  snapshotId?: string;
-  entry?: BrowserSnapshotElement;
-  matchScore?: number;
-  snapshot?: BrowserSnapshot;
-  preconditions?: Record<string, unknown>;
-  error?: string;
+export interface BrowserActionRichMetadata {
+  backend: BrowAutomationBackend;
+  confidence?: number;
+  beforeSnapshot?: BrowserSnapshot;
+}
+
+type BrowserMemoryResolution = BrowserRefResolution;
+
+const ACTION_BEFORE_SNAPSHOT_MAX_ELEMENTS = 100;
+const ACTION_EXPANDED_SNAPSHOT_MAX_ELEMENTS = 250;
+const INTENT_MATCH_THRESHOLD = 42;
+const INTENT_MATCH_MARGIN = 8;
+const CLICK_EXECUTION_TIMEOUT_MS = 1200;
+const PAGE_SETTLE_TIMEOUT_SLACK_MS = 400;
+
+function getBlockedPageExecutionError(context: string): string {
+  return `${context} timed out, likely because a native browser alert/confirm/prompt is open. MV3 cannot continue until the dialog is closed; use the local helper backend to handle native dialogs.`;
+}
+
+async function executeScriptWithTimeout<Result>(
+  details: Parameters<typeof chrome.scripting.executeScript>[0],
+  timeoutMs: number,
+  timeoutError: string,
+): Promise<chrome.scripting.InjectionResult<Result>[]> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      chrome.scripting.executeScript(details) as Promise<chrome.scripting.InjectionResult<Result>[]>,
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(timeoutError)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 type PageAutomationAction =
@@ -89,6 +152,48 @@ type PageAutomationAction =
   | {
     kind: 'click';
     selector: string;
+    clickPoint?: BrowserClickPoint;
+    clickMode?: ClickDispatchMode;
+  }
+  | {
+    kind: 'drag';
+    sourceSelector: string;
+    destinationSelector: string;
+    sourceClickPoint?: BrowserClickPoint;
+    destinationClickPoint?: BrowserClickPoint;
+    pointerPath?: ClickPoint[];
+    durationMs?: number;
+  }
+  | {
+    kind: 'scroll';
+    selector?: string;
+    deltaX?: number;
+    deltaY?: number;
+    top?: number;
+    left?: number;
+  }
+  | {
+    kind: 'key';
+    selector?: string;
+    key?: string;
+    code?: string;
+    text?: string;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+  }
+  | {
+    kind: 'upload';
+    selector: string;
+    fileName?: string;
+    filePath?: string;
+  }
+  | {
+    kind: 'handleDialog';
+    selector?: string;
+    action: 'accept' | 'dismiss' | 'close';
+    text?: string;
   }
   | {
     kind: 'type';
@@ -106,885 +211,6 @@ type PageAutomationAction =
     submit: boolean;
     submitSelector?: string;
   };
-
-type BrowserSnapshotOperation =
-  | {
-    kind: 'snapshot';
-    tabId: number;
-    options?: BrowserSnapshotOptions;
-  }
-  | {
-    kind: 'resolve';
-    tabId: number;
-    ref: string;
-    snapshotId?: string;
-    requireActionable?: boolean;
-  }
-  | {
-    kind: 'resolveMemory';
-    tabId: number;
-    target: BrowActionMemoryTarget;
-    requireActionable?: boolean;
-  };
-
-async function runBrowserSnapshotOperation(operation: BrowserSnapshotOperation): Promise<unknown> {
-  const STATE_KEY = '__browBrowserSnapshotState__';
-  const BROW_REF_PREFIX = 'brow-ref://';
-  const MAX_STORED_SNAPSHOTS = 5;
-  const MAX_REGISTRY_ELEMENTS = 1000;
-  const MIN_MEMORY_MATCH_SCORE = 38;
-
-  type StoredSnapshot = {
-    snapshotId: string;
-    entriesByRef: Record<string, BrowserSnapshotElement>;
-    nodesByRef: Record<string, Element>;
-    order: string[];
-    createdAt: number;
-  };
-
-  type SnapshotState = {
-    currentSnapshotId?: string;
-    snapshots: Record<string, StoredSnapshot>;
-    snapshotOrder: string[];
-  };
-
-  const getState = (): SnapshotState => {
-    const target = window as unknown as Record<string, SnapshotState | undefined>;
-    if (!target[STATE_KEY]) {
-      target[STATE_KEY] = {
-        snapshots: {},
-        snapshotOrder: [],
-      };
-    }
-    return target[STATE_KEY]!;
-  };
-
-  const isElementNode = (value: unknown): value is Element => (
-    Boolean(value)
-    && typeof value === 'object'
-    && (value as Node).nodeType === 1
-    && typeof (value as Element).getBoundingClientRect === 'function'
-  );
-
-  const cleanText = (value: string | null | undefined, max = 160): string => {
-    const cleaned = (value ?? '').replace(/\s+/g, ' ').trim();
-    return cleaned.length > max ? `${cleaned.slice(0, max)}...` : cleaned;
-  };
-
-  const round = (value: number): number => Math.round(value * 10) / 10;
-
-  const getViewport = (): BrowserViewportInfo => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-    scrollX: window.scrollX,
-    scrollY: window.scrollY,
-    devicePixelRatio: window.devicePixelRatio || 1,
-  });
-
-  const getBounds = (el: Element): BrowserViewportRect => {
-    const rect = (el as HTMLElement).getBoundingClientRect();
-    return {
-      x: round(rect.left),
-      y: round(rect.top),
-      left: round(rect.left),
-      top: round(rect.top),
-      right: round(rect.right),
-      bottom: round(rect.bottom),
-      width: round(rect.width),
-      height: round(rect.height),
-    };
-  };
-
-  const isSkippableElement = (el: Element): boolean => {
-    const tag = el.tagName.toLowerCase();
-    if (['script', 'style', 'meta', 'link', 'noscript', 'template', 'head'].includes(tag)) return true;
-    if ((el as HTMLElement).id === '__brow-automation-overlay__') return true;
-    if (el.closest?.('#__brow-automation-overlay__')) return true;
-    return false;
-  };
-
-  const isVisible = (el: Element): boolean => {
-    if (isSkippableElement(el)) return false;
-    const htmlEl = el as HTMLElement;
-    const rect = htmlEl.getBoundingClientRect?.();
-    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
-    const ownerWindow = htmlEl.ownerDocument.defaultView ?? window;
-    if (rect.bottom < 0 || rect.right < 0 || rect.top > ownerWindow.innerHeight || rect.left > ownerWindow.innerWidth) {
-      return false;
-    }
-    const style = ownerWindow.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-    if (htmlEl.getAttribute('aria-hidden') === 'true') return false;
-    return true;
-  };
-
-  const escapeAttributeValue = (value: string): string => (
-    value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-  );
-
-  const escapeCss = (value: string): string => {
-    if (globalThis.CSS?.escape) return globalThis.CSS.escape(value);
-    return value.replace(/["\\]/g, '\\$&');
-  };
-
-  const hasReliableValue = (value: string | null | undefined): value is string => {
-    if (!value) return false;
-    const trimmed = value.trim();
-    return Boolean(trimmed) && !['undefined', 'null', 'nan'].includes(trimmed.toLowerCase());
-  };
-
-  const canUseHashIdSelector = (value: string): boolean => (
-    /^-?[_a-zA-Z][_a-zA-Z0-9-]*$/.test(value)
-  );
-
-  const buildIdSelector = (value: string): string => (
-    canUseHashIdSelector(value)
-      ? `#${escapeCss(value)}`
-      : `[id="${escapeAttributeValue(value)}"]`
-  );
-
-  const isUniqueSelectorFor = (selector: string, el: Element): boolean => {
-    try {
-      const ownerDocument = el.ownerDocument ?? document;
-      const matches = Array.from(ownerDocument.querySelectorAll(selector));
-      return matches.length === 1 && matches[0] === el;
-    } catch {
-      return false;
-    }
-  };
-
-  const buildAttributeSelector = (
-    tag: string,
-    attrName: string,
-    attrValue: string | null,
-  ): string | null => (
-    hasReliableValue(attrValue)
-      ? `${tag}[${attrName}="${escapeAttributeValue(attrValue)}"]`
-      : null
-  );
-
-  const buildDomPath = (el: Element): string => {
-    const parts: string[] = [];
-    let current: Element | null = el;
-
-    while (current && current !== document.body && parts.length < 7) {
-      const htmlEl = current as HTMLElement;
-      if (hasReliableValue(htmlEl.id)) {
-        const idSelector = buildIdSelector(htmlEl.id);
-        const anchoredSelector = parts.length > 0 ? `${idSelector} > ${parts.join(' > ')}` : idSelector;
-        if (isUniqueSelectorFor(anchoredSelector, el)) return anchoredSelector;
-      }
-
-      let part = current.tagName.toLowerCase();
-      const parent = current.parentElement;
-      if (parent) {
-        const siblings = Array.from(parent.children as HTMLCollectionOf<Element>).filter(
-          (child: Element) => child.tagName === current!.tagName,
-        );
-        if (siblings.length > 1) {
-          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
-        }
-      }
-      parts.unshift(part);
-      current = parent;
-    }
-
-    return parts.join(' > ') || el.tagName.toLowerCase();
-  };
-
-  const buildSelector = (el: Element): string => {
-    const tag = el.tagName.toLowerCase();
-    const htmlEl = el as HTMLElement;
-    const attrCandidates: Array<string | null> = [
-      hasReliableValue(htmlEl.id) ? buildIdSelector(htmlEl.id) : null,
-      buildAttributeSelector(tag, 'data-testid', el.getAttribute('data-testid')),
-      buildAttributeSelector(tag, 'data-test', el.getAttribute('data-test')),
-      buildAttributeSelector(tag, 'aria-label', el.getAttribute('aria-label')),
-      buildAttributeSelector(tag, 'name', el.getAttribute('name')),
-      buildAttributeSelector(tag, 'placeholder', el.getAttribute('placeholder')),
-      buildAttributeSelector(tag, 'title', el.getAttribute('title')),
-    ];
-
-    for (const candidate of attrCandidates) {
-      if (candidate && isUniqueSelectorFor(candidate, el)) return candidate;
-    }
-
-    return buildDomPath(el);
-  };
-
-  const getDepth = (el: Element): number => {
-    let depth = 0;
-    let current = el.parentElement;
-    while (current && current !== document.body) {
-      depth += 1;
-      current = current.parentElement;
-    }
-    return depth;
-  };
-
-  const getLabelText = (el: Element): string => {
-    const input = el as HTMLInputElement;
-    const labels = input.labels ? Array.from(input.labels) : [];
-    const labelText = labels.map((label) => cleanText(label.innerText || label.textContent, 80)).find(Boolean);
-    if (labelText) return labelText;
-
-    const wrappingLabel = el.closest('label');
-    if (wrappingLabel) return cleanText(wrappingLabel.innerText || wrappingLabel.textContent, 80);
-    return '';
-  };
-
-  const getAriaLabelledByText = (el: Element): string => {
-    const ids = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean);
-    const ownerDocument = el.ownerDocument ?? document;
-    return cleanText(ids.map((id) => ownerDocument.getElementById(id)?.innerText || ownerDocument.getElementById(id)?.textContent || '').join(' '), 120);
-  };
-
-  const inferRole = (el: Element): string => {
-    const explicit = cleanText(el.getAttribute('role'), 50);
-    if (explicit) return explicit;
-
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'a' && (el as HTMLAnchorElement).href) return 'link';
-    if (tag === 'button') return 'button';
-    if (tag === 'textarea') return 'textbox';
-    if (tag === 'select') return 'combobox';
-    if (tag === 'summary') return 'button';
-    if (tag === 'img') return 'image';
-    if (tag === 'nav') return 'navigation';
-    if (tag === 'main') return 'main';
-    if (tag === 'header') return 'banner';
-    if (tag === 'footer') return 'contentinfo';
-    if (tag === 'form') return 'form';
-    if (tag === 'table') return 'table';
-    if (tag === 'tr') return 'row';
-    if (tag === 'th') return 'columnheader';
-    if (tag === 'td') return 'cell';
-    if (tag === 'ul' || tag === 'ol') return 'list';
-    if (tag === 'li') return 'listitem';
-    if (tag === 'article') return 'article';
-    if (tag === 'section') return 'region';
-    if (tag === 'canvas' || tag === 'svg' || tag === 'video') return 'region';
-    if (/^h[1-6]$/.test(tag)) return 'heading';
-    if (tag === 'input') {
-      const type = ((el as HTMLInputElement).type || 'text').toLowerCase();
-      if (type === 'checkbox') return 'checkbox';
-      if (type === 'radio') return 'radio';
-      if (type === 'range') return 'slider';
-      if (type === 'search') return 'searchbox';
-      if (['button', 'submit', 'reset'].includes(type)) return 'button';
-      return 'textbox';
-    }
-    if ((el as HTMLElement).isContentEditable) return 'textbox';
-    return 'text';
-  };
-
-  const getElementText = (el: Element, max = 160): string => {
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'input') {
-      const input = el as HTMLInputElement;
-      return cleanText(input.value || input.placeholder || input.name, max);
-    }
-    if (tag === 'textarea') {
-      const textarea = el as HTMLTextAreaElement;
-      return cleanText(textarea.value || textarea.placeholder || textarea.name, max);
-    }
-    return cleanText((el as HTMLElement).innerText || el.textContent, max);
-  };
-
-  const getAccessibleName = (el: Element, role: string): string => {
-    const direct = [
-      el.getAttribute('aria-label'),
-      getAriaLabelledByText(el),
-      getLabelText(el),
-      el.getAttribute('alt'),
-      el.getAttribute('title'),
-      el.getAttribute('placeholder'),
-      el.getAttribute('name'),
-    ].map((value) => cleanText(value, 120)).find(Boolean);
-    if (direct) return direct;
-
-    if (role === 'textbox' || role === 'searchbox') {
-      const input = el as HTMLInputElement;
-      return cleanText(input.placeholder || input.value || input.name, 120);
-    }
-
-    return cleanText((el as HTMLElement).innerText || el.textContent, 120);
-  };
-
-  const isActionable = (el: Element, role: string): boolean => {
-    const tag = el.tagName.toLowerCase();
-    const htmlEl = el as HTMLElement;
-    if (htmlEl.isContentEditable) return true;
-    if (tag === 'a' && (el as HTMLAnchorElement).href) return true;
-    if (['button', 'input', 'textarea', 'select', 'summary'].includes(tag)) return true;
-    if ([
-      'button',
-      'link',
-      'textbox',
-      'searchbox',
-      'checkbox',
-      'radio',
-      'combobox',
-      'switch',
-      'menuitem',
-      'menuitemcheckbox',
-      'menuitemradio',
-      'option',
-      'tab',
-      'treeitem',
-      'slider',
-      'spinbutton',
-      'gridcell',
-      'row',
-    ].includes(role)) return true;
-    if (typeof (htmlEl as any).onclick === 'function') return true;
-    if (htmlEl.hasAttribute('onclick') || htmlEl.hasAttribute('jsaction')) return true;
-    if (htmlEl.hasAttribute('aria-haspopup') || htmlEl.hasAttribute('aria-expanded')) return true;
-    if ((el.ownerDocument.defaultView ?? window).getComputedStyle(el).cursor === 'pointer') return true;
-    const tabIndex = htmlEl.getAttribute('tabindex');
-    return tabIndex != null && Number(tabIndex) >= 0;
-  };
-
-  const findActionTarget = (el: Element): Element | null => {
-    let current: Element | null = el;
-    let depth = 0;
-    while (current && current !== document.body && depth < 8) {
-      if (isVisible(current) && isActionable(current, inferRole(current))) {
-        return current;
-      }
-      current = current.parentElement;
-      depth += 1;
-    }
-
-    const descendant = Array.from(el.querySelectorAll('*')).find((candidate) =>
-      isVisible(candidate) && isActionable(candidate, inferRole(candidate)),
-    );
-    return descendant ?? null;
-  };
-
-  const getAttributes = (el: Element): Record<string, string> | undefined => {
-    const names = ['id', 'data-testid', 'data-test', 'aria-label', 'name', 'placeholder', 'title', 'alt'];
-    const attrs: Record<string, string> = {};
-    for (const name of names) {
-      const value = cleanText(el.getAttribute(name), 100);
-      if (value) attrs[name] = value;
-    }
-    return Object.keys(attrs).length > 0 ? attrs : undefined;
-  };
-
-  const contextByNode = new Map<Element, { framePath?: string[]; shadowPath?: string[] }>();
-
-  const collectElements = (root: Element): Element[] => {
-    const collected: Element[] = [];
-    const seen = new Set<Element>();
-    const rootContext = contextByNode.get(root) ?? {};
-
-    const visit = (el: Element, context: { framePath?: string[]; shadowPath?: string[] }) => {
-      if (seen.has(el) || seen.size >= MAX_REGISTRY_ELEMENTS) return;
-      seen.add(el);
-      contextByNode.set(el, context);
-      if (isVisible(el)) collected.push(el);
-
-      const children = Array.from(el.children);
-      for (const child of children) {
-        visit(child, context);
-      }
-
-      const shadowRoot = (el as HTMLElement).shadowRoot;
-      if (shadowRoot) {
-        const hostSelector = buildSelector(el);
-        const shadowPath = [...(context.shadowPath ?? []), hostSelector];
-        for (const child of Array.from(shadowRoot.children)) {
-          visit(child, { ...context, shadowPath });
-        }
-      }
-
-      if (el instanceof HTMLIFrameElement || el instanceof HTMLFrameElement) {
-        try {
-          const frameDocument = el.contentDocument;
-          const frameRoot = frameDocument?.documentElement;
-          if (!frameRoot) return;
-          const frameSelector = buildSelector(el);
-          const framePath = [...(context.framePath ?? []), frameSelector];
-          visit(frameRoot, { ...context, framePath });
-        } catch {
-          // Cross-origin frames are intentionally skipped in MV3-native mode.
-        }
-      }
-    };
-
-    visit(root, rootContext);
-    return collected;
-  };
-
-  const evaluateActionability = (
-    el: Element,
-    role: string,
-    requireEditable = false,
-  ): Record<string, unknown> => {
-    const htmlEl = el as HTMLElement;
-    const rect = htmlEl.getBoundingClientRect?.();
-    const visible = isVisible(el);
-    const enabled = !('disabled' in htmlEl) || !Boolean((htmlEl as HTMLInputElement).disabled);
-    const editable = htmlEl.isContentEditable
-      || (htmlEl instanceof HTMLTextAreaElement && !htmlEl.disabled && !htmlEl.readOnly)
-      || (htmlEl instanceof HTMLInputElement && !htmlEl.disabled && !htmlEl.readOnly && !['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'image'].includes((htmlEl.type || '').toLowerCase()));
-    let receivesEvents = false;
-    if (rect && rect.width > 0 && rect.height > 0) {
-      const ownerDocument = el.ownerDocument ?? document;
-      const pointX = Math.max(1, Math.min(rect.left + rect.width / 2, (ownerDocument.defaultView?.innerWidth ?? window.innerWidth) - 1));
-      const pointY = Math.max(1, Math.min(rect.top + rect.height / 2, (ownerDocument.defaultView?.innerHeight ?? window.innerHeight) - 1));
-      const hit = ownerDocument.elementFromPoint(pointX, pointY);
-      receivesEvents = Boolean(hit && (hit === el || el.contains(hit) || hit.contains(el)));
-    }
-    const actionable = isActionable(el, role);
-
-    return {
-      visible,
-      enabled,
-      editable: requireEditable ? editable : undefined,
-      stable: true,
-      receivesEvents,
-      actionable,
-      ok: visible && enabled && receivesEvents && actionable && (!requireEditable || editable),
-    };
-  };
-
-  const createEntry = (
-    el: Element,
-    ref: string,
-    parentRef?: string,
-  ): BrowserSnapshotElement => {
-    const role = inferRole(el);
-    const text = getElementText(el);
-    const name = getAccessibleName(el, role) || text;
-    const context = contextByNode.get(el);
-    return {
-      ref,
-      parentRef,
-      framePath: context?.framePath,
-      shadowPath: context?.shadowPath,
-      role,
-      name,
-      text: text && text !== name ? text : undefined,
-      tagName: el.tagName.toLowerCase(),
-      type: (el as HTMLInputElement).type || undefined,
-      selector: buildSelector(el),
-      actionable: isActionable(el, role),
-      depth: getDepth(el),
-      bounds: getBounds(el),
-      attributes: getAttributes(el),
-    };
-  };
-
-  const isMostlyContainerText = (el: Element, text: string): boolean => {
-    if (!text) return false;
-    const children = Array.from(el.children).filter((child) => isVisible(child));
-    if (children.length === 0) return false;
-    const childText = cleanText(children.map((child) => (child as HTMLElement).innerText || child.textContent || '').join(' '), 220);
-    return childText.length > 0 && text.startsWith(childText.slice(0, Math.min(80, childText.length)));
-  };
-
-  const isMeaningfulEntry = (entry: BrowserSnapshotElement, el: Element): boolean => {
-    if (entry.actionable) return true;
-    if (['heading', 'image', 'table', 'row', 'list', 'listitem', 'navigation', 'main', 'form', 'search', 'banner', 'contentinfo', 'dialog', 'article'].includes(entry.role)) {
-      return true;
-    }
-    if (entry.role === 'region' && (entry.name || ['canvas', 'svg', 'video', 'section'].includes(entry.tagName))) return true;
-    const text = entry.text || entry.name;
-    if (!text || text.length < 2) return false;
-    if (['div', 'span', 'body'].includes(entry.tagName) && isMostlyContainerText(el, text)) return false;
-    return ['p', 'label', 'legend', 'caption', 'strong', 'em', 'code', 'pre', 'td', 'th', 'li', 'span'].includes(entry.tagName);
-  };
-
-  const resolveStoredElement = (
-    ref: string,
-    snapshotId?: string,
-  ): { snapshotId: string; snapshot: StoredSnapshot; node?: Element; entry?: BrowserSnapshotElement } | null => {
-    const state = getState();
-    const candidateIds = snapshotId
-      ? [snapshotId]
-      : [state.currentSnapshotId, ...state.snapshotOrder.slice().reverse()].filter(Boolean) as string[];
-
-    for (const id of candidateIds) {
-      const snapshot = state.snapshots[id];
-      if (!snapshot) continue;
-      const entry = snapshot.entriesByRef[ref];
-      const node = snapshot.nodesByRef[ref];
-      if (entry || node) return { snapshotId: id, snapshot, node, entry };
-    }
-    return null;
-  };
-
-  const normalizeOptions = (options?: BrowserSnapshotOptions): Required<Pick<BrowserSnapshotOptions, 'mode' | 'maxElements'>> & BrowserSnapshotOptions => ({
-    mode: options?.mode === 'full' ? 'full' : 'compact',
-    maxElements: Math.max(1, Math.min(Math.floor(options?.maxElements ?? 70), 250)),
-    rootRef: options?.rootRef,
-    snapshotId: options?.snapshotId,
-  });
-
-  const captureSnapshot = (
-    tabId: number,
-    options?: BrowserSnapshotOptions,
-  ): { snapshot: BrowserSnapshot; allEntries: BrowserSnapshotElement[]; nodesByRef: Record<string, Element> } => {
-    const normalized = normalizeOptions(options);
-    const storedRoot = normalized.rootRef
-      ? resolveStoredElement(normalized.rootRef, normalized.snapshotId)
-      : null;
-    const root = isElementNode(storedRoot?.node) && isVisible(storedRoot.node)
-      ? storedRoot.node
-      : document.body;
-    contextByNode.clear();
-    const allNodes = collectElements(root).slice(0, MAX_REGISTRY_ELEMENTS);
-
-    const refsByNode = new Map<Element, string>();
-    allNodes.forEach((node, index) => refsByNode.set(node, `e${index + 1}`));
-    const rootRef = root !== document.body ? refsByNode.get(root) : undefined;
-
-    const nodesByRef: Record<string, Element> = {};
-    const allEntries = allNodes.map((node) => {
-      const ref = refsByNode.get(node)!;
-      let parentRef: string | undefined;
-      let parent = node.parentElement;
-      while (parent) {
-        const candidate = refsByNode.get(parent);
-        if (candidate) {
-          parentRef = candidate;
-          break;
-        }
-        parent = parent.parentElement;
-      }
-      nodesByRef[ref] = node;
-      return createEntry(node, ref, parentRef);
-    });
-
-    const displayedEntries = (normalized.mode === 'full'
-      ? allEntries
-      : allEntries.filter((entry) => isMeaningfulEntry(entry, nodesByRef[entry.ref])))
-      .slice(0, normalized.maxElements);
-
-    const snapshotId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    const snapshot: BrowserSnapshot = {
-      ok: true,
-      snapshotId,
-      tabId,
-      url: location.href,
-      title: document.title,
-      generatedAt: Date.now(),
-      viewport: getViewport(),
-      elements: displayedEntries,
-      visibleElementCount: allEntries.length,
-      displayedElementCount: displayedEntries.length,
-      omittedElementCount: Math.max(allEntries.length - displayedEntries.length, 0),
-      rootRef,
-    };
-
-    const entriesByRef: Record<string, BrowserSnapshotElement> = {};
-    for (const entry of allEntries) {
-      entriesByRef[entry.ref] = entry;
-    }
-
-    const state = getState();
-    state.snapshots[snapshotId] = {
-      snapshotId,
-      entriesByRef,
-      nodesByRef,
-      order: allEntries.map((entry) => entry.ref),
-      createdAt: Date.now(),
-    };
-    state.currentSnapshotId = snapshotId;
-    state.snapshotOrder = [...state.snapshotOrder.filter((id) => id !== snapshotId), snapshotId];
-    while (state.snapshotOrder.length > MAX_STORED_SNAPSHOTS) {
-      const expired = state.snapshotOrder.shift();
-      if (expired) delete state.snapshots[expired];
-    }
-
-    return { snapshot, allEntries, nodesByRef };
-  };
-
-  const findBySelector = (entry: BrowserSnapshotElement): Element | null => {
-    if (!entry.selector) return null;
-    try {
-      const matches = Array.from(document.querySelectorAll(entry.selector)).filter((candidate) => isVisible(candidate));
-      if (matches.length !== 1) return null;
-      return matches[0];
-    } catch {
-      return null;
-    }
-  };
-
-  const scoreRecoveryCandidate = (
-    oldEntry: BrowserSnapshotElement,
-    candidate: BrowserSnapshotElement,
-  ): number => {
-    let score = 0;
-    if (candidate.tagName === oldEntry.tagName) score += 4;
-    if (candidate.role === oldEntry.role) score += 6;
-    if (candidate.type && candidate.type === oldEntry.type) score += 4;
-    if (candidate.name && oldEntry.name && candidate.name === oldEntry.name) score += 24;
-    if (candidate.text && oldEntry.text && candidate.text === oldEntry.text) score += 10;
-    if (candidate.attributes?.id && candidate.attributes.id === oldEntry.attributes?.id) score += 30;
-    if (candidate.attributes?.['data-testid'] && candidate.attributes['data-testid'] === oldEntry.attributes?.['data-testid']) score += 30;
-    if (candidate.attributes?.name && candidate.attributes.name === oldEntry.attributes?.name) score += 12;
-    if (candidate.attributes?.placeholder && candidate.attributes.placeholder === oldEntry.attributes?.placeholder) score += 12;
-
-    const dx = Math.abs(candidate.bounds.left - oldEntry.bounds.left);
-    const dy = Math.abs(candidate.bounds.top - oldEntry.bounds.top);
-    if (dx <= 4 && dy <= 4) score += 8;
-    else if (dx <= 32 && dy <= 32) score += 4;
-
-    return score;
-  };
-
-  const signatureFromEntry = (entry: BrowserSnapshotElement): BrowElementSignature => {
-    const textEntry = ['textbox', 'searchbox'].includes(entry.role)
-      || ['input', 'textarea'].includes(entry.tagName)
-      || entry.type === 'password';
-    const attrs = entry.attributes ?? {};
-    return {
-      role: entry.role,
-      name: textEntry
-        ? cleanText(attrs['aria-label'] ?? attrs.placeholder ?? attrs.name ?? attrs.title, 120)
-        : cleanText(entry.name, 120),
-      text: textEntry ? undefined : cleanText(entry.text, 120),
-      tagName: entry.tagName,
-      type: entry.type,
-      selector: entry.selector,
-      attributes: entry.attributes,
-    };
-  };
-
-  const scoreMemoryCandidate = (
-    signature: BrowElementSignature,
-    candidate: BrowserSnapshotElement,
-  ): number => {
-    const candidateSignature = signatureFromEntry(candidate);
-    let score = 0;
-
-    if (candidateSignature.role === signature.role) score += 16;
-    if (candidateSignature.tagName === signature.tagName) score += 10;
-    if (signature.type && candidateSignature.type === signature.type) score += 8;
-    if (signature.selector && candidateSignature.selector === signature.selector) score += 12;
-    if (signature.name && candidateSignature.name) {
-      if (candidateSignature.name === signature.name) score += 36;
-      else if (candidateSignature.name.toLowerCase() === signature.name.toLowerCase()) score += 24;
-    }
-    if (signature.text && candidateSignature.text) {
-      if (candidateSignature.text === signature.text) score += 14;
-      else if (candidateSignature.text.toLowerCase() === signature.text.toLowerCase()) score += 8;
-    }
-
-    const attrs = signature.attributes ?? {};
-    const candidateAttrs = candidateSignature.attributes ?? {};
-    const weightedAttrs: Array<[string, number]> = [
-      ['id', 30],
-      ['data-testid', 30],
-      ['data-test', 26],
-      ['aria-label', 22],
-      ['name', 16],
-      ['placeholder', 16],
-      ['title', 14],
-      ['alt', 14],
-    ];
-    for (const [name, weight] of weightedAttrs) {
-      if (attrs[name] && attrs[name] === candidateAttrs[name]) score += weight;
-    }
-
-    return score;
-  };
-
-  const recoverRef = (
-    oldEntry: BrowserSnapshotElement,
-    currentEntries: BrowserSnapshotElement[],
-    requireActionable: boolean,
-  ): BrowserSnapshotElement | null => {
-    const selectorMatch = findBySelector(oldEntry);
-    if (selectorMatch) {
-      const entry = currentEntries.find((candidate) => candidate.selector === buildSelector(selectorMatch));
-      if (entry && (!requireActionable || entry.actionable)) {
-        const score = scoreRecoveryCandidate(oldEntry, entry);
-        if (score >= 18) return entry;
-      }
-    }
-
-    const scored = currentEntries
-      .filter((candidate) => !requireActionable || candidate.actionable)
-      .map((candidate) => ({ candidate, score: scoreRecoveryCandidate(oldEntry, candidate) }))
-      .filter((item) => item.score >= 24)
-      .sort((left, right) => right.score - left.score);
-
-    if (scored.length === 0) return null;
-    const [best, second] = scored;
-    if (second && best.score - second.score < 8) return null;
-    return best.candidate;
-  };
-
-  if (operation.kind === 'snapshot') {
-    return captureSnapshot(operation.tabId, operation.options).snapshot;
-  }
-
-  if (operation.kind === 'resolveMemory') {
-    const current = captureSnapshot(operation.tabId, { mode: 'compact', maxElements: 80 });
-    const requireActionable = Boolean(operation.requireActionable);
-    const scored = current.allEntries
-      .filter((candidate) => !requireActionable || candidate.actionable)
-      .map((candidate) => ({
-        candidate,
-        score: Math.max(
-          scoreMemoryCandidate(operation.target.signature, candidate),
-          operation.target.selector && candidate.selector === operation.target.selector ? 42 : 0,
-        ),
-      }))
-      .filter((item) => item.score >= MIN_MEMORY_MATCH_SCORE)
-      .sort((left, right) => right.score - left.score);
-
-    if (scored.length === 0) {
-      return {
-        ok: false,
-        error: 'Cached action target was not found on the current page.',
-        snapshot: current.snapshot,
-      } satisfies BrowserMemoryResolution;
-    }
-
-    const [best, second] = scored;
-    if (second && best.score - second.score < 8) {
-      return {
-        ok: false,
-        error: 'Cached action target matched multiple similar elements.',
-        matchScore: best.score,
-        snapshot: current.snapshot,
-      } satisfies BrowserMemoryResolution;
-    }
-
-    const preconditions = evaluateActionability(
-      current.nodesByRef[best.candidate.ref],
-      best.candidate.role,
-      ['textbox', 'searchbox'].includes(best.candidate.role),
-    );
-
-    if (preconditions.ok !== true) {
-      return {
-        ok: false,
-        error: 'Cached action target failed actionability checks.',
-        ref: best.candidate.ref,
-        snapshotId: current.snapshot.snapshotId,
-        entry: best.candidate,
-        matchScore: best.score,
-        snapshot: current.snapshot,
-        preconditions,
-      } satisfies BrowserMemoryResolution;
-    }
-
-    return {
-      ok: true,
-      selector: `${BROW_REF_PREFIX}${current.snapshot.snapshotId}/${best.candidate.ref}`,
-      ref: best.candidate.ref,
-      snapshotId: current.snapshot.snapshotId,
-      entry: best.candidate,
-      matchScore: best.score,
-      snapshot: current.snapshot,
-      preconditions,
-    } satisfies BrowserMemoryResolution;
-  }
-
-  const stored = resolveStoredElement(operation.ref, operation.snapshotId);
-  const requireActionable = Boolean(operation.requireActionable);
-
-  if (isElementNode(stored?.node) && isVisible(stored.node)) {
-    const entry = createEntry(stored.node, operation.ref);
-    const preconditions = evaluateActionability(stored.node, entry.role, ['textbox', 'searchbox'].includes(entry.role));
-    if (requireActionable && !entry.actionable) {
-      const actionTarget = findActionTarget(stored.node);
-      if (actionTarget) {
-        const targetEntry = createEntry(actionTarget, operation.ref);
-        const targetPreconditions = evaluateActionability(actionTarget, targetEntry.role, ['textbox', 'searchbox'].includes(targetEntry.role));
-        return {
-          ok: true,
-          ref: operation.ref,
-          snapshotId: stored.snapshotId,
-          selector: `${BROW_REF_PREFIX}${stored.snapshotId}/${operation.ref}`,
-          entry: targetEntry,
-          recovered: false,
-          preconditions: targetPreconditions,
-          promotedFrom: entry,
-          message: `Ref ${operation.ref} pointed at a non-actionable child; using nearest actionable ${targetEntry.role}.`,
-          region: {
-            source: 'ref',
-            ref: operation.ref,
-            snapshotId: stored.snapshotId,
-            rect: targetEntry.bounds,
-            viewport: getViewport(),
-          } satisfies BrowserVisualRegion,
-        };
-      }
-      return {
-        ok: false,
-        error: `Ref ${operation.ref} resolves to a visible element, but it is not actionable.`,
-        ref: operation.ref,
-        snapshotId: stored.snapshotId,
-        entry,
-      };
-    }
-    return {
-      ok: true,
-      ref: operation.ref,
-      snapshotId: stored.snapshotId,
-      selector: `${BROW_REF_PREFIX}${stored.snapshotId}/${operation.ref}`,
-      entry,
-      recovered: false,
-      preconditions,
-      region: {
-        source: 'ref',
-        ref: operation.ref,
-        snapshotId: stored.snapshotId,
-        rect: entry.bounds,
-        viewport: getViewport(),
-      } satisfies BrowserVisualRegion,
-    };
-  }
-
-  const oldEntry = stored?.entry;
-  if (!oldEntry) {
-    return {
-      ok: false,
-      error: `Unknown element ref: ${operation.ref}. Take a fresh browser_snapshot and try again.`,
-      ref: operation.ref,
-      snapshotId: operation.snapshotId,
-    };
-  }
-
-  const current = captureSnapshot(operation.tabId, { mode: 'compact', maxElements: 80 });
-  const recovered = recoverRef(oldEntry, current.allEntries, requireActionable);
-  if (!recovered) {
-    return {
-      ok: false,
-      error: `Ref ${operation.ref} is stale and could not be safely rematched. Take a fresh browser_snapshot and choose a new ref.`,
-      ref: operation.ref,
-      snapshotId: operation.snapshotId ?? stored?.snapshotId,
-      snapshot: current.snapshot,
-    };
-  }
-
-  return {
-    ok: true,
-    ref: recovered.ref,
-    originalRef: operation.ref,
-    snapshotId: current.snapshot.snapshotId,
-    selector: `${BROW_REF_PREFIX}${current.snapshot.snapshotId}/${recovered.ref}`,
-    entry: recovered,
-    recovered: true,
-    snapshot: current.snapshot,
-    matchScore: scoreRecoveryCandidate(oldEntry, recovered),
-    preconditions: evaluateActionability(current.nodesByRef[recovered.ref], recovered.role, ['textbox', 'searchbox'].includes(recovered.role)),
-    region: {
-      source: 'ref',
-      ref: recovered.ref,
-      snapshotId: current.snapshot.snapshotId,
-      rect: recovered.bounds,
-      viewport: current.snapshot.viewport,
-    } satisfies BrowserVisualRegion,
-  };
-}
 
 async function runPageAutomationAction(action: PageAutomationAction): Promise<unknown> {
   const ROOT_ID = '__brow-automation-overlay__';
@@ -1035,23 +261,52 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     && typeof (value as HTMLElement).tagName === 'string'
   );
 
-  const parseBrowRefSelector = (selector: string): { snapshotId: string; ref: string } | null => {
-    if (!selector.startsWith(BROW_REF_PREFIX)) return null;
-    const rest = selector.slice(BROW_REF_PREFIX.length);
-    const slash = rest.lastIndexOf('/');
-    if (slash <= 0 || slash >= rest.length - 1) return null;
-    return {
-      snapshotId: decodeURIComponent(rest.slice(0, slash)),
-      ref: decodeURIComponent(rest.slice(slash + 1)),
-    };
-  };
-
   const resolveBrowRefElement = (selector: string): HTMLElement | null => {
-    const parsed = parseBrowRefSelector(selector);
+    const parsed = (() => {
+      const trimmed = selector.trim();
+      if (trimmed.startsWith(BROW_REF_PREFIX)) {
+        const rest = trimmed.slice(BROW_REF_PREFIX.length);
+        const slash = rest.lastIndexOf('/');
+        if (slash <= 0 || slash >= rest.length - 1) return null;
+
+        return {
+          snapshotId: decodeURIComponent(rest.slice(0, slash)),
+          ref: decodeURIComponent(rest.slice(slash + 1)),
+        };
+      }
+
+      const bracketMatch = trimmed.match(/^\[\s*ref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\]\s]+))\s*\]$/i);
+      if (bracketMatch) {
+        const ref = (bracketMatch[1] ?? bracketMatch[2] ?? bracketMatch[3] ?? '').trim();
+        return ref ? { ref } : null;
+      }
+
+      const inlineMatch = trimmed.match(/^ref\s*=\s*(?:"([^"]+)"|'([^']+)'|(.+))$/i);
+      if (inlineMatch) {
+        const ref = (inlineMatch[1] ?? inlineMatch[2] ?? inlineMatch[3] ?? '').trim();
+        return ref ? { ref } : null;
+      }
+
+      return null;
+    })();
     if (!parsed) return null;
-    const snapshot = getSnapshotState()?.snapshots?.[parsed.snapshotId];
-    const node = snapshot?.nodesByRef?.[parsed.ref];
-    return isHTMLElementLike(node) && node.isConnected ? node : null;
+
+    const state = getSnapshotState();
+    const candidateIds = parsed.snapshotId
+      ? [parsed.snapshotId]
+      : [state?.currentSnapshotId, ...(state?.snapshotOrder.slice().reverse() ?? [])]
+        .filter((value): value is string => Boolean(value));
+
+    const seen = new Set<string>();
+    for (const snapshotId of candidateIds) {
+      if (seen.has(snapshotId)) continue;
+      seen.add(snapshotId);
+      const snapshot = state?.snapshots?.[snapshotId];
+      const node = snapshot?.nodesByRef?.[parsed.ref];
+      if (isHTMLElementLike(node) && node.isConnected) return node;
+    }
+
+    return null;
   };
 
   const ensureOverlay = () => {
@@ -1625,32 +880,35 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     return ranked.length === 1 ? { element: ranked[0], resolvedSelector } : null;
   };
 
-  const parseSimpleLocator = (
-    selector: string,
-  ): { kind: 'text' | 'heading' | 'title' | 'placeholder'; needle: string } | null => {
-    const match = selector.match(/^\s*(text|heading|title|placeholder)\s*(?:=|:)\s*(.+?)\s*$/i);
-    if (!match) return null;
-    const kind = match[1].toLowerCase() as 'text' | 'heading' | 'title' | 'placeholder';
-    const needle = normalizeInlineText(unquoteSelectorText(match[2]));
-    if (!needle) return null;
-    return { kind, needle };
-  };
-
   const querySimpleLocator = (
     selector: string,
     requireUnique = false,
   ): { element: HTMLElement; resolvedSelector: string } | null => {
-    const parsed = parseSimpleLocator(selector);
+    const parsed = (() => {
+      const match = selector.match(/^\s*(text|heading|title|placeholder|link|button|textbox)\s*(?:=|:)\s*(.+?)\s*$/i);
+      if (!match) return null;
+
+      const kind = match[1].toLowerCase();
+      const needle = normalizeInlineText(unquoteSelectorText(match[2]));
+      if (!needle) return null;
+
+      return { kind, needle };
+    })();
     if (!parsed) return null;
 
-    const baseSelectors =
-      parsed.kind === 'heading'
-        ? ['h1, h2, h3, h4, h5, h6, [role="heading"]']
-        : parsed.kind === 'title'
-          ? ['[title]']
-          : parsed.kind === 'placeholder'
-            ? ['[placeholder]']
-            : ['a, button, input, textarea, select, label, summary, h1, h2, h3, h4, h5, h6, p, span, div, li, dt, dd, article, section, [role="button"], [role="link"], [role="heading"], [title], [placeholder], [aria-label]'];
+    const baseSelectors = (() => {
+      if (parsed.kind === 'heading') return ['h1, h2, h3, h4, h5, h6, [role="heading"]'];
+      if (parsed.kind === 'title') return ['[title]'];
+      if (parsed.kind === 'placeholder') return ['[placeholder]'];
+      if (parsed.kind === 'link') return ['a[href], [role="link"]'];
+      if (parsed.kind === 'button') {
+        return ['button, input[type="button"], input[type="submit"], input[type="reset"], [role="button"]'];
+      }
+      if (parsed.kind === 'textbox') {
+        return ['input:not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), textarea, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], [role="textbox"]'];
+      }
+      return ['a, button, input, textarea, select, label, summary, h1, h2, h3, h4, h5, h6, p, span, div, li, dt, dd, article, section, [role="button"], [role="link"], [role="heading"], [title], [placeholder], [aria-label]'];
+    })();
 
     return queryTextMatchesForBaseSelectors(
       baseSelectors,
@@ -1747,12 +1005,45 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
 
   const hasStableSelectorAnchor = (part: string): boolean => (
     part.includes('#')
-    || part.includes('[id=')
-    || part.includes('[data-testid=')
-    || part.includes('[aria-label=')
-    || part.includes('[name=')
-    || part.includes('[placeholder=')
+    || /\[\s*(id|data-testid|data-test|aria-label|title|name|placeholder)\s*=/.test(part)
   );
+
+  const extractStableAttributeSelectors = (part: string): string[] => {
+    const selectors: string[] = [];
+    const seen = new Set<string>();
+    const push = (candidate: string) => {
+      if (!candidate || seen.has(candidate)) return;
+      seen.add(candidate);
+      selectors.push(candidate);
+    };
+    const stableAttrs = [
+      'aria-label',
+      'title',
+      'placeholder',
+      'name',
+      'data-testid',
+      'data-test',
+      'id',
+    ];
+    const attrPattern = /\[\s*([a-zA-Z_:-][\w:.-]*)\s*=\s*(["'])((?:\\.|(?!\2).)*)\2\s*\]/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = attrPattern.exec(part)) !== null) {
+      const attrName = match[1];
+      if (!stableAttrs.includes(attrName)) continue;
+      const attrValue = match[3];
+      const selector = `[${attrName}="${attrValue}"]`;
+      push(selector);
+      if (attrName === 'aria-label' || attrName === 'title') {
+        push(`text="${attrValue.replace(/\\"/g, '"')}"`);
+      }
+      if (attrName === 'placeholder') {
+        push(`placeholder="${attrValue.replace(/\\"/g, '"')}"`);
+      }
+    }
+
+    return selectors;
+  };
 
   const buildSelectorRecoveryCandidates = (selector: string): string[] => {
     const rawParts = selector.split(/\s*>\s*/).map((part) => part.trim()).filter(Boolean);
@@ -1788,6 +1079,9 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       if (!hasStableSelectorAnchor(part)) continue;
       push(cleanedParts.slice(index).join(' > '));
       push(part);
+      for (const attributeSelector of extractStableAttributeSelectors(part)) {
+        push(attributeSelector);
+      }
     }
 
     return candidates;
@@ -1873,7 +1167,44 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     }));
   };
 
-  const resolveClickPlan = (matchedEl: HTMLElement): ClickPlan | null => {
+  const buildPreferredClickPoint = (
+    matchedEl: HTMLElement,
+    clickPoint: BrowserClickPoint | undefined,
+  ): ClickPlan | null => {
+    if (!clickPoint) return null;
+    const rect = getVisibleRect(matchedEl);
+    if (!rect) return null;
+
+    const maxX = Math.max(window.innerWidth - 2, 1);
+    const maxY = Math.max(window.innerHeight - 2, 1);
+    const point = (() => {
+      if (clickPoint.origin === 'viewport') {
+        return {
+          x: clamp(clickPoint.x, 1, maxX),
+          y: clamp(clickPoint.y, 1, maxY),
+        };
+      }
+      if (clickPoint.origin === 'targetFraction') {
+        return {
+          x: clamp(rect.left + rect.width * clickPoint.x, 1, maxX),
+          y: clamp(rect.top + rect.height * clickPoint.y, 1, maxY),
+        };
+      }
+      return {
+        x: clamp(rect.left + clickPoint.x, 1, maxX),
+        y: clamp(rect.top + clickPoint.y, 1, maxY),
+      };
+    })();
+
+    const hit = matchedEl.ownerDocument.elementFromPoint(point.x, point.y);
+    if (!isRelatedElement(matchedEl, hit)) return null;
+    return { target: matchedEl, point, rect, dispatchMode: 'synthetic' };
+  };
+
+  const resolveClickPlan = (matchedEl: HTMLElement, clickPoint?: BrowserClickPoint): ClickPlan | null => {
+    const preferredPlan = buildPreferredClickPoint(matchedEl, clickPoint);
+    if (preferredPlan) return preferredPlan;
+
     const candidates = [matchedEl, ...Array.from(matchedEl.querySelectorAll<HTMLElement>('*')).slice(0, 80)];
     let fallback: ClickPlan | null = null;
 
@@ -2461,11 +1792,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
   };
 
   const findTypeTarget = (matchedEl: HTMLElement): TypeableElement | null => {
-    const activeTarget = asTypeableElement(document.activeElement);
-    if (activeTarget) return activeTarget;
-
     const directTarget = asTypeableElement(matchedEl);
-    if (directTarget) return directTarget;
 
     const selector = [
       'input:not([type="hidden"])',
@@ -2482,20 +1809,35 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     );
 
     const descendantTarget = findIn(matchedEl);
-    if (descendantTarget) return descendantTarget;
 
+    let ancestorTarget: TypeableElement | null = null;
     let parent = matchedEl.parentElement;
     let depth = 0;
     while (parent && parent !== document.body && depth < 6) {
       const parentTarget = asTypeableElement(parent) ?? findIn(parent);
-      if (parentTarget) return parentTarget;
+      if (parentTarget) {
+        ancestorTarget = parentTarget;
+        break;
+      }
       parent = parent.parentElement;
       depth += 1;
     }
 
+    const activeTarget = asTypeableElement(document.activeElement);
     const visibleTypeTargets = Array.from(document.querySelectorAll(selector))
       .map((candidate) => asTypeableElement(candidate))
       .filter((candidate): candidate is TypeableElement => Boolean(candidate));
+
+    if (directTarget) return directTarget;
+    if (descendantTarget) return descendantTarget;
+    if (ancestorTarget) return ancestorTarget;
+    if (
+      activeTarget
+      && (activeTarget === matchedEl || matchedEl.contains(activeTarget) || activeTarget.contains(matchedEl))
+    ) {
+      return activeTarget;
+    }
+
     return visibleTypeTargets.length === 1 ? visibleTypeTargets[0] : null;
   };
 
@@ -2513,6 +1855,33 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       inputType: 'insertText',
     }));
     target.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  const commitFilledTextField = async (target: HTMLInputElement | HTMLTextAreaElement) => {
+    const normalizedTagName = (target.tagName ?? '').trim().toLowerCase();
+    const normalizedRole = (target.getAttribute('role') ?? '').trim().toLowerCase();
+    const normalizedAriaAutocomplete = (target.getAttribute('aria-autocomplete') ?? '').trim().toLowerCase();
+    const normalizedAriaHaspopup = (target.getAttribute('aria-haspopup') ?? '').trim().toLowerCase();
+    const hasAriaControls = Boolean((target.getAttribute('aria-controls') ?? '').trim());
+    const commitMode = (
+      (normalizedTagName === 'input' || normalizedTagName === 'textarea')
+      && (
+        normalizedRole === 'combobox'
+        || normalizedAriaAutocomplete === 'list'
+        || normalizedAriaAutocomplete === 'both'
+        || normalizedAriaHaspopup === 'listbox'
+        || hasAriaControls
+        || target.hasAttribute('list')
+      )
+    )
+      ? 'enter'
+      : 'none';
+
+    if (commitMode === 'enter') {
+      await sleep(30);
+      dispatchEnter(target);
+      await sleep(30);
+    }
   };
 
   const setChecked = (el: HTMLInputElement, nextChecked: boolean) => {
@@ -2555,6 +1924,154 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     href: (el as HTMLAnchorElement).href || undefined,
     placeholder: el.getAttribute('placeholder') || undefined,
   });
+
+  const findCommonAncestor = (elements: HTMLElement[]): HTMLElement | null => {
+    const [first, ...rest] = elements;
+    if (!first) return null;
+
+    let current: HTMLElement | null = first;
+    while (current) {
+      const candidate = current;
+      if (rest.every((element) => candidate === element || candidate.contains(element))) {
+        return candidate;
+      }
+      current = candidate.parentElement;
+    }
+
+    return null;
+  };
+
+  const inferSubmitControl = (elements: HTMLElement[]): HTMLElement | null => {
+    if (elements.length === 0) return null;
+
+    const normalizeSubmitCandidateValue = (value: string | null | undefined): string => (
+      (value ?? '').trim().toLowerCase()
+    );
+
+    const scoreSubmitCandidate = (candidate: {
+      tagName?: string | null;
+      type?: string | null;
+      role?: string | null;
+      text?: string | null;
+      name?: string | null;
+      id?: string | null;
+      testId?: string | null;
+    }): number => {
+      const positivePatterns: RegExp[] = [
+        /\bcontinue\b/i,
+        /\bsubmit\b/i,
+        /\bnext\b/i,
+        /\bsearch\b/i,
+        /\bsave\b/i,
+        /\bapply\b/i,
+        /\breview\b/i,
+        /\bcheckout\b/i,
+        /\bplace order\b/i,
+        /\bfinish\b/i,
+        /\blog in\b/i,
+        /\bsign in\b/i,
+      ];
+      const negativePatterns: RegExp[] = [
+        /\bcancel\b/i,
+        /\bback\b/i,
+        /\bclose\b/i,
+        /\bdismiss\b/i,
+        /\bmenu\b/i,
+        /\bdelete\b/i,
+        /\bremove\b/i,
+        /\breset\b/i,
+      ];
+
+      const tagName = normalizeSubmitCandidateValue(candidate.tagName);
+      const type = normalizeSubmitCandidateValue(candidate.type);
+      const role = normalizeSubmitCandidateValue(candidate.role);
+      const textSignals = [candidate.text, candidate.name, candidate.id, candidate.testId]
+        .map((value) => normalizeSubmitCandidateValue(value))
+        .filter(Boolean);
+
+      let score = 0;
+      if (tagName === 'input' && type === 'submit') score += 110;
+      else if (tagName === 'button' && type === 'submit') score += 100;
+      else if (tagName === 'button') score += 30;
+      else if (tagName === 'input' && type === 'button') score += 20;
+
+      if (role === 'button') score += 12;
+
+      for (const signal of textSignals) {
+        if (positivePatterns.some((pattern) => pattern.test(signal))) score += 45;
+        if (negativePatterns.some((pattern) => pattern.test(signal))) score -= 120;
+      }
+
+      return score;
+    };
+
+    const chooseSubmitCandidateIndex = (candidates: Array<Parameters<typeof scoreSubmitCandidate>[0]>): number | undefined => {
+      if (candidates.length === 0) return undefined;
+
+      const scored = candidates
+        .map((candidate, index) => ({ index, score: scoreSubmitCandidate(candidate) }))
+        .sort((left, right) => right.score - left.score);
+
+      const best = scored[0];
+      if (!best || best.score < 75) return undefined;
+
+      const runnerUp = scored[1];
+      if (runnerUp && best.score - runnerUp.score < 25) return undefined;
+
+      return best.index;
+    };
+
+    const searchRoots: HTMLElement[] = [];
+    const seenRoots = new Set<HTMLElement>();
+    let root = findCommonAncestor(elements) ?? document.body;
+    let depth = 0;
+
+    while (root && depth < 5) {
+      if (!seenRoots.has(root)) {
+        searchRoots.push(root);
+        seenRoots.add(root);
+      }
+      if (root === document.body) break;
+      root = root.parentElement ?? document.body;
+      depth += 1;
+    }
+
+    if (!seenRoots.has(document.body)) searchRoots.push(document.body);
+
+    const selector = [
+      'button',
+      'input[type="submit"]',
+      'input[type="button"]',
+      '[role="button"]',
+    ].join(', ');
+
+    for (const searchRoot of searchRoots) {
+      const controls = Array.from(searchRoot.querySelectorAll(selector))
+        .filter((candidate): candidate is HTMLElement => isHTMLElementLike(candidate))
+        .filter((candidate) => isElementVisible(candidate))
+        .filter((candidate) => !elements.includes(candidate))
+        .filter((candidate) => candidate.getAttribute('aria-disabled') !== 'true')
+        .filter((candidate) => !('disabled' in candidate) || !(candidate as HTMLInputElement | HTMLButtonElement).disabled);
+
+      const inferredIndex = chooseSubmitCandidateIndex(controls.map((candidate) => ({
+        tagName: candidate.tagName,
+        type: candidate instanceof HTMLInputElement || candidate instanceof HTMLButtonElement
+          ? candidate.type
+          : candidate.getAttribute('type'),
+        role: candidate.getAttribute('role'),
+        text: candidate.innerText || candidate.getAttribute('aria-label') || candidate.getAttribute('value'),
+        name: candidate.getAttribute('name'),
+        id: candidate.id,
+        testId: candidate.getAttribute('data-testid') || candidate.getAttribute('data-test'),
+      })));
+
+      if (typeof inferredIndex === 'number') {
+        return controls[inferredIndex] ?? null;
+      }
+    }
+
+    return null;
+  };
 
   if (action.kind === 'highlight') {
     const resolved = resolveActionElement(action.selector);
@@ -2623,20 +2140,283 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     el.scrollIntoView({ block: 'center', inline: 'center' });
     await sleep(120);
 
-    const initialPlan = resolveClickPlan(el);
+    const initialPlan = resolveClickPlan(el, action.clickPoint);
     if (!initialPlan) {
       return { ok: false, error: 'Matched element has no visible click target' };
     }
 
     await previewClick(el, `Brow clicking ${describeElement(el)}`);
-    const finalPlan = resolveClickPlan(el) ?? initialPlan;
-    finalPlan.target.focus({ preventScroll: true });
-    dispatchClick(el, finalPlan);
+    const finalPlan = resolveClickPlan(el, action.clickPoint) ?? initialPlan;
+    const dispatchPlan = action.clickMode === 'programmatic'
+      ? { ...finalPlan, dispatchMode: 'programmatic' as const }
+      : finalPlan;
+    dispatchPlan.target.focus({ preventScroll: true });
+    dispatchClick(el, dispatchPlan);
     cleanupOverlay();
 
     return {
       ok: true,
       clicked: summarizeElement(resolvedSelector, el),
+    };
+  }
+
+  if (action.kind === 'drag') {
+    const source = resolveActionElement(action.sourceSelector);
+    if (!source) {
+      return { ok: false, error: `Drag source not found for selector: ${action.sourceSelector}` };
+    }
+    const destination = resolveActionElement(action.destinationSelector);
+    if (!destination) {
+      return { ok: false, error: `Drag destination not found for selector: ${action.destinationSelector}` };
+    }
+
+    source.element.scrollIntoView({ block: 'center', inline: 'center' });
+    destination.element.scrollIntoView({ block: 'center', inline: 'center' });
+    await sleep(140);
+
+    const sourcePlan = resolveClickPlan(source.element, action.sourceClickPoint);
+    const destinationPlan = resolveClickPlan(destination.element, action.destinationClickPoint);
+    if (!sourcePlan || !destinationPlan) {
+      return { ok: false, error: 'Drag source or destination has no visible interaction point' };
+    }
+
+    const dataTransfer = typeof DataTransfer === 'function' ? new DataTransfer() : undefined;
+    const eventInit = (point: ClickPoint) => ({
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: point.x,
+      clientY: point.y,
+      screenX: toScreenX(point.x),
+      screenY: toScreenY(point.y),
+      button: 0,
+      buttons: 1,
+      view: window,
+    });
+    const dispatchDragEvent = (target: HTMLElement, type: string, point: ClickPoint) => {
+      let event: Event;
+      if (typeof DragEvent === 'function') {
+        event = new DragEvent(type, { ...eventInit(point), dataTransfer });
+      } else {
+        event = new Event(type, { bubbles: true, cancelable: true, composed: true });
+        Object.assign(event, eventInit(point));
+      }
+      if (dataTransfer && !('dataTransfer' in event)) {
+        Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+      }
+      return target.dispatchEvent(event);
+    };
+    const dispatchMouse = (target: HTMLElement, type: string, point: ClickPoint, buttons: number) => {
+      target.dispatchEvent(new MouseEvent(type, { ...eventInit(point), buttons }));
+    };
+
+    await previewClick(source.element, `Brow dragging ${describeElement(source.element)}`);
+    const path = action.pointerPath?.length
+      ? action.pointerPath
+      : [
+        sourcePlan.point,
+        {
+          x: (sourcePlan.point.x + destinationPlan.point.x) / 2,
+          y: (sourcePlan.point.y + destinationPlan.point.y) / 2,
+        },
+        destinationPlan.point,
+      ];
+
+    source.element.focus({ preventScroll: true });
+    dispatchMouse(sourcePlan.target, 'mousedown', sourcePlan.point, 1);
+    dispatchDragEvent(sourcePlan.target, 'dragstart', sourcePlan.point);
+    for (const point of path) {
+      const hit = document.elementFromPoint(point.x, point.y);
+      const target = isHTMLElementLike(hit) ? hit : destinationPlan.target;
+      dispatchMouse(target, 'mousemove', point, 1);
+      dispatchDragEvent(target, 'drag', point);
+      await sleep(Math.max(20, Math.min(Math.round((action.durationMs ?? 320) / Math.max(path.length, 1)), 160)));
+    }
+    dispatchDragEvent(destinationPlan.target, 'dragenter', destinationPlan.point);
+    dispatchDragEvent(destinationPlan.target, 'dragover', destinationPlan.point);
+    dispatchDragEvent(destinationPlan.target, 'drop', destinationPlan.point);
+    dispatchDragEvent(sourcePlan.target, 'dragend', destinationPlan.point);
+    dispatchMouse(destinationPlan.target, 'mouseup', destinationPlan.point, 0);
+    cleanupOverlay();
+
+    return {
+      ok: true,
+      dragged: {
+        source: summarizeElement(source.resolvedSelector, source.element),
+        destination: summarizeElement(destination.resolvedSelector, destination.element),
+        pointerPathLength: path.length,
+      },
+    };
+  }
+
+  if (action.kind === 'scroll') {
+    const resolved = action.selector ? resolveActionElement(action.selector) : null;
+    const target = resolved?.element ?? document.scrollingElement ?? document.documentElement;
+    const before = {
+      scrollLeft: target === document.scrollingElement || target === document.documentElement ? window.scrollX : (target as HTMLElement).scrollLeft,
+      scrollTop: target === document.scrollingElement || target === document.documentElement ? window.scrollY : (target as HTMLElement).scrollTop,
+    };
+
+    if (typeof action.top === 'number' || typeof action.left === 'number') {
+      if (target === document.scrollingElement || target === document.documentElement) {
+        window.scrollTo({
+          top: typeof action.top === 'number' ? action.top : window.scrollY,
+          left: typeof action.left === 'number' ? action.left : window.scrollX,
+          behavior: 'auto',
+        });
+      } else {
+        (target as HTMLElement).scrollTo({
+          top: typeof action.top === 'number' ? action.top : (target as HTMLElement).scrollTop,
+          left: typeof action.left === 'number' ? action.left : (target as HTMLElement).scrollLeft,
+          behavior: 'auto',
+        });
+      }
+    } else if (target === document.scrollingElement || target === document.documentElement) {
+      window.scrollBy({ left: action.deltaX ?? 0, top: action.deltaY ?? 0, behavior: 'auto' });
+    } else {
+      (target as HTMLElement).scrollBy({ left: action.deltaX ?? 0, top: action.deltaY ?? 0, behavior: 'auto' });
+    }
+
+    await sleep(80);
+    const after = {
+      scrollLeft: target === document.scrollingElement || target === document.documentElement ? window.scrollX : (target as HTMLElement).scrollLeft,
+      scrollTop: target === document.scrollingElement || target === document.documentElement ? window.scrollY : (target as HTMLElement).scrollTop,
+    };
+
+    return {
+      ok: true,
+      scrolled: {
+        target: resolved ? summarizeElement(resolved.resolvedSelector, resolved.element) : { selector: 'window', tagName: 'window', text: 'window' },
+        before,
+        after,
+      },
+    };
+  }
+
+  if (action.kind === 'key') {
+    const resolved = action.selector ? resolveActionElement(action.selector) : null;
+    const target = resolved?.element ?? (document.activeElement instanceof HTMLElement ? document.activeElement : document.body);
+    target.focus?.({ preventScroll: true });
+
+    if (action.text && !action.key) {
+      const typeTarget = findTypeTarget(target);
+      if (!typeTarget) return { ok: false, error: 'No typeable target is focused for text insertion' };
+      const currentValue = typeTarget instanceof HTMLInputElement || typeTarget instanceof HTMLTextAreaElement
+        ? typeTarget.value
+        : typeTarget.textContent ?? '';
+      setTypeableElementValue(typeTarget, `${currentValue}${action.text}`);
+      return {
+        ok: true,
+        keyed: {
+          target: summarizeElement(resolved?.resolvedSelector ?? 'activeElement', target),
+          insertedTextLength: action.text.length,
+        },
+      };
+    }
+
+    const key = action.key ?? action.text ?? 'Enter';
+    const code = action.code ?? (key.length === 1 ? `Key${key.toUpperCase()}` : key);
+    const eventBase = {
+      key,
+      code,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      altKey: Boolean(action.altKey),
+      ctrlKey: Boolean(action.ctrlKey),
+      metaKey: Boolean(action.metaKey),
+      shiftKey: Boolean(action.shiftKey),
+    };
+    target.dispatchEvent(new KeyboardEvent('keydown', eventBase));
+    if (key.length === 1) {
+      target.dispatchEvent(new KeyboardEvent('keypress', eventBase));
+    }
+    if (key === 'Enter') dispatchEnter(target);
+    target.dispatchEvent(new KeyboardEvent('keyup', eventBase));
+    return {
+      ok: true,
+      keyed: {
+        target: summarizeElement(resolved?.resolvedSelector ?? 'activeElement', target),
+        key,
+        code,
+        modifiers: {
+          altKey: Boolean(action.altKey),
+          ctrlKey: Boolean(action.ctrlKey),
+          metaKey: Boolean(action.metaKey),
+          shiftKey: Boolean(action.shiftKey),
+        },
+      },
+    };
+  }
+
+  if (action.kind === 'upload') {
+    const resolved = resolveActionElement(action.selector);
+    if (!resolved) {
+      return { ok: false, error: `Upload control not found for selector: ${action.selector}` };
+    }
+    const input = resolved.element.tagName.toLowerCase() === 'input'
+      ? resolved.element as HTMLInputElement
+      : resolved.element.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!input || input.type !== 'file') {
+      return { ok: false, error: 'Matched element is not a file input or upload control' };
+    }
+    input.scrollIntoView({ block: 'center', inline: 'center' });
+    await previewClick(input, `Brow opening file picker for ${describeElement(input)}`);
+    input.click();
+    cleanupOverlay();
+    return {
+      ok: false,
+      helperRequired: true,
+      backend: 'local-helper',
+      error: 'Native file selection requires the local helper backend. MV3 can open the picker but cannot set a local file path safely.',
+      upload: {
+        control: summarizeElement(resolved.resolvedSelector, input),
+        fileName: action.fileName,
+        filePath: action.filePath ? '[redacted path]' : undefined,
+      },
+    };
+  }
+
+  if (action.kind === 'handleDialog') {
+    const resolved = action.selector ? resolveActionElement(action.selector) : null;
+    const dialog = resolved?.element
+      ?? document.querySelector<HTMLElement>('dialog[open], [role="dialog"], [aria-modal="true"]');
+    if (!dialog) {
+      return {
+        ok: false,
+        helperRequired: true,
+        backend: 'local-helper',
+        error: 'No HTML dialog was found. Native browser dialogs require the local helper backend.',
+      };
+    }
+
+    if (dialog instanceof HTMLDialogElement && action.action !== 'accept') {
+      dialog.close(action.text ?? '');
+      return { ok: true, dialog: { action: action.action, target: summarizeElement(resolved?.resolvedSelector ?? 'dialog[open]', dialog) } };
+    }
+
+    const buttonNeedles = action.action === 'dismiss'
+      ? ['cancel', 'close', 'dismiss', 'no']
+      : ['ok', 'yes', 'accept', 'confirm', 'continue'];
+    const buttons = Array.from(dialog.querySelectorAll<HTMLElement>('button, [role="button"], input[type="button"], input[type="submit"]'));
+    const button = buttons.find((candidate) => {
+      const text = normalizeInlineText(candidate.innerText || candidate.getAttribute('aria-label') || candidate.getAttribute('value'));
+      return buttonNeedles.some((needle) => text.toLowerCase().includes(needle));
+    }) ?? buttons[0];
+
+    if (!button) {
+      return { ok: false, error: 'Dialog was found but no actionable dialog control was available' };
+    }
+    await previewClick(button, `Brow handling dialog`);
+    button.click();
+    cleanupOverlay();
+    return {
+      ok: true,
+      dialog: {
+        action: action.action,
+        target: summarizeElement(resolved?.resolvedSelector ?? 'dialog', dialog),
+        control: summarizeElement('dialog control', button),
+      },
     };
   }
 
@@ -2670,8 +2450,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       setTypeableElementValue(typeTarget, action.text);
       if (action.submit) {
         showBadge('Brow submitting input', 16, 16);
-        await sleep(120);
-        dispatchEnter(typeTarget);
+        window.setTimeout(() => dispatchEnter(typeTarget), 30);
       }
       cleanupOverlay();
       return {
@@ -2694,6 +2473,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
     error?: string;
   }> = [];
   let formForSubmit: HTMLFormElement | null = null;
+  const successfulFieldElements: HTMLElement[] = [];
 
   for (const field of action.fields) {
     const selector = typeof field?.selector === 'string' ? field.selector : '';
@@ -2741,7 +2521,10 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       if (mode === 'text') {
         if (tagName === 'input' || tagName === 'textarea') {
           await previewFieldEdit(el, `Brow typing into ${describeElement(el)}`);
-          setValue(el as HTMLInputElement | HTMLTextAreaElement, String(field.value));
+          const inputEl = el as HTMLInputElement | HTMLTextAreaElement;
+          setValue(inputEl, String(field.value));
+          await commitFilledTextField(inputEl);
+          successfulFieldElements.push(inputEl);
           results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: field.value });
           continue;
         }
@@ -2766,6 +2549,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
             data: String(field.value),
             inputType: 'insertText',
           }));
+          successfulFieldElements.push(el);
           results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: field.value });
           continue;
         }
@@ -2812,6 +2596,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
           option.selected = true;
           selectEl.dispatchEvent(new Event('input', { bubbles: true }));
           selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+          successfulFieldElements.push(selectEl);
           results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: option.value });
           continue;
         }
@@ -2841,6 +2626,7 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
               setChecked(inputEl, nextChecked);
             }
           }
+          successfulFieldElements.push(inputEl);
           results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: nextChecked });
           continue;
         }
@@ -2896,23 +2682,51 @@ async function runPageAutomationAction(action: PageAutomationAction): Promise<un
       }
     } else if (formForSubmit) {
       showBadge('Brow submitting form', 16, 16);
-      await sleep(140);
-      formForSubmit.requestSubmit?.();
-      if (!formForSubmit.requestSubmit) formForSubmit.submit();
+      window.setTimeout(() => {
+        formForSubmit.requestSubmit?.();
+        if (!formForSubmit.requestSubmit) formForSubmit.submit();
+      }, 30);
       submitted = true;
     } else {
-      submitError = 'No parent form found to submit';
+      const inferredSubmit = inferSubmitControl(successfulFieldElements);
+      if (inferredSubmit) {
+        await previewClick(inferredSubmit, `Brow submitting ${describeElement(inferredSubmit)}`);
+        inferredSubmit.focus({ preventScroll: true });
+        inferredSubmit.click();
+        submitted = true;
+      } else {
+        submitError = 'No parent form found to submit';
+      }
     }
   }
 
   cleanupOverlay(1000);
 
   const hadFieldErrors = results.some((result) => !result.ok);
+  const outcome: { ok: boolean; warning?: string; error?: string } = hadFieldErrors
+    ? {
+      ok: false,
+      error: 'One or more form fields could not be filled',
+    }
+    : Boolean(action.submit || action.submitSelector) && submitError
+      ? !submitted && submitError === 'No parent form found to submit'
+        ? {
+          ok: true,
+          warning: submitError,
+        }
+        : {
+          ok: false,
+          error: submitError,
+        }
+      : {
+        ok: true,
+      };
   return {
-    ok: !hadFieldErrors && !submitError,
+    ok: outcome.ok,
     results,
     submitted,
-    error: submitError ?? (hadFieldErrors ? 'One or more form fields could not be filled' : undefined),
+    warning: outcome.warning,
+    error: outcome.error,
   };
 }
 
@@ -3142,15 +2956,21 @@ export async function tabsListInteractiveElements(
 export async function tabsClick(
   tabId: number,
   selector: string,
+  clickPoint?: BrowserClickPoint,
+  clickMode?: ClickDispatchMode,
 ): Promise<{ ok: boolean; clicked?: InteractiveElementInfo; error?: string }> {
   try {
     await ensureTabIsActive(tabId);
 
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: runPageAutomationAction,
-      args: [{ kind: 'click', selector }],
-    });
+    const results = await executeScriptWithTimeout<{ ok: boolean; clicked?: InteractiveElementInfo; error?: string }>(
+      {
+        target: { tabId },
+        func: runPageAutomationAction,
+        args: [{ kind: 'click', selector, clickPoint, clickMode }],
+      },
+      CLICK_EXECUTION_TIMEOUT_MS,
+      getBlockedPageExecutionError('Click execution'),
+    );
 
     return (results?.[0]?.result as { ok: boolean; clicked?: InteractiveElementInfo; error?: string } | undefined)
       ?? { ok: false, error: 'No response from tab' };
@@ -3282,6 +3102,7 @@ export async function tabsFillForm(
   ok: boolean;
   results?: FormFillFieldResult[];
   submitted?: boolean;
+  warning?: string;
   error?: string;
 }> {
   try {
@@ -3297,6 +3118,7 @@ export async function tabsFillForm(
       ok: boolean;
       results?: FormFillFieldResult[];
       submitted?: boolean;
+      warning?: string;
       error?: string;
     } | undefined) ?? { ok: false, error: 'No response from tab' };
   } catch (err: any) {
@@ -3304,19 +3126,125 @@ export async function tabsFillForm(
   }
 }
 
-export interface BrowserRefResolution {
-  ok: boolean;
-  ref?: string;
-  originalRef?: string;
-  snapshotId?: string;
-  selector?: string;
-  entry?: BrowserSnapshotElement;
-  recovered?: boolean;
-  region?: BrowserVisualRegion;
-  snapshot?: BrowserSnapshot;
-  matchScore?: number;
-  preconditions?: Record<string, unknown>;
-  error?: string;
+export async function tabsDrag(
+  tabId: number,
+  sourceSelector: string,
+  destinationSelector: string,
+  options: {
+    sourceClickPoint?: BrowserClickPoint;
+    destinationClickPoint?: BrowserClickPoint;
+    pointerPath?: Array<{ x: number; y: number }>;
+    durationMs?: number;
+  } = {},
+): Promise<{ ok: boolean; dragged?: unknown; error?: string }> {
+  try {
+    await ensureTabIsActive(tabId);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runPageAutomationAction,
+      args: [{
+        kind: 'drag',
+        sourceSelector,
+        destinationSelector,
+        sourceClickPoint: options.sourceClickPoint,
+        destinationClickPoint: options.destinationClickPoint,
+        pointerPath: options.pointerPath,
+        durationMs: options.durationMs,
+      }],
+    });
+
+    return (results?.[0]?.result as { ok: boolean; dragged?: unknown; error?: string } | undefined)
+      ?? { ok: false, error: 'No response from tab' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to drag element' };
+  }
+}
+
+export async function tabsScroll(
+  tabId: number,
+  options: { selector?: string; deltaX?: number; deltaY?: number; top?: number; left?: number },
+): Promise<{ ok: boolean; scrolled?: unknown; error?: string }> {
+  try {
+    await ensureTabIsActive(tabId);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runPageAutomationAction,
+      args: [{ kind: 'scroll', ...options }],
+    });
+
+    return (results?.[0]?.result as { ok: boolean; scrolled?: unknown; error?: string } | undefined)
+      ?? { ok: false, error: 'No response from tab' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to scroll page' };
+  }
+}
+
+export async function tabsKey(
+  tabId: number,
+  options: {
+    selector?: string;
+    key?: string;
+    code?: string;
+    text?: string;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+  },
+): Promise<{ ok: boolean; keyed?: unknown; error?: string }> {
+  try {
+    await ensureTabIsActive(tabId);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runPageAutomationAction,
+      args: [{ kind: 'key', ...options }],
+    });
+
+    return (results?.[0]?.result as { ok: boolean; keyed?: unknown; error?: string } | undefined)
+      ?? { ok: false, error: 'No response from tab' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to send key event' };
+  }
+}
+
+export async function tabsUploadFile(
+  tabId: number,
+  selector: string,
+  fileName?: string,
+  filePath?: string,
+): Promise<{ ok: boolean; upload?: unknown; helperRequired?: boolean; backend?: BrowAutomationBackend; error?: string }> {
+  try {
+    await ensureTabIsActive(tabId);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runPageAutomationAction,
+      args: [{ kind: 'upload', selector, fileName, filePath }],
+    });
+
+    return (results?.[0]?.result as { ok: boolean; upload?: unknown; helperRequired?: boolean; backend?: BrowAutomationBackend; error?: string } | undefined)
+      ?? { ok: false, error: 'No response from tab' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to open upload control' };
+  }
+}
+
+export async function tabsHandleDialog(
+  tabId: number,
+  options: { selector?: string; action: 'accept' | 'dismiss' | 'close'; text?: string },
+): Promise<{ ok: boolean; dialog?: unknown; helperRequired?: boolean; backend?: BrowAutomationBackend; error?: string }> {
+  try {
+    await ensureTabIsActive(tabId);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runPageAutomationAction,
+      args: [{ kind: 'handleDialog', ...options }],
+    });
+
+    return (results?.[0]?.result as { ok: boolean; dialog?: unknown; helperRequired?: boolean; backend?: BrowAutomationBackend; error?: string } | undefined)
+      ?? { ok: false, error: 'No response from tab' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to handle dialog' };
+  }
 }
 
 export interface BrowserActionResult {
@@ -3324,10 +3252,16 @@ export interface BrowserActionResult {
   action?: unknown;
   resolved?: BrowserRefResolution;
   snapshot?: BrowserSnapshot;
+  beforeSnapshot?: BrowserSnapshot;
+  backend?: BrowAutomationBackend;
+  confidence?: number;
   cacheStatus?: BrowActionCacheStatus;
   trace?: BrowActionTrace;
   postconditions?: BrowPostconditionResult[];
+  recoveryCandidates?: BrowActionRepairCandidate[];
   repairNeeded?: boolean;
+  helperRequired?: boolean;
+  warning?: string;
   error?: string;
 }
 
@@ -3335,10 +3269,187 @@ export interface BrowserFormFillField {
   ref: string;
   value: string | number | boolean;
   mode?: FormFillMode;
+  targetEvidence?: BrowReplayTargetEvidence;
 }
+
+export interface BrowserDragOptions extends BrowserActionOptions {
+  sourceClickPoint?: BrowserClickPoint;
+  destinationClickPoint?: BrowserClickPoint;
+  pointerPath?: Array<{ x: number; y: number }>;
+  durationMs?: number;
+  destinationTargetEvidence?: BrowReplayTargetEvidence;
+}
+
+const SATISFIED_VALUE_REPAIR_ERROR = 'Requested field value already matches the target state. Do not keep acting on this field; take a fresh browser_snapshot with mode="full" or browser_form_snapshot to find the next actionable control.';
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function captureActionBeforeSnapshot(tabId: number): Promise<BrowserSnapshot> {
+  return browserSnapshot(tabId, { mode: 'compact', maxElements: ACTION_BEFORE_SNAPSHOT_MAX_ELEMENTS });
+}
+
+function snapshotHasRef(snapshot: BrowserSnapshot | undefined, ref: string | undefined): boolean {
+  return Boolean(ref && snapshot?.elements.some((element) => element.ref === ref));
+}
+
+const INTENT_STOP_WORDS = new Set([
+  'about',
+  'action',
+  'button',
+  'click',
+  'element',
+  'find',
+  'for',
+  'from',
+  'into',
+  'open',
+  'page',
+  'play',
+  'press',
+  'result',
+  'search',
+  'select',
+  'submit',
+  'target',
+  'the',
+  'this',
+  'type',
+  'video',
+  'with',
+]);
+
+function normalizeIntentText(value: string | undefined): string {
+  return (value ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function tokenizeIntent(value: string | undefined): string[] {
+  const tokens = normalizeIntentText(value).split(' ').filter(Boolean);
+  const unique = new Set<string>();
+  for (const token of tokens) {
+    if (token.length < 3) continue;
+    if (INTENT_STOP_WORDS.has(token)) continue;
+    unique.add(token);
+  }
+  return [...unique];
+}
+
+function entryIntentText(entry: BrowserSnapshotElement): string {
+  const attrs = entry.attributes ?? {};
+  return normalizeIntentText([
+    entry.name,
+    entry.text,
+    entry.role,
+    entry.tagName,
+    attrs['aria-label'],
+    attrs.title,
+    attrs.placeholder,
+    attrs.name,
+    attrs.alt,
+  ].filter(Boolean).join(' '));
+}
+
+function scoreIntentCandidate(
+  entry: BrowserSnapshotElement,
+  intentTokens: string[],
+  actionKind: BrowActionKind | undefined,
+): number {
+  if (intentTokens.length === 0) return 0;
+  const haystack = entryIntentText(entry);
+  if (!haystack) return 0;
+
+  let score = 0;
+  let matched = 0;
+  for (const token of intentTokens) {
+    const tokenPattern = new RegExp(`(^|\\s)${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`);
+    if (tokenPattern.test(haystack)) {
+      matched += 1;
+      score += 12;
+    } else if (haystack.includes(token)) {
+      matched += 1;
+      score += 7;
+    }
+  }
+
+  if (matched === 0) return 0;
+  const coverage = matched / intentTokens.length;
+  score += Math.round(coverage * 24);
+  if (coverage >= 0.8) score += 14;
+  if (coverage === 1) score += 10;
+
+  if (actionKind === 'type') {
+    if (['textbox', 'searchbox', 'combobox'].includes(entry.role)) score += 24;
+    if (['input', 'textarea'].includes(entry.tagName)) score += 18;
+    const fieldText = haystack;
+    if (fieldText.includes('search') || fieldText.includes('rechercher')) score += 14;
+  } else if (actionKind === 'click') {
+    if (entry.role === 'link') score += 20;
+    else if (entry.role === 'button') score += 14;
+    else if (entry.role === 'heading') score += 8;
+    if (entry.actionable) score += 10;
+  }
+
+  const textLength = (entry.name || entry.text || '').length;
+  if (textLength > 220) score -= 12;
+  return score;
+}
+
+function repairCandidateFromSnapshotEntry(entry: BrowserSnapshotElement, score: number): BrowActionRepairCandidate {
+  return {
+    ref: entry.ref,
+    selector: entry.selector,
+    role: entry.role,
+    name: entry.name,
+    tagName: entry.tagName,
+    score,
+    bounds: entry.bounds,
+    attributes: entry.attributes,
+  };
+}
+
+function findIntentCandidate(
+  snapshot: BrowserSnapshot | undefined,
+  intent: string | undefined,
+  actionKind: BrowActionKind | undefined,
+  requireActionable: boolean,
+): { candidate?: BrowActionRepairCandidate; candidates: BrowActionRepairCandidate[]; ambiguous?: boolean } {
+  if (!snapshot?.ok || !intent || !['click', 'type'].includes(actionKind ?? '')) {
+    return { candidates: [] };
+  }
+  const intentTokens = tokenizeIntent(intent);
+  if (intentTokens.length === 0) return { candidates: [] };
+
+  const scored = snapshot.elements
+    .filter((entry) => {
+      if (requireActionable && !entry.actionable) return false;
+      if (!isIntentRecoveryEntryAllowed(entry, actionKind)) return false;
+      if (actionKind === 'type') {
+        return entry.actionable
+          && (['textbox', 'searchbox', 'combobox'].includes(entry.role) || ['input', 'textarea'].includes(entry.tagName));
+      }
+      return true;
+    })
+    .map((entry) => ({
+      entry,
+      score: scoreIntentCandidate(entry, intentTokens, actionKind),
+    }))
+    .filter((item) => item.score >= INTENT_MATCH_THRESHOLD)
+    .sort((left, right) => right.score - left.score);
+
+  const candidates = scored.slice(0, 5).map((item) => repairCandidateFromSnapshotEntry(item.entry, item.score));
+  const [best, second] = scored;
+  if (!best) return { candidates };
+  if (second && best.score - second.score < INTENT_MATCH_MARGIN) {
+    return { candidates, ambiguous: true };
+  }
+  return { candidate: candidates[0], candidates };
 }
 
 export async function waitForTabSettled(
@@ -3356,11 +3467,15 @@ export async function waitForTabSettled(
       }
     }
 
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: runPageSettlingProbe,
-      args: [{ timeoutMs }],
-    });
+    const results = await executeScriptWithTimeout<{ ok: boolean; readyState: string; quietMs: number; durationMs: number; error?: string }>(
+      {
+        target: { tabId },
+        func: runPageSettlingProbe,
+        args: [{ timeoutMs }],
+      },
+      Math.max(timeoutMs + PAGE_SETTLE_TIMEOUT_SLACK_MS, 600),
+      getBlockedPageExecutionError('Page settling probe'),
+    );
 
     return (results?.[0]?.result as { ok: boolean; readyState: string; quietMs: number; durationMs: number; error?: string } | undefined)
       ?? { ok: false, error: 'No response from tab while waiting for page stability' };
@@ -3369,48 +3484,103 @@ export async function waitForTabSettled(
   }
 }
 
+function emptyBrowserSnapshot(tabId: number, error: string): BrowserSnapshot {
+  return {
+    ok: false,
+    snapshotId: '',
+    tabId,
+    url: '',
+    title: '',
+    generatedAt: Date.now(),
+    viewport: { width: 0, height: 0, scrollX: 0, scrollY: 0, devicePixelRatio: 1 },
+    elements: [],
+    visibleElementCount: 0,
+    displayedElementCount: 0,
+    omittedElementCount: 0,
+    error,
+  };
+}
+
+function emptyBrowserFormSnapshot(tabId: number, error: string): BrowserFormSnapshot {
+  return {
+    ok: false,
+    snapshotId: '',
+    tabId,
+    url: '',
+    title: '',
+    generatedAt: Date.now(),
+    forms: [],
+    fields: [],
+    fieldCount: 0,
+    visibleFieldCount: 0,
+    fillTargetCount: 0,
+    omittedFieldCount: 0,
+    error,
+  };
+}
+
+function isBrowserSnapshotResult(
+  result: BrowserSnapshotOperationResult | undefined,
+): result is BrowserSnapshot {
+  return Boolean(result && typeof result === 'object' && 'elements' in result);
+}
+
+function isBrowserFormSnapshotResult(
+  result: BrowserSnapshotOperationResult | undefined,
+): result is BrowserFormSnapshot {
+  return Boolean(result && typeof result === 'object' && 'forms' in result && 'fields' in result);
+}
+
+function isBrowserRefResolutionResult(
+  result: BrowserSnapshotOperationResult | undefined,
+): result is BrowserRefResolution {
+  return Boolean(result && typeof result === 'object' && 'ok' in result && !isBrowserSnapshotResult(result) && !isBrowserFormSnapshotResult(result));
+}
+
+async function sendBrowserSnapshotOperation(
+  tabId: number,
+  operation: BrowserSnapshotOperation,
+): Promise<BrowserSnapshotOperationMessageResult> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: 'BROWSER_SNAPSHOT_OPERATION', payload: { tabId, operation } },
+      (response: BrowserSnapshotOperationMessageResult | undefined) => {
+        const runtimeError = chrome.runtime.lastError?.message;
+        if (runtimeError) {
+          resolve({ ok: false, error: runtimeError });
+          return;
+        }
+        resolve(response ?? { ok: false, error: 'No response from background while running browser snapshot operation' });
+      },
+    );
+  });
+}
+
 export async function browserSnapshot(
   tabId: number,
   options: BrowserSnapshotOptions = {},
 ): Promise<BrowserSnapshot> {
   try {
     await waitForTabSettled(tabId);
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: runBrowserSnapshotOperation,
-      args: [{ kind: 'snapshot', tabId, options }],
-    });
-
-    return (results?.[0]?.result as BrowserSnapshot | undefined)
-      ?? {
-        ok: false,
-        snapshotId: '',
-        tabId,
-        url: '',
-        title: '',
-        generatedAt: Date.now(),
-        viewport: { width: 0, height: 0, scrollX: 0, scrollY: 0, devicePixelRatio: 1 },
-        elements: [],
-        visibleElementCount: 0,
-        displayedElementCount: 0,
-        omittedElementCount: 0,
-        error: 'No response from tab',
-      };
+    const response = await sendBrowserSnapshotOperation(tabId, { kind: 'snapshot', tabId, options });
+    if (response.ok && isBrowserSnapshotResult(response.result)) return response.result;
+    return emptyBrowserSnapshot(tabId, response.error ?? 'No response from tab');
   } catch (err: any) {
-    return {
-      ok: false,
-      snapshotId: '',
-      tabId,
-      url: '',
-      title: '',
-      generatedAt: Date.now(),
-      viewport: { width: 0, height: 0, scrollX: 0, scrollY: 0, devicePixelRatio: 1 },
-      elements: [],
-      visibleElementCount: 0,
-      displayedElementCount: 0,
-      omittedElementCount: 0,
-      error: err?.message ?? 'Failed to capture browser snapshot',
-    };
+    return emptyBrowserSnapshot(tabId, err?.message ?? 'Failed to capture browser snapshot');
+  }
+}
+
+export async function browserFormSnapshot(
+  tabId: number,
+  options: BrowserFormSnapshotOptions = {},
+): Promise<BrowserFormSnapshot> {
+  try {
+    await waitForTabSettled(tabId);
+    const response = await sendBrowserSnapshotOperation(tabId, { kind: 'formSnapshot', tabId, options });
+    if (response.ok && isBrowserFormSnapshotResult(response.result)) return response.result;
+    return emptyBrowserFormSnapshot(tabId, response.error ?? 'No response from tab');
+  } catch (err: any) {
+    return emptyBrowserFormSnapshot(tabId, err?.message ?? 'Failed to capture browser form snapshot');
   }
 }
 
@@ -3421,17 +3591,183 @@ export async function browserResolveRef(
   requireActionable = false,
 ): Promise<BrowserRefResolution> {
   try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: runBrowserSnapshotOperation,
-      args: [{ kind: 'resolve', tabId, ref, snapshotId, requireActionable }],
+    const response = await sendBrowserSnapshotOperation(tabId, {
+      kind: 'resolve',
+      tabId,
+      ref,
+      snapshotId,
+      requireActionable,
     });
-
-    return (results?.[0]?.result as BrowserRefResolution | undefined)
-      ?? { ok: false, ref, snapshotId, error: 'No response from tab' };
+    if (response.ok && isBrowserRefResolutionResult(response.result)) {
+      return response.result;
+    }
+    return { ok: false, ref, snapshotId, error: response.error ?? 'No response from tab' };
   } catch (err: any) {
     return { ok: false, ref, snapshotId, error: err?.message ?? 'Failed to resolve element ref' };
   }
+}
+
+async function browserResolveTargetEvidence(
+  tabId: number,
+  target: BrowReplayTargetEvidence,
+  requireActionable = false,
+): Promise<BrowserRefResolution> {
+  try {
+    await waitForTabSettled(tabId);
+    const response = await sendBrowserSnapshotOperation(tabId, {
+      kind: 'resolveTarget',
+      tabId,
+      target,
+      requireActionable,
+    });
+    if (response.ok && isBrowserRefResolutionResult(response.result)) {
+      return response.result;
+    }
+    return { ok: false, error: response.error ?? 'No response from tab while resolving target evidence' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to resolve target evidence' };
+  }
+}
+
+async function resolveActionTarget(params: {
+  tabId: number;
+  ref?: string;
+  snapshotId?: string;
+  requireActionable: boolean;
+  actionKind?: BrowActionKind;
+  options?: BrowserActionOptions;
+  beforeSnapshot?: BrowserSnapshot;
+}): Promise<BrowserRefResolution> {
+  let refResolution: BrowserRefResolution | undefined;
+  const evidenceRef = params.options?.targetEvidence?.observedRef ?? params.options?.targetEvidence?.ref;
+  const candidateRef = params.ref ?? evidenceRef;
+  const candidateSnapshotId = params.snapshotId ?? params.options?.targetEvidence?.snapshotId;
+  const freshSnapshot = snapshotHasRef(params.beforeSnapshot, candidateRef) ? params.beforeSnapshot : undefined;
+  const freshSnapshotId = freshSnapshot
+    ? freshSnapshot.snapshotId
+    : undefined;
+  const recoveryCandidates: BrowActionRepairCandidate[] = [];
+
+  if (candidateRef) {
+    refResolution = await browserResolveRef(
+      params.tabId,
+      candidateRef,
+      candidateSnapshotId,
+      params.requireActionable,
+    );
+    if (refResolution.ok && refResolution.selector) {
+      return {
+        ...refResolution,
+        backend: 'mv3-dom',
+        confidence: refResolution.matchScore ?? 100,
+      };
+    }
+
+    if (
+      freshSnapshotId
+      && candidateSnapshotId
+      && freshSnapshotId !== candidateSnapshotId
+      && refResolution.error?.includes('Unknown element ref')
+    ) {
+      const freshResolution = await browserResolveRef(
+        params.tabId,
+        candidateRef,
+        freshSnapshotId,
+        params.requireActionable,
+      );
+      if (freshResolution.ok && freshResolution.selector) {
+        return {
+          ...freshResolution,
+          originalRef: candidateRef,
+          recovered: true,
+          backend: 'mv3-dom',
+          confidence: freshResolution.matchScore ?? 100,
+          message: `Recovered ref ${candidateRef} from fresh pre-action snapshot after stale snapshotId failed.`,
+        };
+      }
+    }
+
+    if (refResolution.error?.includes('Unknown element ref')) {
+      const expandedSnapshot = await browserSnapshot(params.tabId, {
+        mode: 'full',
+        maxElements: ACTION_EXPANDED_SNAPSHOT_MAX_ELEMENTS,
+      });
+
+      const intentMatch = findIntentCandidate(
+        expandedSnapshot.ok ? expandedSnapshot : params.beforeSnapshot,
+        params.options?.intent,
+        params.actionKind,
+        params.requireActionable,
+      );
+      recoveryCandidates.push(...intentMatch.candidates);
+
+      if (intentMatch.candidate && expandedSnapshot.ok) {
+        const semanticResolution = await browserResolveRef(
+          params.tabId,
+          intentMatch.candidate.ref,
+          expandedSnapshot.snapshotId,
+          params.requireActionable,
+        );
+        if (semanticResolution.ok && semanticResolution.selector) {
+          return {
+            ...semanticResolution,
+            originalRef: candidateRef,
+            recovered: true,
+            backend: 'mv3-dom',
+            confidence: intentMatch.candidate.score,
+            matchScore: intentMatch.candidate.score,
+            repairCandidates: intentMatch.candidates,
+            message: `Recovered stale ref ${candidateRef} by matching action intent against expanded pre-action snapshot.`,
+          };
+        }
+      }
+
+      if (intentMatch.ambiguous && refResolution) {
+        refResolution = {
+          ...refResolution,
+          snapshot: expandedSnapshot.ok ? expandedSnapshot : refResolution.snapshot,
+          repairCandidates: intentMatch.candidates,
+          error: `${refResolution.error} Multiple current elements matched the action intent; choose one of the repair candidates from a fresh browser_snapshot.`,
+        };
+      }
+    }
+  }
+
+  if (refResolution && recoveryCandidates.length > 0 && !refResolution.repairCandidates) {
+    refResolution = {
+      ...refResolution,
+      repairCandidates: recoveryCandidates,
+    };
+  }
+
+  if (params.options?.targetEvidence) {
+    const evidenceResolution = await browserResolveTargetEvidence(
+      params.tabId,
+      params.options.targetEvidence,
+      params.requireActionable,
+    );
+    if (evidenceResolution.ok && evidenceResolution.selector) {
+      return {
+        ...evidenceResolution,
+        originalRef: candidateRef,
+        backend: 'mv3-dom',
+        confidence: evidenceResolution.matchScore,
+      };
+    }
+    return {
+      ...evidenceResolution,
+      originalRef: candidateRef,
+      error: evidenceResolution.error ?? refResolution?.error ?? 'Unable to resolve target evidence',
+    };
+  }
+
+  return refResolution ?? {
+    ok: false,
+    ref: params.ref,
+    snapshotId: params.snapshotId,
+    repairCandidates: recoveryCandidates.length > 0 ? recoveryCandidates : undefined,
+    error: 'Provide either a live ref or targetEvidence for this browser action.',
+  };
 }
 
 async function browserResolveMemoryTarget(
@@ -3441,14 +3777,16 @@ async function browserResolveMemoryTarget(
 ): Promise<BrowserMemoryResolution> {
   try {
     await waitForTabSettled(tabId);
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: runBrowserSnapshotOperation,
-      args: [{ kind: 'resolveMemory', tabId, target, requireActionable }],
+    const response = await sendBrowserSnapshotOperation(tabId, {
+      kind: 'resolveMemory',
+      tabId,
+      target,
+      requireActionable,
     });
-
-    return (results?.[0]?.result as BrowserMemoryResolution | undefined)
-      ?? { ok: false, error: 'No response from tab while resolving cached action target' };
+    if (response.ok && isBrowserRefResolutionResult(response.result)) {
+      return response.result;
+    }
+    return { ok: false, error: response.error ?? 'No response from tab while resolving cached action target' };
   } catch (err: any) {
     return { ok: false, error: err?.message ?? 'Failed to resolve cached action target' };
   }
@@ -3458,6 +3796,36 @@ async function snapshotAfterAction(tabId: number): Promise<BrowserSnapshot> {
   await delay(180);
   await waitForTabSettled(tabId);
   return browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
+}
+
+async function waitForClickPostconditions(
+  tabId: number,
+  snapshot: BrowserSnapshot,
+  postconditions: BrowActionPostcondition[] | undefined,
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<{ snapshot: BrowserSnapshot; results: BrowPostconditionResult[]; waitedMs: number }> {
+  let currentSnapshot = snapshot;
+  let results = await evaluatePostconditions(tabId, currentSnapshot, postconditions);
+
+  if (postconditionsPassed(results) || !postconditions || postconditions.length === 0) {
+    return { snapshot: currentSnapshot, results, waitedMs: 0 };
+  }
+
+  const timeoutMs = Math.max(250, Math.min(Math.floor(options.timeoutMs ?? 1800), 5000));
+  const pollMs = Math.max(100, Math.min(Math.floor(options.pollMs ?? 250), 1000));
+  const startedAt = Date.now();
+
+  while (!postconditionsPassed(results) && Date.now() - startedAt < timeoutMs) {
+    await delay(pollMs);
+    currentSnapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
+    results = await evaluatePostconditions(tabId, currentSnapshot, postconditions);
+  }
+
+  return {
+    snapshot: currentSnapshot,
+    results,
+    waitedMs: Date.now() - startedAt,
+  };
 }
 
 function createActionTrace(
@@ -3489,6 +3857,112 @@ function snapshotContainsText(snapshot: BrowserSnapshot, needle: string): boolea
   return snapshot.elements.some((element) =>
     `${element.name ?? ''} ${element.text ?? ''}`.replace(/\s+/g, ' ').trim().toLowerCase().includes(normalizedNeedle),
   );
+}
+
+async function recentDownloadAppeared(needle?: string): Promise<{ ok: boolean; actual?: string; error?: string }> {
+  try {
+    if (!chrome.downloads?.search) {
+      return { ok: false, error: 'chrome.downloads permission/API is unavailable' };
+    }
+    const downloads = await chrome.downloads.search({
+      limit: 25,
+      orderBy: ['-startTime'],
+      startedAfter: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    });
+    const normalizedNeedle = (needle ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const match = downloads.find((item) => {
+      const haystack = `${item.filename ?? ''} ${item.url ?? ''} ${item.finalUrl ?? ''}`.toLowerCase();
+      return !normalizedNeedle || haystack.includes(normalizedNeedle);
+    });
+    return {
+      ok: Boolean(match),
+      actual: match?.filename ?? match?.url,
+    };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to inspect downloads' };
+  }
+}
+
+async function readMediaState(tabId: number): Promise<{ ok: boolean; actual?: string; error?: string }> {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const media = Array.from(document.querySelectorAll<HTMLMediaElement>('video, audio'))
+          .filter((element) => element.offsetWidth > 0 || element.offsetHeight > 0);
+        const target = media[0];
+        if (!target) return { ok: false, error: 'No visible media element found' };
+        return { ok: true, actual: target.paused ? 'paused' : 'playing' };
+      },
+    });
+    return (results?.[0]?.result as { ok: boolean; actual?: string; error?: string } | undefined)
+      ?? { ok: false, error: 'No response while reading media state' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? 'Failed to read media state' };
+  }
+}
+
+// ─── Date-aware valueEquals fallback ────────────────────────────────────────
+// Date inputs often reformat typed values (e.g. "10/05/2026" → "dim. 10 mai").
+// This helper tries to parse both sides as dates and compares day+month+year
+// so postconditions set by the LLM don't spuriously fail after reformatting.
+
+const MONTH_NAMES: Record<string, number> = {
+  jan: 0, january: 0, janvier: 0, ene: 0, enero: 0,
+  feb: 1, february: 1, février: 1, fevrier: 1,
+  mar: 2, march: 2, mars: 2, marzo: 2,
+  apr: 3, april: 3, avril: 3, abr: 3, abril: 3,
+  may: 4, mai: 4, mayo: 4,
+  jun: 5, june: 5, juin: 5, junio: 5,
+  jul: 6, july: 6, juillet: 6, julio: 6,
+  aug: 7, august: 7, août: 7, aout: 7, ago: 7, agosto: 7,
+  sep: 8, sept: 8, september: 8, septembre: 8, septiembre: 8,
+  oct: 9, october: 9, octobre: 9, octubre: 9,
+  nov: 10, november: 10, novembre: 10, noviembre: 10,
+  dec: 11, december: 11, décembre: 11, decembre: 11, dic: 11, diciembre: 11,
+};
+
+function extractDateParts(value: string): { day: number; month: number; year?: number } | null {
+  // Try numeric formats: DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, DD-MM-YYYY
+  const slashDot = value.match(/^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})$/);
+  if (slashDot) {
+    const [, a, b, c] = slashDot;
+    const n1 = Number(a); const n2 = Number(b); const n3 = Number(c);
+    const year = n3 < 100 ? n3 + 2000 : n3;
+    // DD/MM/YYYY (European) when first number ≤ 31 and second ≤ 12
+    if (n1 <= 31 && n2 >= 1 && n2 <= 12) return { day: n1, month: n2 - 1, year };
+    // MM/DD/YYYY (US) fallback
+    if (n1 >= 1 && n1 <= 12 && n2 <= 31) return { day: n2, month: n1 - 1, year };
+  }
+  const isoDash = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoDash) {
+    return { day: Number(isoDash[3]), month: Number(isoDash[2]) - 1, year: Number(isoDash[1]) };
+  }
+
+  // Try localized text: "dim. 10 mai", "10 mai", "May 10", "10 May 2026"
+  const words = value.replace(/[.,]/g, ' ').split(/\s+/).filter(Boolean);
+  let day: number | undefined;
+  let month: number | undefined;
+  let year: number | undefined;
+  for (const word of words) {
+    const num = Number(word);
+    if (Number.isFinite(num) && num >= 1 && num <= 31 && day === undefined) { day = num; continue; }
+    if (Number.isFinite(num) && num >= 1900 && num <= 2100) { year = num; continue; }
+    const m = MONTH_NAMES[word.toLowerCase()];
+    if (m !== undefined) { month = m; continue; }
+  }
+  if (day !== undefined && month !== undefined) return { day, month, year };
+  return null;
+}
+
+function valuesMatchAfterReformat(expected: string, actual: string): boolean {
+  const e = extractDateParts(expected);
+  const a = extractDateParts(actual);
+  if (!e || !a) return false;
+  if (e.day !== a.day || e.month !== a.month) return false;
+  // If both have years, they must match; if only one has a year, accept
+  if (e.year !== undefined && a.year !== undefined && e.year !== a.year) return false;
+  return true;
 }
 
 async function evaluatePostconditions(
@@ -3537,7 +4011,34 @@ async function evaluatePostconditions(
       if (condition.type === 'valueEquals') {
         const resolution = await browserResolveRef(tabId, condition.ref, condition.snapshotId, false);
         const actual = resolution.entry?.text ?? resolution.entry?.name ?? '';
-        results.push({ ok: actual === condition.value, condition, actual });
+        const normalizedActual = actual.replace(/\s+/g, ' ').trim().toLowerCase();
+        const normalizedExpected = (condition.value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const matched = actual === condition.value
+          || normalizedActual === normalizedExpected
+          || normalizedActual.includes(normalizedExpected)
+          || normalizedExpected.includes(normalizedActual)
+          || valuesMatchAfterReformat(normalizedExpected, normalizedActual);
+        results.push({ ok: matched, condition, actual });
+        continue;
+      }
+      if (condition.type === 'downloadAppeared') {
+        const download = await recentDownloadAppeared(condition.value);
+        results.push({ ok: download.ok, condition, actual: download.actual, error: download.error });
+        continue;
+      }
+      if (condition.type === 'dialogClosed') {
+        const normalized = (condition.value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const openDialog = snapshot.elements.some((element) => {
+          if (element.role !== 'dialog' && element.attributes?.['aria-modal'] !== 'true') return false;
+          if (!normalized) return true;
+          return `${element.name ?? ''} ${element.text ?? ''}`.toLowerCase().includes(normalized);
+        });
+        results.push({ ok: !openDialog, condition, actual: openDialog ? 'dialog still visible' : 'closed' });
+        continue;
+      }
+      if (condition.type === 'mediaState') {
+        const media = await readMediaState(tabId);
+        results.push({ ok: media.ok && media.actual === condition.value, condition, actual: media.actual, error: media.error });
       }
     } catch (err: any) {
       results.push({ ok: false, condition, error: err?.message ?? 'Postcondition check failed' });
@@ -3551,12 +4052,142 @@ function postconditionsPassed(results: BrowPostconditionResult[]): boolean {
   return results.every((result) => result.ok);
 }
 
+function normalizeNavigatedUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    parsed.hash = '';
+    if (parsed.pathname.length > 1) {
+      parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    }
+    return parsed.toString();
+  } catch {
+    return value.trim() || undefined;
+  }
+}
+
+function urlsMatchAfterNavigation(actualUrl: string | undefined, expectedUrl: string | undefined): boolean {
+  const normalizedActual = normalizeNavigatedUrl(actualUrl);
+  const normalizedExpected = normalizeNavigatedUrl(expectedUrl);
+  if (!normalizedActual || !normalizedExpected) return false;
+  return normalizedActual === normalizedExpected;
+}
+
+function hasOnlyTextPostconditionFailures(results: BrowPostconditionResult[]): boolean {
+  const failed = results.filter((result) => !result.ok);
+  return failed.length > 0
+    && failed.every((result) => result.condition.type === 'textVisible' || result.condition.type === 'textAbsent');
+}
+
+function getSuccessfulNavigationWarning(params: {
+  beforeSnapshot?: BrowserSnapshot;
+  snapshot: BrowserSnapshot;
+  action: unknown;
+  postconditions: BrowPostconditionResult[];
+}): string | undefined {
+  const clickedHref = (params.action as any)?.clicked?.href as string | undefined;
+  const beforeUrl = params.beforeSnapshot?.url;
+  const afterUrl = params.snapshot.url;
+
+  if (!clickedHref || !beforeUrl || !afterUrl) return undefined;
+  if (normalizeNavigatedUrl(beforeUrl) === normalizeNavigatedUrl(afterUrl)) return undefined;
+  if (!urlsMatchAfterNavigation(afterUrl, clickedHref)) return undefined;
+  if (!hasOnlyTextPostconditionFailures(params.postconditions)) return undefined;
+
+  return 'Click navigated to the clicked href, but the requested text postconditions did not match the destination page. Continue from the returned snapshot or prefer urlIncludes/elementVisible for page-opening clicks.';
+}
+
+function getExpectedClickNavigationHref(
+  action: unknown,
+  beforeSnapshot?: BrowserSnapshot,
+): string | undefined {
+  const clickedHref = (action as any)?.clicked?.href as string | undefined;
+  const beforeUrl = beforeSnapshot?.url;
+  if (!clickedHref || !beforeUrl) return undefined;
+
+  try {
+    const parsedHref = new URL(clickedHref);
+    if (!['http:', 'https:'].includes(parsedHref.protocol)) return undefined;
+    const normalizedHref = normalizeNavigatedUrl(parsedHref.toString());
+    const normalizedBefore = normalizeNavigatedUrl(beforeUrl);
+    if (!normalizedHref || !normalizedBefore || normalizedHref === normalizedBefore) return undefined;
+    return parsedHref.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function shouldRetryProgrammaticClickForNavigation(params: {
+  beforeSnapshot?: BrowserSnapshot;
+  snapshot: BrowserSnapshot;
+  action: unknown;
+}): boolean {
+  const expectedHref = getExpectedClickNavigationHref(params.action, params.beforeSnapshot);
+  const beforeUrl = params.beforeSnapshot?.url;
+  const afterUrl = params.snapshot.url;
+  if (!expectedHref || !beforeUrl || !afterUrl) return false;
+  if (urlsMatchAfterNavigation(afterUrl, expectedHref)) return false;
+  return normalizeNavigatedUrl(beforeUrl) === normalizeNavigatedUrl(afterUrl);
+}
+
+function getMissedClickNavigationError(params: {
+  beforeSnapshot?: BrowserSnapshot;
+  snapshot: BrowserSnapshot;
+  action: unknown;
+}): string | undefined {
+  const expectedHref = getExpectedClickNavigationHref(params.action, params.beforeSnapshot);
+  const beforeUrl = params.beforeSnapshot?.url;
+  const afterUrl = params.snapshot.url;
+  if (!expectedHref || !beforeUrl || !afterUrl) return undefined;
+  if (urlsMatchAfterNavigation(afterUrl, expectedHref)) return undefined;
+  if (normalizeNavigatedUrl(beforeUrl) === normalizeNavigatedUrl(afterUrl)) {
+    return 'Click targeted a navigable link, but the page stayed on the current URL instead of opening the clicked href.';
+  }
+  return 'Click targeted a navigable link, but the page did not reach the clicked href.';
+}
+
+async function navigateTabToClickedHref(
+  tabId: number,
+  href: string,
+  postconditions: BrowActionPostcondition[] | undefined,
+): Promise<{
+  ok: boolean;
+  snapshot?: BrowserSnapshot;
+  postconditions?: BrowPostconditionResult[];
+  error?: string;
+}> {
+  try {
+    await chrome.tabs.update(tabId, { url: href });
+    let snapshot = await snapshotAfterAction(tabId);
+    let results = await evaluatePostconditions(tabId, snapshot, postconditions);
+    if (!postconditionsPassed(results)) {
+      const waited = await waitForClickPostconditions(tabId, snapshot, postconditions);
+      snapshot = waited.snapshot;
+      results = waited.results;
+    }
+    return {
+      ok: true,
+      snapshot,
+      postconditions: results,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: err?.message ?? 'Failed to open the clicked href via tab navigation fallback',
+    };
+  }
+}
+
+function actionKindRequiresActionableRef(actionKind: BrowActionKind): boolean {
+  return actionKind !== 'click';
+}
+
 async function tryReplaySingleTargetAction(params: {
   tabId: number;
   actionKind: Exclude<BrowActionKind, 'fillForm'>;
   options?: BrowserActionOptions;
   trace: BrowActionTrace;
-  execute: (selector: string) => Promise<unknown>;
+  execute: (selector: string, clickMode?: ClickDispatchMode) => Promise<unknown>;
 }): Promise<BrowserActionResult | null> {
   if (!params.options?.intent || params.options.useActionMemory === false) {
     params.trace.cacheStatus = 'disabled';
@@ -3577,7 +4208,11 @@ async function tryReplaySingleTargetAction(params: {
 
   params.trace.cacheStatus = 'hit';
   params.trace.memoryEntryId = lookup.entry.id;
-  const resolved = await browserResolveMemoryTarget(params.tabId, lookup.entry.target, true);
+  const resolved = await browserResolveMemoryTarget(
+    params.tabId,
+    lookup.entry.target,
+    actionKindRequiresActionableRef(params.actionKind),
+  );
   params.trace.matchScore = resolved.matchScore;
   params.trace.preconditions = resolved.preconditions;
   params.trace.snapshotId = resolved.snapshotId;
@@ -3589,17 +4224,133 @@ async function tryReplaySingleTargetAction(params: {
     return null;
   }
 
-  const action = await params.execute(resolved.selector);
-  const snapshot = await snapshotAfterAction(params.tabId);
-  const postconditions = await evaluatePostconditions(params.tabId, snapshot, params.options.postconditions);
+  let action = await params.execute(resolved.selector);
+  let snapshot = await snapshotAfterAction(params.tabId);
+  let postconditions = await evaluatePostconditions(params.tabId, snapshot, params.options.postconditions);
+  if (params.actionKind === 'click' && Boolean((action as any).ok) && !postconditionsPassed(postconditions)) {
+    const waited = await waitForClickPostconditions(params.tabId, snapshot, params.options.postconditions);
+    snapshot = waited.snapshot;
+    postconditions = waited.results;
+    if (postconditionsPassed(postconditions) && waited.waitedMs > 0) {
+      params.trace.recoveryDecision = `Waited ${waited.waitedMs}ms for click postconditions to settle after cached action replay.`;
+    }
+  }
+
+  if (params.actionKind === 'click' && Boolean((action as any).ok) && shouldRetryProgrammaticClickForNavigation({
+    beforeSnapshot: activeSnapshot,
+    snapshot,
+    action,
+  })) {
+    const repairAttempt = await params.execute(resolved.selector, 'programmatic');
+    let repairSnapshot = await snapshotAfterAction(params.tabId);
+    let repairPostconditions = await evaluatePostconditions(params.tabId, repairSnapshot, params.options.postconditions);
+    if (!postconditionsPassed(repairPostconditions)) {
+      const waited = await waitForClickPostconditions(params.tabId, repairSnapshot, params.options.postconditions);
+      repairSnapshot = waited.snapshot;
+      repairPostconditions = waited.results;
+    }
+    action = Boolean((repairAttempt as any).ok)
+      ? {
+        ...(repairAttempt as any),
+        initialAttempt: action,
+      }
+      : {
+        ...(action as any),
+        repairAttempt,
+      };
+    snapshot = repairSnapshot;
+    postconditions = repairPostconditions;
+    params.trace.recoveryDecision = 'Retried click with programmatic dispatch after the initial click did not navigate to the clicked href.';
+  }
+
   params.trace.execution = action as Record<string, unknown>;
   params.trace.postconditions = postconditions;
 
-  if (!Boolean((action as any).ok) || !postconditionsPassed(postconditions)) {
+  const missedNavigationError = params.actionKind === 'click' && Boolean((action as any).ok)
+    ? getMissedClickNavigationError({
+      beforeSnapshot: activeSnapshot,
+      snapshot,
+      action,
+    })
+    : undefined;
+
+  if (params.actionKind === 'click' && Boolean((action as any).ok) && missedNavigationError) {
+    const expectedHref = getExpectedClickNavigationHref(action, activeSnapshot);
+    if (expectedHref) {
+      const fallback = await navigateTabToClickedHref(params.tabId, expectedHref, params.options.postconditions);
+      if (fallback.ok && fallback.snapshot && fallback.postconditions) {
+        action = {
+          ...(action as any),
+          navigationFallback: {
+            ok: true,
+            method: 'tabs.update',
+            url: expectedHref,
+          },
+        };
+        snapshot = fallback.snapshot;
+        postconditions = fallback.postconditions;
+        params.trace.recoveryDecision = 'Opened the clicked href via tab URL navigation after DOM click attempts did not leave the current page.';
+      } else {
+        action = {
+          ...(action as any),
+          navigationFallback: {
+            ok: false,
+            method: 'tabs.update',
+            url: expectedHref,
+            error: fallback.error,
+          },
+        };
+      }
+    }
+  }
+
+  const finalMissedNavigationError = params.actionKind === 'click' && Boolean((action as any).ok)
+    ? getMissedClickNavigationError({
+      beforeSnapshot: activeSnapshot,
+      snapshot,
+      action,
+    })
+    : undefined;
+
+  const navigationWarning = params.actionKind === 'click' && Boolean((action as any).ok) && !finalMissedNavigationError
+    ? getSuccessfulNavigationWarning({
+      beforeSnapshot: activeSnapshot,
+      snapshot,
+      action,
+      postconditions,
+    })
+    : undefined;
+
+  if (navigationWarning) {
+    params.trace.recoveryDecision = navigationWarning;
+    return {
+      ok: true,
+      action,
+      snapshot,
+      cacheStatus: params.trace.cacheStatus,
+      trace: completeTrace(params.trace),
+      postconditions,
+      repairNeeded: false,
+      warning: navigationWarning,
+      resolved: {
+        ok: true,
+        ref: resolved.ref,
+        snapshotId: resolved.snapshotId,
+        selector: resolved.selector,
+        entry: resolved.entry,
+        backend: resolved.backend,
+        confidence: resolved.confidence,
+        matchScore: resolved.matchScore,
+        preconditions: resolved.preconditions,
+      },
+    };
+  }
+
+  if (!Boolean((action as any).ok) || finalMissedNavigationError || !postconditionsPassed(postconditions)) {
     params.trace.cacheStatus = 'stale';
     params.trace.recoveryDecision = !Boolean((action as any).ok)
       ? ((action as any).error ?? 'cached action execution failed')
-      : 'cached action postcondition failed';
+      : (finalMissedNavigationError ?? 'cached action postcondition failed');
     return {
       ok: false,
       action,
@@ -3655,40 +4406,232 @@ async function rememberSingleTargetAction(params: {
 
 export async function browserClick(
   tabId: number,
-  ref: string,
+  ref?: string,
   snapshotId?: string,
   options: BrowserActionOptions = {},
 ): Promise<BrowserActionResult> {
   const trace = createActionTrace(tabId, 'click', options);
+  trace.backend = 'mv3-dom';
   const replayed = await tryReplaySingleTargetAction({
     tabId,
     actionKind: 'click',
     options,
     trace,
-    execute: (selector) => tabsClick(tabId, selector),
+    execute: (selector, clickMode) => tabsClick(tabId, selector, options.clickPoint, clickMode),
   });
   if (replayed) return replayed;
 
   await waitForTabSettled(tabId);
-  const resolved = await browserResolveRef(tabId, ref, snapshotId, true);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  const precheckedPostconditions = await evaluatePostconditions(tabId, beforeSnapshot, options.postconditions);
+  if (shouldRepairForSatisfiedValuePostconditions(precheckedPostconditions)) {
+    trace.execution = {
+      ok: false,
+      skipped: {
+        reason: 'Requested value postconditions were already satisfied before click.',
+      },
+    };
+    trace.postconditions = precheckedPostconditions;
+    trace.recoveryDecision = SATISFIED_VALUE_REPAIR_ERROR;
+    return {
+      ok: false,
+      action: trace.execution,
+      beforeSnapshot,
+      snapshot: beforeSnapshot,
+      backend: 'mv3-dom',
+      cacheStatus: trace.cacheStatus,
+      trace: completeTrace(trace),
+      postconditions: precheckedPostconditions,
+      repairNeeded: true,
+      error: SATISFIED_VALUE_REPAIR_ERROR,
+    };
+  }
+
+  if (shouldSkipActionForSatisfiedPostconditions(precheckedPostconditions)) {
+    trace.execution = {
+      ok: true,
+      skipped: {
+        reason: 'Requested postconditions were already satisfied before click.',
+      },
+    };
+    trace.postconditions = precheckedPostconditions;
+    trace.recoveryDecision = 'Skipped click because the requested end state was already satisfied.';
+    return {
+      ok: true,
+      action: trace.execution,
+      beforeSnapshot,
+      snapshot: beforeSnapshot,
+      backend: 'mv3-dom',
+      cacheStatus: trace.cacheStatus,
+      trace: completeTrace(trace),
+      postconditions: precheckedPostconditions,
+      repairNeeded: false,
+    };
+  }
+
+  let resolved = await resolveActionTarget({
+    tabId,
+    ref,
+    snapshotId,
+    requireActionable: actionKindRequiresActionableRef('click'),
+    actionKind: 'click',
+    options,
+    beforeSnapshot,
+  });
+  if (resolved.ok && shouldRequireActionableClickResolution(resolved.entry)) {
+    resolved = await resolveActionTarget({
+      tabId,
+      ref: resolved.ref ?? ref,
+      snapshotId: resolved.snapshotId ?? snapshotId,
+      requireActionable: true,
+      actionKind: 'click',
+      options,
+      beforeSnapshot,
+    });
+  }
   trace.resolvedRef = resolved.ref;
   trace.originalRef = resolved.originalRef ?? ref;
   trace.snapshotId = resolved.snapshotId;
   trace.matchScore = resolved.matchScore;
+  trace.confidence = resolved.confidence ?? resolved.matchScore;
   trace.preconditions = resolved.preconditions;
+  trace.recoveryCandidates = resolved.repairCandidates;
   if (!resolved.ok || !resolved.selector) {
     trace.recoveryDecision = resolved.error ?? `Unable to resolve ref ${ref}`;
-    return { ok: false, resolved, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
+    return { ok: false, resolved, beforeSnapshot, backend: 'mv3-dom', confidence: trace.confidence, recoveryCandidates: resolved.repairCandidates, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
   }
 
-  const action = await tabsClick(tabId, resolved.selector);
-  const snapshot = await snapshotAfterAction(tabId);
-  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  const unsafePromotionError = getUnsafePromotedClickResolutionError(resolved);
+  if (unsafePromotionError) {
+    trace.recoveryDecision = unsafePromotionError;
+    return {
+      ok: false,
+      resolved,
+      beforeSnapshot,
+      backend: 'mv3-dom',
+      confidence: trace.confidence,
+      recoveryCandidates: resolved.repairCandidates,
+      cacheStatus: trace.cacheStatus,
+      trace: completeTrace(trace),
+      error: unsafePromotionError,
+    };
+  }
+
+  const unsafeEditableClickError = getUnsafeEditableClickIntentError(resolved.entry, options.intent);
+  if (unsafeEditableClickError) {
+    trace.recoveryDecision = unsafeEditableClickError;
+    return {
+      ok: false,
+      resolved,
+      beforeSnapshot,
+      backend: 'mv3-dom',
+      confidence: trace.confidence,
+      recoveryCandidates: resolved.repairCandidates,
+      cacheStatus: trace.cacheStatus,
+      trace: completeTrace(trace),
+      error: unsafeEditableClickError,
+    };
+  }
+
+  let action = await tabsClick(tabId, resolved.selector, options.clickPoint);
+  let snapshot = await snapshotAfterAction(tabId);
+  let postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  if (Boolean((action as any).ok) && !postconditionsPassed(postconditions)) {
+    const waited = await waitForClickPostconditions(tabId, snapshot, options.postconditions);
+    snapshot = waited.snapshot;
+    postconditions = waited.results;
+    if (postconditionsPassed(postconditions) && waited.waitedMs > 0) {
+      trace.recoveryDecision = `Waited ${waited.waitedMs}ms for click postconditions to settle after the initial post-click snapshot.`;
+    }
+  }
+
+  if (Boolean((action as any).ok) && shouldRetryProgrammaticClickForNavigation({
+    beforeSnapshot,
+    snapshot,
+    action,
+  })) {
+    const repairAttempt = await tabsClick(tabId, resolved.selector, options.clickPoint, 'programmatic');
+    let repairSnapshot = await snapshotAfterAction(tabId);
+    let repairPostconditions = await evaluatePostconditions(tabId, repairSnapshot, options.postconditions);
+    if (!postconditionsPassed(repairPostconditions)) {
+      const waited = await waitForClickPostconditions(tabId, repairSnapshot, options.postconditions);
+      repairSnapshot = waited.snapshot;
+      repairPostconditions = waited.results;
+    }
+    action = Boolean((repairAttempt as any).ok)
+      ? {
+        ...(repairAttempt as any),
+        initialAttempt: action,
+      }
+      : {
+        ...(action as any),
+        repairAttempt,
+      };
+    snapshot = repairSnapshot;
+    postconditions = repairPostconditions;
+    trace.recoveryDecision = 'Retried click with programmatic dispatch after the initial click did not navigate to the clicked href.';
+  }
+
   trace.execution = action as Record<string, unknown>;
   trace.postconditions = postconditions;
   const actionOk = Boolean((action as any).ok);
   const postconditionsOk = postconditionsPassed(postconditions);
-  if (actionOk && postconditionsOk) {
+  const missedNavigationError = actionOk
+    ? getMissedClickNavigationError({
+      beforeSnapshot,
+      snapshot,
+      action,
+    })
+    : undefined;
+
+  if (actionOk && missedNavigationError) {
+    const expectedHref = getExpectedClickNavigationHref(action, beforeSnapshot);
+    if (expectedHref) {
+      const fallback = await navigateTabToClickedHref(tabId, expectedHref, options.postconditions);
+      if (fallback.ok && fallback.snapshot && fallback.postconditions) {
+        action = {
+          ...(action as any),
+          navigationFallback: {
+            ok: true,
+            method: 'tabs.update',
+            url: expectedHref,
+          },
+        };
+        snapshot = fallback.snapshot;
+        postconditions = fallback.postconditions;
+        trace.recoveryDecision = 'Opened the clicked href via tab URL navigation after DOM click attempts did not leave the current page.';
+      } else {
+        action = {
+          ...(action as any),
+          navigationFallback: {
+            ok: false,
+            method: 'tabs.update',
+            url: expectedHref,
+            error: fallback.error,
+          },
+        };
+      }
+    }
+  }
+
+  const finalPostconditionsOk = postconditionsPassed(postconditions);
+  const finalMissedNavigationError = actionOk
+    ? getMissedClickNavigationError({
+      beforeSnapshot,
+      snapshot,
+      action,
+    })
+    : undefined;
+  const navigationWarning = actionOk && !finalMissedNavigationError
+    ? getSuccessfulNavigationWarning({
+      beforeSnapshot,
+      snapshot,
+      action,
+      postconditions,
+    })
+    : undefined;
+
+  if (actionOk && !finalMissedNavigationError && (finalPostconditionsOk || navigationWarning)) {
     const storedStatus = await rememberSingleTargetAction({
       actionKind: 'click',
       options,
@@ -3698,30 +4641,44 @@ export async function browserClick(
     });
     if (trace.cacheStatus !== 'disabled') trace.cacheStatus = storedStatus;
   }
+
+  if (navigationWarning) {
+    trace.recoveryDecision = navigationWarning;
+  }
+
+  if (finalMissedNavigationError) {
+    trace.recoveryDecision = finalMissedNavigationError;
+  }
+
   return {
-    ok: actionOk && postconditionsOk,
+    ok: actionOk && !finalMissedNavigationError && (finalPostconditionsOk || Boolean(navigationWarning)),
     action,
     resolved,
+    beforeSnapshot,
     snapshot,
+    backend: 'mv3-dom',
+    confidence: trace.confidence,
     cacheStatus: trace.cacheStatus,
     trace: completeTrace(trace),
     postconditions,
-    repairNeeded: actionOk && !postconditionsOk,
+    repairNeeded: actionOk && (Boolean(finalMissedNavigationError) || (!finalPostconditionsOk && !navigationWarning)),
+    warning: navigationWarning,
     error: actionOk
-      ? (postconditionsOk ? undefined : 'Click postcondition failed')
+      ? (finalMissedNavigationError ?? (finalPostconditionsOk || navigationWarning ? undefined : 'Click postcondition failed'))
       : ((action as any).error ?? 'Click failed'),
   };
 }
 
 export async function browserHover(
   tabId: number,
-  ref: string,
+  ref?: string,
   snapshotId?: string,
   message?: string,
   durationMs?: number,
   options: BrowserActionOptions = {},
 ): Promise<BrowserActionResult> {
   const trace = createActionTrace(tabId, 'hover', options);
+  trace.backend = 'mv3-dom';
   const replayed = await tryReplaySingleTargetAction({
     tabId,
     actionKind: 'hover',
@@ -3732,15 +4689,18 @@ export async function browserHover(
   if (replayed) return replayed;
 
   await waitForTabSettled(tabId);
-  const resolved = await browserResolveRef(tabId, ref, snapshotId, true);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  const resolved = await resolveActionTarget({ tabId, ref, snapshotId, requireActionable: true, actionKind: 'hover', options, beforeSnapshot });
   trace.resolvedRef = resolved.ref;
   trace.originalRef = resolved.originalRef ?? ref;
   trace.snapshotId = resolved.snapshotId;
   trace.matchScore = resolved.matchScore;
+  trace.confidence = resolved.confidence ?? resolved.matchScore;
   trace.preconditions = resolved.preconditions;
+  trace.recoveryCandidates = resolved.repairCandidates;
   if (!resolved.ok || !resolved.selector) {
     trace.recoveryDecision = resolved.error ?? `Unable to resolve ref ${ref}`;
-    return { ok: false, resolved, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
+    return { ok: false, resolved, beforeSnapshot, backend: 'mv3-dom', confidence: trace.confidence, recoveryCandidates: resolved.repairCandidates, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
   }
 
   const action = await tabsHover(tabId, resolved.selector, message, durationMs);
@@ -3764,7 +4724,10 @@ export async function browserHover(
     ok: actionOk && postconditionsOk,
     action,
     resolved,
+    beforeSnapshot,
     snapshot,
+    backend: 'mv3-dom',
+    confidence: trace.confidence,
     cacheStatus: trace.cacheStatus,
     trace: completeTrace(trace),
     postconditions,
@@ -3777,13 +4740,14 @@ export async function browserHover(
 
 export async function browserType(
   tabId: number,
-  ref: string,
+  ref: string | undefined,
   text: string,
   submit = false,
   snapshotId?: string,
   options: BrowserActionOptions = {},
 ): Promise<BrowserActionResult> {
   const trace = createActionTrace(tabId, 'type', options);
+  trace.backend = 'mv3-dom';
   const replayed = await tryReplaySingleTargetAction({
     tabId,
     actionKind: 'type',
@@ -3794,15 +4758,64 @@ export async function browserType(
   if (replayed) return replayed;
 
   await waitForTabSettled(tabId);
-  const resolved = await browserResolveRef(tabId, ref, snapshotId, false);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  const precheckedPostconditions = await evaluatePostconditions(tabId, beforeSnapshot, options.postconditions);
+  if (shouldRepairForSatisfiedValuePostconditions(precheckedPostconditions)) {
+    trace.execution = {
+      ok: false,
+      skipped: {
+        reason: 'Requested value postconditions were already satisfied before type.',
+      },
+    };
+    trace.postconditions = precheckedPostconditions;
+    trace.recoveryDecision = SATISFIED_VALUE_REPAIR_ERROR;
+    return {
+      ok: false,
+      action: trace.execution,
+      beforeSnapshot,
+      snapshot: beforeSnapshot,
+      backend: 'mv3-dom',
+      cacheStatus: trace.cacheStatus,
+      trace: completeTrace(trace),
+      postconditions: precheckedPostconditions,
+      repairNeeded: true,
+      error: SATISFIED_VALUE_REPAIR_ERROR,
+    };
+  }
+
+  if (shouldSkipActionForSatisfiedPostconditions(precheckedPostconditions)) {
+    trace.execution = {
+      ok: true,
+      skipped: {
+        reason: 'Requested postconditions were already satisfied before type.',
+      },
+    };
+    trace.postconditions = precheckedPostconditions;
+    trace.recoveryDecision = 'Skipped type because the requested end state was already satisfied.';
+    return {
+      ok: true,
+      action: trace.execution,
+      beforeSnapshot,
+      snapshot: beforeSnapshot,
+      backend: 'mv3-dom',
+      cacheStatus: trace.cacheStatus,
+      trace: completeTrace(trace),
+      postconditions: precheckedPostconditions,
+      repairNeeded: false,
+    };
+  }
+
+  const resolved = await resolveActionTarget({ tabId, ref, snapshotId, requireActionable: false, actionKind: 'type', options, beforeSnapshot });
   trace.resolvedRef = resolved.ref;
   trace.originalRef = resolved.originalRef ?? ref;
   trace.snapshotId = resolved.snapshotId;
   trace.matchScore = resolved.matchScore;
+  trace.confidence = resolved.confidence ?? resolved.matchScore;
   trace.preconditions = resolved.preconditions;
+  trace.recoveryCandidates = resolved.repairCandidates;
   if (!resolved.ok || !resolved.selector) {
     trace.recoveryDecision = resolved.error ?? `Unable to resolve ref ${ref}`;
-    return { ok: false, resolved, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
+    return { ok: false, resolved, beforeSnapshot, backend: 'mv3-dom', confidence: trace.confidence, recoveryCandidates: resolved.repairCandidates, cacheStatus: trace.cacheStatus, trace: completeTrace(trace), error: trace.recoveryDecision };
   }
 
   const action = await tabsType(tabId, resolved.selector, text, submit);
@@ -3826,7 +4839,10 @@ export async function browserType(
     ok: actionOk && postconditionsOk,
     action,
     resolved,
+    beforeSnapshot,
     snapshot,
+    backend: 'mv3-dom',
+    confidence: trace.confidence,
     cacheStatus: trace.cacheStatus,
     trace: completeTrace(trace),
     postconditions,
@@ -3846,6 +4862,7 @@ export async function browserFillForm(
   options: BrowserActionOptions = {},
 ): Promise<BrowserActionResult> {
   const trace = createActionTrace(tabId, 'fillForm', options);
+  trace.backend = 'mv3-dom';
   if (options.intent && options.useActionMemory !== false) {
     const activeSnapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 1 });
     const lookup = await findActionMemoryEntry({
@@ -3937,11 +4954,23 @@ export async function browserFillForm(
   }
 
   await waitForTabSettled(tabId);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
   const resolvedFields: FormFillField[] = [];
   const resolutions: BrowserRefResolution[] = [];
 
   for (const field of fields) {
-    const resolved = await browserResolveRef(tabId, field.ref, snapshotId, true);
+    const resolved = await resolveActionTarget({
+      tabId,
+      ref: field.ref,
+      snapshotId,
+      requireActionable: true,
+      actionKind: 'fillForm',
+      options: {
+        ...options,
+        targetEvidence: field.targetEvidence ?? options.targetEvidence,
+      },
+      beforeSnapshot,
+    });
     resolutions.push(resolved);
     if (!resolved.ok || !resolved.selector) {
       trace.resolvedRef = resolved.ref;
@@ -3951,6 +4980,10 @@ export async function browserFillForm(
       return {
         ok: false,
         resolved,
+        beforeSnapshot,
+        backend: 'mv3-dom',
+        confidence: resolved.confidence ?? resolved.matchScore,
+        recoveryCandidates: resolved.repairCandidates,
         cacheStatus: trace.cacheStatus,
         trace: completeTrace(trace),
         error: trace.recoveryDecision,
@@ -3966,7 +4999,7 @@ export async function browserFillForm(
   let submitSelector: string | undefined;
   let submitResolution: BrowserRefResolution | undefined;
   if (submitRef) {
-    submitResolution = await browserResolveRef(tabId, submitRef, snapshotId, true);
+    submitResolution = await resolveActionTarget({ tabId, ref: submitRef, snapshotId, requireActionable: true, actionKind: 'click', options, beforeSnapshot });
     if (!submitResolution.ok || !submitResolution.selector) {
       trace.resolvedRef = submitResolution.ref;
       trace.snapshotId = submitResolution.snapshotId;
@@ -3975,6 +5008,10 @@ export async function browserFillForm(
       return {
         ok: false,
         resolved: submitResolution,
+        beforeSnapshot,
+        backend: 'mv3-dom',
+        confidence: submitResolution.confidence ?? submitResolution.matchScore,
+        recoveryCandidates: submitResolution.repairCandidates,
         cacheStatus: trace.cacheStatus,
         trace: completeTrace(trace),
         error: trace.recoveryDecision,
@@ -4018,7 +5055,10 @@ export async function browserFillForm(
       resolvedFields: resolutions,
       submitResolution,
     },
+    beforeSnapshot,
     snapshot,
+    backend: 'mv3-dom',
+    confidence: Math.min(...resolutions.map((resolution) => resolution.confidence ?? resolution.matchScore ?? 100)),
     cacheStatus: trace.cacheStatus,
     trace: completeTrace(trace),
     postconditions,
@@ -4026,5 +5066,467 @@ export async function browserFillForm(
     error: actionOk
       ? (postconditionsOk ? undefined : 'Form fill postcondition failed')
       : ((action as any).error ?? 'Form fill failed'),
+  };
+}
+
+export async function browserDrag(
+  tabId: number,
+  sourceRef: string | undefined,
+  destinationRef: string | undefined,
+  snapshotId?: string,
+  options: BrowserDragOptions = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'drag', options);
+  trace.backend = 'mv3-dom';
+  await waitForTabSettled(tabId);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  const source = await resolveActionTarget({
+    tabId,
+    ref: sourceRef,
+    snapshotId,
+    requireActionable: false,
+    actionKind: 'drag',
+    options,
+    beforeSnapshot,
+  });
+  if (!source.ok || !source.selector) {
+    trace.recoveryDecision = source.error ?? 'Unable to resolve drag source';
+    trace.recoveryCandidates = source.repairCandidates;
+    return {
+      ok: false,
+      resolved: source,
+      beforeSnapshot,
+      backend: 'mv3-dom',
+      recoveryCandidates: source.repairCandidates,
+      trace: completeTrace(trace),
+      error: trace.recoveryDecision,
+    };
+  }
+
+  const destination = await resolveActionTarget({
+    tabId,
+    ref: destinationRef,
+    snapshotId,
+    requireActionable: false,
+    actionKind: 'drag',
+    options: {
+      ...options,
+      targetEvidence: options.destinationTargetEvidence,
+    },
+    beforeSnapshot,
+  });
+  if (!destination.ok || !destination.selector) {
+    trace.recoveryDecision = destination.error ?? 'Unable to resolve drag destination';
+    trace.recoveryCandidates = destination.repairCandidates;
+    return {
+      ok: false,
+      resolved: destination,
+      beforeSnapshot,
+      backend: 'mv3-dom',
+      recoveryCandidates: destination.repairCandidates,
+      trace: completeTrace(trace),
+      error: trace.recoveryDecision,
+    };
+  }
+
+  trace.resolvedRef = source.ref;
+  trace.snapshotId = source.snapshotId;
+  trace.matchScore = Math.min(source.matchScore ?? 100, destination.matchScore ?? 100);
+  trace.confidence = trace.matchScore;
+  trace.preconditions = { source: source.preconditions, destination: destination.preconditions };
+  const action = await tabsDrag(tabId, source.selector, destination.selector, {
+    sourceClickPoint: options.sourceClickPoint,
+    destinationClickPoint: options.destinationClickPoint,
+    pointerPath: options.pointerPath,
+    durationMs: options.durationMs,
+  });
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  const actionOk = Boolean((action as any).ok);
+  const postconditionsOk = postconditionsPassed(postconditions);
+  return {
+    ok: actionOk && postconditionsOk,
+    action: {
+      ...action,
+      source,
+      destination,
+    },
+    resolved: source,
+    beforeSnapshot,
+    snapshot,
+    backend: 'mv3-dom',
+    confidence: trace.confidence,
+    trace: completeTrace(trace),
+    postconditions,
+    repairNeeded: actionOk && !postconditionsOk,
+    error: actionOk
+      ? (postconditionsOk ? undefined : 'Drag postcondition failed')
+      : ((action as any).error ?? 'Drag failed'),
+  };
+}
+
+export async function browserScroll(
+  tabId: number,
+  options: BrowserActionOptions & {
+    ref?: string;
+    snapshotId?: string;
+    deltaX?: number;
+    deltaY?: number;
+    top?: number;
+    left?: number;
+  } = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'scroll', options);
+  trace.backend = 'mv3-dom';
+  await waitForTabSettled(tabId);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  let selector: string | undefined;
+  let resolved: BrowserRefResolution | undefined;
+  if (options.ref || options.targetEvidence) {
+    resolved = await resolveActionTarget({
+      tabId,
+      ref: options.ref,
+      snapshotId: options.snapshotId,
+      requireActionable: false,
+      actionKind: 'scroll',
+      options,
+      beforeSnapshot,
+    });
+    if (!resolved.ok || !resolved.selector) {
+      trace.recoveryDecision = resolved.error ?? 'Unable to resolve scroll target';
+      trace.recoveryCandidates = resolved.repairCandidates;
+      return {
+        ok: false,
+        resolved,
+        beforeSnapshot,
+        backend: 'mv3-dom',
+        recoveryCandidates: resolved.repairCandidates,
+        trace: completeTrace(trace),
+        error: trace.recoveryDecision,
+      };
+    }
+    selector = resolved.selector;
+  }
+
+  const action = await tabsScroll(tabId, {
+    selector,
+    deltaX: options.deltaX,
+    deltaY: options.deltaY ?? 650,
+    top: options.top,
+    left: options.left,
+  });
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  const actionOk = Boolean((action as any).ok);
+  const postconditionsOk = postconditionsPassed(postconditions);
+  return {
+    ok: actionOk && postconditionsOk,
+    action,
+    resolved,
+    beforeSnapshot,
+    snapshot,
+    backend: 'mv3-dom',
+    trace: completeTrace(trace),
+    postconditions,
+    repairNeeded: actionOk && !postconditionsOk,
+    error: actionOk
+      ? (postconditionsOk ? undefined : 'Scroll postcondition failed')
+      : ((action as any).error ?? 'Scroll failed'),
+  };
+}
+
+export async function browserKey(
+  tabId: number,
+  options: BrowserActionOptions & {
+    ref?: string;
+    snapshotId?: string;
+    key?: string;
+    code?: string;
+    text?: string;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+  } = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'key', options);
+  trace.backend = 'mv3-dom';
+  await waitForTabSettled(tabId);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  let selector: string | undefined;
+  let resolved: BrowserRefResolution | undefined;
+  if (options.ref || options.targetEvidence) {
+    resolved = await resolveActionTarget({
+      tabId,
+      ref: options.ref,
+      snapshotId: options.snapshotId,
+      requireActionable: false,
+      actionKind: 'key',
+      options,
+      beforeSnapshot,
+    });
+    if (!resolved.ok || !resolved.selector) {
+      trace.recoveryDecision = resolved.error ?? 'Unable to resolve key target';
+      trace.recoveryCandidates = resolved.repairCandidates;
+      return {
+        ok: false,
+        resolved,
+        beforeSnapshot,
+        backend: 'mv3-dom',
+        recoveryCandidates: resolved.repairCandidates,
+        trace: completeTrace(trace),
+        error: trace.recoveryDecision,
+      };
+    }
+    selector = resolved.selector;
+  }
+
+  const initialAction = await tabsKey(tabId, {
+    selector,
+    key: options.key,
+    code: options.code,
+    text: options.text,
+    altKey: options.altKey,
+    ctrlKey: options.ctrlKey,
+    metaKey: options.metaKey,
+    shiftKey: options.shiftKey,
+  });
+  let action: { ok: boolean; keyed?: unknown; error?: string; initialAttempt?: unknown; repairAttempt?: unknown } = initialAction;
+  let snapshot = await snapshotAfterAction(tabId);
+  let postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+
+  if (Boolean((initialAction as any).ok) && shouldRetryBodyMediaKey({
+    selector,
+    key: options.key,
+    code: options.code,
+    text: options.text,
+    postconditions: options.postconditions,
+    postconditionResults: postconditions,
+    targetSelector: (initialAction as any)?.keyed?.target?.selector,
+    targetTagName: (initialAction as any)?.keyed?.target?.tagName,
+  })) {
+    const repairAttempt = await tabsKey(tabId, {
+      selector: 'body',
+      key: options.key,
+      code: options.code,
+      text: options.text,
+      altKey: options.altKey,
+      ctrlKey: options.ctrlKey,
+      metaKey: options.metaKey,
+      shiftKey: options.shiftKey,
+    });
+    const repairSnapshot = await snapshotAfterAction(tabId);
+    const repairPostconditions = await evaluatePostconditions(tabId, repairSnapshot, options.postconditions);
+    trace.recoveryDecision = 'Retried key input on document.body after media postcondition failed on the initial target.';
+
+    action = Boolean((repairAttempt as any).ok)
+      ? {
+        ...(repairAttempt as any),
+        initialAttempt: initialAction,
+      }
+      : {
+        ...(initialAction as any),
+        repairAttempt,
+      };
+    snapshot = repairSnapshot;
+    postconditions = repairPostconditions;
+  }
+
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  const actionOk = Boolean((action as any).ok);
+  const postconditionsOk = postconditionsPassed(postconditions);
+  return {
+    ok: actionOk && postconditionsOk,
+    action,
+    resolved,
+    beforeSnapshot,
+    snapshot,
+    backend: 'mv3-dom',
+    trace: completeTrace(trace),
+    postconditions,
+    repairNeeded: actionOk && !postconditionsOk,
+    error: actionOk
+      ? (postconditionsOk ? undefined : 'Key postcondition failed')
+      : ((action as any).error ?? 'Key action failed'),
+  };
+}
+
+export async function browserUploadFile(
+  tabId: number,
+  ref: string | undefined,
+  fileName?: string,
+  filePath?: string,
+  snapshotId?: string,
+  options: BrowserActionOptions = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'upload', options);
+  trace.backend = options.backendPreference === 'local-helper' ? 'local-helper' : 'mv3-dom';
+  await waitForTabSettled(tabId);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  const resolved = await resolveActionTarget({ tabId, ref, snapshotId, requireActionable: false, actionKind: 'upload', options, beforeSnapshot });
+  if (!resolved.ok || !resolved.selector) {
+    trace.recoveryDecision = resolved.error ?? 'Unable to resolve upload control';
+    trace.recoveryCandidates = resolved.repairCandidates;
+    return {
+      ok: false,
+      resolved,
+      beforeSnapshot,
+      backend: trace.backend,
+      recoveryCandidates: resolved.repairCandidates,
+      trace: completeTrace(trace),
+      error: trace.recoveryDecision,
+    };
+  }
+
+  const action = await tabsUploadFile(tabId, resolved.selector, fileName, filePath);
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions);
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  return {
+    ok: Boolean((action as any).ok) && postconditionsPassed(postconditions),
+    action,
+    resolved,
+    beforeSnapshot,
+    snapshot,
+    backend: (action as any).backend ?? trace.backend,
+    trace: completeTrace(trace),
+    postconditions,
+    helperRequired: Boolean((action as any).helperRequired),
+    error: (action as any).error,
+  };
+}
+
+export async function browserHandleDialog(
+  tabId: number,
+  options: BrowserActionOptions & {
+    ref?: string;
+    snapshotId?: string;
+    action?: 'accept' | 'dismiss' | 'close';
+    text?: string;
+  } = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'handleDialog', options);
+  trace.backend = options.backendPreference === 'local-helper' ? 'local-helper' : 'mv3-dom';
+  await waitForTabSettled(tabId);
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  let selector: string | undefined;
+  let resolved: BrowserRefResolution | undefined;
+  if (options.ref || options.targetEvidence) {
+    resolved = await resolveActionTarget({
+      tabId,
+      ref: options.ref,
+      snapshotId: options.snapshotId,
+      requireActionable: false,
+      actionKind: 'handleDialog',
+      options,
+      beforeSnapshot,
+    });
+    if (!resolved.ok || !resolved.selector) {
+      trace.recoveryDecision = resolved.error ?? 'Unable to resolve dialog target';
+      return {
+        ok: false,
+        resolved,
+        beforeSnapshot,
+        backend: trace.backend,
+        recoveryCandidates: resolved.repairCandidates,
+        trace: completeTrace(trace),
+        error: trace.recoveryDecision,
+      };
+    }
+    selector = resolved.selector;
+  }
+
+  const action = await tabsHandleDialog(tabId, {
+    selector,
+    action: options.action ?? 'accept',
+    text: options.text,
+  });
+  const snapshot = await snapshotAfterAction(tabId);
+  const postconditions = await evaluatePostconditions(tabId, snapshot, options.postconditions ?? [{ type: 'dialogClosed', value: options.text }]);
+  trace.execution = action as Record<string, unknown>;
+  trace.postconditions = postconditions;
+  return {
+    ok: Boolean((action as any).ok) && postconditionsPassed(postconditions),
+    action,
+    resolved,
+    beforeSnapshot,
+    snapshot,
+    backend: (action as any).backend ?? trace.backend,
+    trace: completeTrace(trace),
+    postconditions,
+    helperRequired: Boolean((action as any).helperRequired),
+    error: (action as any).error,
+  };
+}
+
+export async function browserWaitFor(
+  tabId: number,
+  postconditions: BrowActionPostcondition[],
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'wait');
+  trace.backend = 'mv3-dom';
+  const beforeSnapshot = await captureActionBeforeSnapshot(tabId);
+  const timeoutMs = Math.max(250, Math.min(Math.floor(options.timeoutMs ?? 5000), 60000));
+  const pollMs = Math.max(100, Math.min(Math.floor(options.pollMs ?? 250), 2000));
+  const startedAt = Date.now();
+  let snapshot = beforeSnapshot;
+  let results = await evaluatePostconditions(tabId, snapshot, postconditions);
+
+  while (!postconditionsPassed(results) && Date.now() - startedAt < timeoutMs) {
+    await delay(pollMs);
+    snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 80 });
+    results = await evaluatePostconditions(tabId, snapshot, postconditions);
+  }
+
+  trace.postconditions = results;
+  trace.execution = { waitedMs: Date.now() - startedAt, timeoutMs, pollMs };
+  return {
+    ok: postconditionsPassed(results),
+    action: trace.execution,
+    beforeSnapshot,
+    snapshot,
+    backend: 'mv3-dom',
+    trace: completeTrace(trace),
+    postconditions: results,
+    error: postconditionsPassed(results) ? undefined : 'Timed out waiting for postconditions',
+  };
+}
+
+export async function browserDownloadWait(
+  tabId: number,
+  options: { filenameIncludes?: string; timeoutMs?: number; pollMs?: number } = {},
+): Promise<BrowserActionResult> {
+  const trace = createActionTrace(tabId, 'downloadWait');
+  trace.backend = 'mv3-dom';
+  const beforeSnapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 20 });
+  const timeoutMs = Math.max(250, Math.min(Math.floor(options.timeoutMs ?? 30000), 120000));
+  const pollMs = Math.max(250, Math.min(Math.floor(options.pollMs ?? 500), 5000));
+  const startedAt = Date.now();
+  let download = await recentDownloadAppeared(options.filenameIncludes);
+  while (!download.ok && Date.now() - startedAt < timeoutMs) {
+    await delay(pollMs);
+    download = await recentDownloadAppeared(options.filenameIncludes);
+  }
+  const snapshot = await browserSnapshot(tabId, { mode: 'compact', maxElements: 20 });
+  const condition: BrowActionPostcondition = { type: 'downloadAppeared', value: options.filenameIncludes };
+  const postconditions = [{ ok: download.ok, condition, actual: download.actual, error: download.error }];
+  trace.postconditions = postconditions;
+  trace.execution = { waitedMs: Date.now() - startedAt, timeoutMs, pollMs, filenameIncludes: options.filenameIncludes };
+  return {
+    ok: download.ok,
+    action: trace.execution,
+    beforeSnapshot,
+    snapshot,
+    backend: 'mv3-dom',
+    trace: completeTrace(trace),
+    postconditions,
+    error: download.ok ? undefined : (download.error ?? 'Timed out waiting for download'),
   };
 }

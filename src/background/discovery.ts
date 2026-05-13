@@ -23,14 +23,17 @@ function createRegistryEntry(
   };
 }
 
-async function ensureBridgeScripts(tabId: number): Promise<void> {
+export async function ensureBridgeScripts(tabId: number, options: { strict?: boolean } = {}): Promise<void> {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['page-bridge.js'],
       world: 'MAIN',
     });
-  } catch {
+  } catch (err: any) {
+    if (options.strict) {
+      throw new Error(err?.message ?? 'Failed to inject page bridge');
+    }
     // page-bridge may already be injected
   }
 
@@ -39,7 +42,10 @@ async function ensureBridgeScripts(tabId: number): Promise<void> {
       target: { tabId },
       files: ['content-script.js'],
     });
-  } catch {
+  } catch (err: any) {
+    if (options.strict) {
+      throw new Error(err?.message ?? 'Failed to inject content script');
+    }
     // content script may already be injected via manifest
   }
 }
@@ -117,4 +123,3 @@ export async function runDiscovery(tabId: number): Promise<void> {
     broadcastRegistryUpdate(tabId, entry);
   }
 }
-

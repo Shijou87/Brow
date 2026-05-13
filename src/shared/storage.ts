@@ -5,6 +5,8 @@ import {
   DEFAULT_OPENAI_FIELDS,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_VLM_CONFIG,
+  normalizeContextWindow,
+  normalizePreferredOpenAiModel,
   normalizeRecursionLimit,
   type LLMProviderMode,
   type ProviderFields,
@@ -18,6 +20,10 @@ export const DISABLED_TOOLS_STORAGE_KEY = 'agent-webmcp-disabled-tools';
 export const CONVERSATIONS_STORAGE_KEY = 'agent-webmcp-conversations';
 export const MCP_SERVERS_STORAGE_KEY = 'agent-webmcp-mcp-servers';
 export const SKILL_REGISTRY_STORAGE_KEY = 'agent-webmcp-skills';
+export const DOMAIN_SKILL_REGISTRY_STORAGE_KEY = 'agent-webmcp-domain-skills';
+export const LEGACY_SKILL_REGISTRY_STORAGE_KEY = SKILL_REGISTRY_STORAGE_KEY;
+export const DOMAIN_SKILL_PROPOSALS_STORAGE_KEY = 'agent-webmcp-domain-skill-proposals';
+export const DOMAIN_TRUST_SETTINGS_STORAGE_KEY = 'agent-webmcp-domain-trust-settings';
 export const BROW_ACTION_MEMORY_STORAGE_KEY = 'agent-webmcp-action-memory';
 
 export interface SidepanelConfigRecord {
@@ -40,6 +46,7 @@ function toProviderFields(value: unknown, defaults: ProviderFields): ProviderFie
     baseUrl: typeof record.baseUrl === 'string' ? record.baseUrl : defaults.baseUrl,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : defaults.apiKey,
     model: typeof record.model === 'string' ? record.model : defaults.model,
+    contextWindow: normalizeContextWindow(record.contextWindow as number | string | undefined, defaults.contextWindow),
   };
 }
 
@@ -101,6 +108,7 @@ function normalizeSidepanelConfig(rawConfig: unknown, rawSettings: unknown): Sid
   const settingsLlm = settings.llm;
 
   const openai = toProviderFields(config.openai ?? config.direct ?? settingsLlm, DEFAULT_OPENAI_FIELDS);
+  openai.model = normalizePreferredOpenAiModel(openai.model) ?? DEFAULT_OPENAI_FIELDS.model;
   const claude = toProviderFields(config.claude, DEFAULT_CLAUDE_FIELDS);
   const runtimeRecord = isRecord(config.runtime) ? config.runtime : {};
   const systemPrompt = typeof runtimeRecord.systemPrompt === 'string'
@@ -203,7 +211,12 @@ export async function saveExtensionSettings(settings: Partial<ExtensionSettings>
   const llmFields = toProviderFields(settings.llm, currentSidepanelConfig.openai);
   const nextSidepanelConfig: SidepanelConfigRecord = {
     ...currentSidepanelConfig,
-    openai: settings.llm ? llmFields : currentSidepanelConfig.openai,
+    openai: settings.llm
+      ? {
+        ...llmFields,
+        model: normalizePreferredOpenAiModel(llmFields.model) ?? DEFAULT_OPENAI_FIELDS.model,
+      }
+      : currentSidepanelConfig.openai,
     vlm: settings.vlm ? toVLMConfig(settings.vlm) : currentSidepanelConfig.vlm,
   };
 
