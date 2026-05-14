@@ -160,7 +160,7 @@ export function formatWorkflowDemonstrationForContext(
     `steps: ${demonstration.steps.length}`,
     ...stepLines,
     '',
-    'EXECUTION PLAN (follow exactly in order, use same interaction pattern as demo):',
+    'RECORDED WORKFLOW SUMMARY (recorded order and interaction pattern):',
     ...executionPlan,
   ].filter(Boolean).join('\n');
 }
@@ -174,9 +174,12 @@ export function buildWorkflowDemonstrationContext(workflowDemonstrations: Workfl
 
   return [
     `Attached workflow demonstrations: ${selected.map((demonstration) => demonstration.title).join(', ')}${omittedCount > 0 ? ` (plus ${omittedCount} earlier demonstration${omittedCount !== 1 ? 's' : ''})` : ''}.`,
+    `The user explicitly recorded ${selected.length === 1 ? 'this workflow demonstration' : 'these workflow demonstrations'} for you as context.`,
+    `Use ${selected.length === 1 ? 'it' : 'them'} to understand what the user did, answer questions, or adapt the workflow when the current request calls for action.`,
+    'Do not replay or follow the demonstrated steps unless the current user request calls for it.',
     blocks.join('\n\n'),
-    'Replay guidance: a Workflow Demonstration is a TEMPLATE showing HOW to accomplish a task on a site — the same navigation steps and UI targets, but with the user\'s values substituted for the demo\'s recorded values. Compare the user\'s request to the demo: map each demo value (cities, dates, quantities, search terms, options) to the corresponding user-requested value, then follow the demo steps in order using the user\'s values instead.',
-    'Step execution: for each step: 1) take a fresh browser_snapshot, 2) find the current ref matching the step role/name/attributes, 3) call the matching browser tool with that ref AND pass the step targetEvidence JSON as-is into the targetEvidence parameter for recovery. When the step has a recorded value (e.g. value: literal "Paris"), replace it with the user\'s corresponding value (e.g. the user\'s departure city). When a step clicks a date or option that was specific to the demo, pick the equivalent for the user\'s request instead.',
+    'Usage guidance: a Workflow Demonstration is user-recorded replay evidence and context. First answer the user\'s current request. If the user is asking what happened or how the workflow works, explain the recorded steps instead of replaying them. If the user is asking you to perform a related task, adapt the demonstrated navigation steps and UI targets to the user\'s requested values.',
+    'Replay execution: when the current user request calls for acting on the demonstrated workflow: 1) take a fresh browser_snapshot, 2) find the current ref matching the step role/name/attributes, 3) call the matching browser tool with that ref AND pass the step targetEvidence JSON as-is into the targetEvidence parameter for recovery. When the step has a recorded value (e.g. value: literal "Paris"), replace it with the user\'s corresponding value (e.g. the user\'s departure city). When a step clicks a date or option that was specific to the demo, pick the equivalent for the user\'s request instead.',
     'For canvas/SVG/region clicks and drags, also pass the provided clickPoint or pointerPath. If the recorded target is absent from the compact snapshot, request mode="full" or rely on the targetEvidence for selector/signature fallback rather than guessing a nearby ref. Manual/omitted values require user confirmation before replay.',
   ].filter(Boolean).join('\n');
 }

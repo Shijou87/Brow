@@ -228,11 +228,10 @@ export function formatDomainSkillMatcherSummary(matcher?: DomainSkillMatcher): s
   return parts.join(' | ');
 }
 
-export function matchesDomainSkillContext(
-  skill: SkillRegistryEntry,
+export function matchesDomainMatcherContext(
+  matcher: DomainSkillMatcher | undefined,
   context: { url?: string; title?: string },
 ): boolean {
-  const matcher = skill.matcher;
   if (!matcher) return true;
 
   const rawUrl = context.url?.trim();
@@ -268,6 +267,13 @@ export function matchesDomainSkillContext(
   }
 
   return true;
+}
+
+export function matchesDomainSkillContext(
+  skill: SkillRegistryEntry,
+  context: { url?: string; title?: string },
+): boolean {
+  return matchesDomainMatcherContext(skill.matcher, context);
 }
 
 function normalizeSkillMentionQuery(query: string): string {

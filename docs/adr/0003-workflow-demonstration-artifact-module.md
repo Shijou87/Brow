@@ -1,0 +1,3 @@
+# Workflow Demonstration Artifact Module
+
+Workflow Demonstration construction now sits behind a shared raw-event envelope and `StepBuilder` module in `src/shared/workflow-demonstration/` so value capture, step merging, normalization, and LLM formatting are testable without a live DOM. The content script still owns DOM-coupled extraction such as target resolution and selector generation, but everything after that envelope is shared across recording, persistence, and prompt construction.

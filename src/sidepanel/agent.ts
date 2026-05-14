@@ -27,16 +27,22 @@ import {
   type RequestContextDebugSnapshot,
   type RequestContextDebugTimings,
 } from './agent-runtime/request-context-debug';
+import { buildApprovalAwaitingDescription } from './agent-runtime/approval-description';
+import { wrapUntrustedContextBlock } from './agent-runtime/untrusted-context';
 import { buildToolContextCarryForwardMessage } from './agent-runtime/tool-context-carry-forward';
 import { createRepeatedToolFailureTracker } from './agent-runtime/repeated-tool-failure';
 import { submitDomainSkillProposal } from './domain-skill-proposals';
+import {
+  buildDomainMemoryIndexContext,
+  loadDomainMemoryEntries,
+} from './domain-memory';
 import {
   DEFAULT_DISABLED_TOOL_NAMES,
   buildToolManifest,
   getCategoryLabel,
   getToolCompletionDescription,
   getToolDisplayLabel,
-  isAutomationToolName,
+  isApprovalGatedToolName,
   registerMCPToolDisplayLabels,
   registerWebMCPToolDisplayLabels,
   removeMCPToolDisplayLabels,
@@ -139,6 +145,7 @@ interface AssembledQueryContext {
   browserContextMetrics: BrowserContextSnapshotMetrics;
   workflowDemonstrationContext: string;
   matchedDomainSkills: string;
+  matchedDomainMemory: string;
   selectedSkillMentionContext: string;
 }
 
@@ -304,6 +311,7 @@ function buildRequestContextDebugShape(params: {
     browserContextAttachedSnapshotsChars: params.assembled.browserContextMetrics.attachedSnapshotsSectionChars,
     workflowDemonstrationChars: params.assembled.workflowDemonstrationContext.length,
     matchedDomainSkillsChars: params.assembled.matchedDomainSkills.length,
+    matchedDomainMemoryChars: params.assembled.matchedDomainMemory.length,
     selectedSkillMentionChars: params.assembled.selectedSkillMentionContext.length,
     carriedForwardToolSummaryChars: countCarriedForwardToolSummaryChars(params.exactPromptMessages),
     selectedContextTabCount: params.assembled.browserContextMetrics.selectedTabCount,
@@ -731,28 +739,24 @@ export class Agent implements AgentAPI {
         },
       };
     });
-    const browserContext = browserContextResult.text;
+    const browserContext = wrapUntrustedContextBlock(
+      'Browser context snapshot from the current tabs.',
+      browserContextResult.text,
+    );
     const workflowDemonstrationContext = buildWorkflowDemonstrationContext(workflowDemonstrations);
     const matchedDomainSkills = await this.buildMatchedDomainSkillContext(contextTabIds).catch((err: any) => {
       console.warn('[agent] Failed to resolve matched Domain Skills:', err?.message ?? err);
+      return '';
+    });
+    const matchedDomainMemory = await this.buildMatchedDomainMemoryContext(contextTabIds).catch((err: any) => {
+      console.warn('[agent] Failed to resolve matched Domain Memory:', err?.message ?? err);
       return '';
     });
     const selectedSkillMentionContext = skillMention
       ? buildSelectedSkillMentionContext(skillMention)
       : '';
 
-    const augmentedUserQuery = workflowDemonstrationContext
-      ? [
-        '[IMPORTANT: Follow the attached Workflow Demonstration EXECUTION PLAN step by step.',
-        'Rules:',
-        '- Use the SAME interaction pattern as the demo (if the demo clicks calendar day buttons, you must click calendar day buttons — do NOT type dates as text instead).',
-        '- Substitute my values below for the demo\'s recorded values.',
-        '- Pass each step\'s targetEvidence JSON into the tool call.',
-        '- If a button/element is not visible in the compact snapshot, use browser_snapshot with mode="full" to find it before clicking something else.',
-        '- Do NOT click "Reset"/"Réinitialiser" unless instructed.]\n',
-        userQuery,
-      ].join('\n')
-      : userQuery;
+    const augmentedUserQuery = userQuery;
 
     const messages: AgentMessage[] = [
       ...this.buildEffectiveHistoryMessages(history),
@@ -764,6 +768,9 @@ export class Agent implements AgentAPI {
     }
     if (matchedDomainSkills) {
       messages.push({ role: 'system', content: matchedDomainSkills });
+    }
+    if (matchedDomainMemory) {
+      messages.push({ role: 'system', content: matchedDomainMemory });
     }
     if (selectedSkillMentionContext) {
       messages.push({ role: 'system', content: selectedSkillMentionContext });
@@ -778,6 +785,7 @@ export class Agent implements AgentAPI {
       browserContextMetrics: browserContextResult.metrics,
       workflowDemonstrationContext,
       matchedDomainSkills,
+      matchedDomainMemory,
       selectedSkillMentionContext,
     };
   }
@@ -1102,7 +1110,7 @@ export class Agent implements AgentAPI {
           step.approvalRequestId = undefined;
           step.status = 'running';
           step.description = pendingId === requestId
-            ? 'Approval granted. All automation actions allowed for this session.'
+            ? 'Approval granted. All approval-gated actions allowed for this session.'
             : 'Approval granted by session-wide allow. Executing action…';
         }
         pending.resolve(pendingId === requestId ? 'allow_all' : 'allow');
@@ -1163,7 +1171,7 @@ export class Agent implements AgentAPI {
   private isAutomationTool(tool: StructuredToolInterface): boolean {
     const name = (tool as any).name as string;
     const aliasOf = (tool as any).__aliasOf as string | undefined;
-    return isAutomationToolName(aliasOf ?? name);
+    return isApprovalGatedToolName(aliasOf ?? name);
   }
 
   private wrapAutomationToolWithApproval(originalTool: StructuredToolInterface): StructuredToolInterface {
@@ -1176,7 +1184,7 @@ export class Agent implements AgentAPI {
         if (decision === 'skip') {
           return JSON.stringify({
             ok: false,
-            error: 'Automation action skipped by user.',
+            error: 'Approval-gated action skipped by user.',
             skippedByUser: true,
           }, null, 2);
         }
@@ -1303,7 +1311,11 @@ export class Agent implements AgentAPI {
       globalThis.crypto?.randomUUID?.()
       ?? `approval-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     step.status = 'awaiting_approval';
-    step.description = 'Awaiting approval to run this automation action.';
+    step.description = buildApprovalAwaitingDescription({
+      toolName,
+      input,
+      vlmBaseUrl: this.vlmConfig?.baseUrl,
+    });
     step.approvalRequestId = requestId;
     this.emitToolSteps(this.activeToolSteps);
 
@@ -1379,6 +1391,33 @@ export class Agent implements AgentAPI {
       }),
       'If one of these matched Domain Skills seems relevant, call skills_load with its slug or name before relying on the full guidance.',
     ].join('\n');
+  }
+
+  private async buildMatchedDomainMemoryContext(contextTabIds?: number[]): Promise<string> {
+    const [tabs, activeTab, domainMemory] = await Promise.all([
+      tabsList().catch(() => []),
+      tabsGetActive().catch(() => null),
+      loadDomainMemoryEntries().catch(() => []),
+    ]);
+
+    const selectedTabIds = getEffectiveContextTabIds(contextTabIds, activeTab?.tabId);
+    if (selectedTabIds.length === 0) return '';
+
+    const tabsById = new Map<number, (typeof tabs)[number]>();
+    for (const tab of tabs) {
+      tabsById.set(tab.tabId, tab);
+    }
+
+    const selectedTabs = selectedTabIds
+      .map((tabId) => tabsById.get(tabId) ?? (activeTab?.tabId === tabId ? activeTab : undefined))
+      .filter((tab): tab is NonNullable<typeof activeTab> => Boolean(tab));
+
+    if (selectedTabs.length === 0) return '';
+
+    return buildDomainMemoryIndexContext(domainMemory, selectedTabs.map((tab) => ({
+      url: tab.url,
+      title: tab.title,
+    })));
   }
 
   async query(

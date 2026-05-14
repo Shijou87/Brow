@@ -1,6 +1,11 @@
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { toJsonSchema } from '@langchain/core/utils/json_schema';
 import {
+  DEFAULT_DISABLED_TOOL_NAMES,
+  isApprovalGatedToolName,
+  isAutomationToolName,
+} from './tool-classification';
+import {
   getMCPToolUIResourceUri,
   getMCPToolVisibility,
   isToolVisibleToModel,
@@ -8,6 +13,12 @@ import {
   type MCPToolDescriptor,
 } from '../mcp-client';
 import type { WebMCPToolDescriptor } from '../../shared/types';
+
+export {
+  DEFAULT_DISABLED_TOOL_NAMES,
+  isApprovalGatedToolName,
+  isAutomationToolName,
+} from './tool-classification';
 
 export type ToolManifestSource = 'builtin' | 'webmcp' | 'mcp';
 
@@ -126,40 +137,14 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   webmcp_invoke: 'Invoking WebMCP tool',
   skills_load: 'Loading skill details',
   skills_propose: 'Saving Domain Skill proposal',
+  domain_memory_save: 'Saving Domain Memory',
+  domain_memory_load: 'Loading Domain Memory',
+  domain_memory_set_enabled: 'Updating Domain Memory',
+  domain_memory_delete: 'Deleting Domain Memory',
 };
 
-const AUTOMATION_TOOL_NAMES = new Set([
-  'tabs_highlight',
-  'tabs_hover',
-  'tabs_click',
-  'tabs_type',
-  'tabs_fillForm',
-  'tabs_activate',
-  'tabs_create',
-  'tabs_updateUrl',
-  'browser_click',
-  'browser_hover',
-  'browser_type',
-  'browser_fill_form',
-  'browser_drag',
-  'browser_scroll',
-  'browser_key',
-  'browser_wait_for',
-  'browser_upload_file',
-  'browser_download_wait',
-  'browser_handle_dialog',
-  'http_fetch',
-  'webmcp_invoke',
-]);
-
-export const DEFAULT_DISABLED_TOOL_NAMES = new Set(AUTOMATION_TOOL_NAMES);
-
-export function isAutomationToolName(toolName: string): boolean {
-  return AUTOMATION_TOOL_NAMES.has(toolName) || /^webmcp_t\d+_/.test(toolName);
-}
-
 export function getBuiltinToolCategory(toolName: string): string {
-  if (toolName.startsWith('skills_')) return 'skills';
+  if (toolName.startsWith('skills_') || toolName.startsWith('domain_memory_')) return 'skills';
   if (isAutomationToolName(toolName)) return 'browser_automation';
   return 'browser_read';
 }
@@ -243,6 +228,10 @@ export function getToolCompletionDescription(toolName: string, result?: string):
     tab_screenshot_vlm: 'VLM analysis complete',
     webmcp_discover: 'Discovery complete',
     webmcp_invoke: 'Tool invoked',
+    domain_memory_save: 'Domain Memory saved',
+    domain_memory_load: 'Domain Memory loaded',
+    domain_memory_set_enabled: 'Domain Memory updated',
+    domain_memory_delete: 'Domain Memory deleted',
   };
 
   return defaults[toolName] || `Completed ${toolName}`;

@@ -23,6 +23,7 @@ export const SKILL_REGISTRY_STORAGE_KEY = 'agent-webmcp-skills';
 export const DOMAIN_SKILL_REGISTRY_STORAGE_KEY = 'agent-webmcp-domain-skills';
 export const LEGACY_SKILL_REGISTRY_STORAGE_KEY = SKILL_REGISTRY_STORAGE_KEY;
 export const DOMAIN_SKILL_PROPOSALS_STORAGE_KEY = 'agent-webmcp-domain-skill-proposals';
+export const DOMAIN_MEMORY_STORAGE_KEY = 'agent-webmcp-domain-memory';
 export const DOMAIN_TRUST_SETTINGS_STORAGE_KEY = 'agent-webmcp-domain-trust-settings';
 export const BROW_ACTION_MEMORY_STORAGE_KEY = 'agent-webmcp-action-memory';
 

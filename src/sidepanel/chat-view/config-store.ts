@@ -16,7 +16,8 @@ import {
   type SkillRegistryEntry,
 } from '../skills-registry';
 import { loadDomainSkillProposalEntries } from '../domain-skill-proposals';
-import type { InteractionSkillEntry } from '../../shared/types';
+import { loadDomainMemoryEntries } from '../domain-memory';
+import type { DomainMemoryEntry, InteractionSkillEntry } from '../../shared/types';
 import type { DomainSkillProposal } from '../../shared/types';
 
 export async function loadDomainSkillRegistryEntries(): Promise<SkillRegistryEntry[]> {
@@ -38,18 +39,21 @@ export async function loadPromptEditorState(): Promise<{
   systemPrompt: string;
   domainSkills: SkillRegistryEntry[];
   domainSkillProposals: DomainSkillProposal[];
+  domainMemory: DomainMemoryEntry[];
   interactionSkills: InteractionSkillEntry[];
 }> {
-  const [config, domainSkills, domainSkillProposals] = await Promise.all([
+  const [config, domainSkills, domainSkillProposals, domainMemory] = await Promise.all([
     loadSidepanelConfig(),
     loadDomainSkillRegistryEntries(),
     loadDomainSkillProposalEntries(),
+    loadDomainMemoryEntries(),
   ]);
 
   return {
     systemPrompt: config.runtime.systemPrompt || DEFAULT_SYSTEM_PROMPT,
     domainSkills,
     domainSkillProposals,
+    domainMemory,
     interactionSkills: getInteractionSkillRegistry(),
   };
 }

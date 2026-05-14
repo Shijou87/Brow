@@ -15,6 +15,13 @@ import {
 } from './input-schemas';
 import { browserFillFormToolSchema, browserDragToolSchema, browserFillModeSchema } from './browser-tool-schemas';
 import { getWebMCPAftermathWaitMs, shouldCaptureWebMCPAftermath } from '../webmcp-tool-factory';
+import {
+  deleteDomainMemoryEntry,
+  loadDomainMemoryEntries,
+  queryDomainMemoryEntries,
+  saveDomainMemoryDraft,
+  setDomainMemoryEnabled,
+} from '../domain-memory';
 
 import {
   attachToolSnapshotFields,
@@ -71,6 +78,7 @@ import type {
   BrowBackendPreference,
   BrowActionPostcondition,
   BrowReplayTargetEvidence,
+  DomainMemoryDraft,
   DomainSkillProposal,
   DomainSkillProposalDraft,
   InteractionSkillEntry,
@@ -109,6 +117,28 @@ function sleep(ms: number): Promise<void> {
 
 function normalizeOptional<T>(value: T | null | undefined): T | undefined {
   return value ?? undefined;
+}
+
+function normalizeStringList(value: string[] | string | null | undefined): string[] | undefined {
+  if (Array.isArray(value)) {
+    const items = Array.from(new Set(value.map((item) => String(item).trim()).filter(Boolean)));
+    return items.length > 0 ? items : undefined;
+  }
+  if (typeof value === 'string') {
+    const items = Array.from(new Set(value.split(',').map((item) => item.trim()).filter(Boolean)));
+    return items.length > 0 ? items : undefined;
+  }
+  return undefined;
+}
+
+async function inferActiveDomain(): Promise<string | undefined> {
+  const activeTab = await tabsGetActive().catch(() => null);
+  if (!activeTab?.url) return undefined;
+  try {
+    return new URL(activeTab.url).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeOptionalJsonRecord(value: Record<string, unknown> | string | null | undefined): Record<string, unknown> | undefined {
@@ -1651,6 +1681,165 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     },
   );
 
+  const domainMemorySaveTool = tool(
+    async ({
+      title,
+      lesson,
+      appliesWhen,
+      domain,
+      pathPatterns,
+      pagePatterns,
+      tags,
+      evidence,
+      confidence,
+      enabled,
+      outcome,
+    }: {
+      title: string;
+      lesson: string;
+      appliesWhen?: string | null;
+      domain?: string | null;
+      pathPatterns?: string[] | string | null;
+      pagePatterns?: string[] | string | null;
+      tags?: string[] | string | null;
+      evidence?: string[] | string | null;
+      confidence?: number | null;
+      enabled?: boolean | null;
+      outcome?: DomainMemoryDraft['outcome'] | null;
+    }) => {
+      const scopedDomain = domain?.trim().toLowerCase() || await inferActiveDomain();
+      const draft: DomainMemoryDraft = {
+        title,
+        lesson,
+        appliesWhen: appliesWhen?.trim() || undefined,
+        matcher: {
+          domain: scopedDomain,
+          pathPatterns: normalizeStringList(pathPatterns),
+          pagePatterns: normalizeStringList(pagePatterns),
+        },
+        tags: normalizeStringList(tags),
+        evidence: normalizeStringList(evidence),
+        confidence: confidence ?? undefined,
+        enabled: enabled ?? undefined,
+        outcome: outcome ?? undefined,
+      };
+      try {
+        const result = await saveDomainMemoryDraft(draft);
+        return JSON.stringify({
+          ok: true,
+          entry: result.entry,
+          merged: result.merged,
+          message: result.merged
+            ? `Domain Memory "${result.entry.title}" updated.`
+            : `Domain Memory "${result.entry.title}" saved.`,
+        }, null, 2);
+      } catch (err: any) {
+        return JSON.stringify({
+          ok: false,
+          error: err?.message ?? 'Domain Memory save failed',
+        }, null, 2);
+      }
+    },
+    {
+      name: 'domain_memory_save',
+      description: 'Save or merge a local Domain Memory card containing non-secret operational site knowledge such as selectors, flows, quirks, waits, or failure fixes. Never store user/account content or secrets.',
+      schema: z.object({
+        title: z.string().describe('Short card title for the learned operational fact'),
+        lesson: z.string().describe('The durable operational lesson. Do not include secrets, personal data, account content, or raw dynamic user values.'),
+        appliesWhen: nullableOptionalString('When this memory should be considered relevant, such as a page state, workflow, or failure condition'),
+        domain: nullableOptionalString('Domain scope such as github.com. Omit to use the active tab domain.'),
+        pathPatterns: z.union([z.array(z.string()), z.string()]).nullable().optional().describe('Optional path patterns such as /owner/repo/pull/*'),
+        pagePatterns: z.union([z.array(z.string()), z.string()]).nullable().optional().describe('Optional page keywords such as pull request or settings'),
+        tags: z.union([z.array(z.string()), z.string()]).nullable().optional().describe('Optional tags like login, search, checkout, iframe'),
+        evidence: z.union([z.array(z.string()), z.string()]).nullable().optional().describe('Optional supporting non-secret facts or outcomes'),
+        confidence: nullableOptionalNumber('Optional confidence from 0 to 1'),
+        enabled: nullableOptionalBoolean('Whether this memory should be active'),
+        outcome: z.enum(['neutral', 'success', 'failure']).nullable().optional().describe('Use success or failure when updating a memory after trying it; failures demote confidence but do not delete it.'),
+      }),
+    },
+  );
+
+  const domainMemoryLoadTool = tool(
+    async ({
+      id,
+      domain,
+      query,
+      includeDisabled,
+      limit,
+    }: {
+      id?: string | null;
+      domain?: string | null;
+      query?: string | null;
+      includeDisabled?: boolean | null;
+      limit?: number | null;
+    }) => {
+      const entries = await loadDomainMemoryEntries();
+      const results = queryDomainMemoryEntries(entries, {
+        id: id?.trim() || undefined,
+        domain: domain?.trim().toLowerCase() || undefined,
+        query: query?.trim() || undefined,
+        includeDisabled: includeDisabled ?? false,
+        limit: limit ?? undefined,
+      });
+      return JSON.stringify({
+        ok: true,
+        memories: results,
+        count: results.length,
+      }, null, 2);
+    },
+    {
+      name: 'domain_memory_load',
+      description: 'Load full local Domain Memory cards by id, domain, or query. Use this when the compact matched-memory index looks relevant.',
+      schema: z.object({
+        id: nullableOptionalString('Optional exact Domain Memory id to load'),
+        domain: nullableOptionalString('Optional domain filter such as github.com'),
+        query: nullableOptionalString('Optional text query over title, lesson, scope, tags, and evidence'),
+        includeDisabled: nullableOptionalBoolean('Whether to include disabled memories'),
+        limit: nullableOptionalNumber('Maximum cards to return'),
+      }),
+    },
+  );
+
+  const domainMemorySetEnabledTool = tool(
+    async ({ id, enabled }: { id: string; enabled: boolean }) => {
+      const entry = await setDomainMemoryEnabled(id, enabled);
+      if (!entry) {
+        return JSON.stringify({ ok: false, error: `Domain Memory "${id}" not found` }, null, 2);
+      }
+      return JSON.stringify({
+        ok: true,
+        entry,
+        message: `Domain Memory "${entry.title}" ${enabled ? 'enabled' : 'disabled'}.`,
+      }, null, 2);
+    },
+    {
+      name: 'domain_memory_set_enabled',
+      description: 'Enable or disable a local Domain Memory card when it becomes useful or stale.',
+      schema: z.object({
+        id: z.string().describe('Domain Memory id'),
+        enabled: z.boolean().describe('Whether the memory should be active'),
+      }),
+    },
+  );
+
+  const domainMemoryDeleteTool = tool(
+    async ({ id }: { id: string }) => {
+      const deleted = await deleteDomainMemoryEntry(id);
+      return JSON.stringify({
+        ok: deleted,
+        deleted,
+        message: deleted ? `Domain Memory "${id}" deleted.` : `Domain Memory "${id}" not found.`,
+      }, null, 2);
+    },
+    {
+      name: 'domain_memory_delete',
+      description: 'Delete a local Domain Memory card when it is obsolete or harmful. Deletion is permanent in v1.',
+      schema: z.object({
+        id: z.string().describe('Domain Memory id'),
+      }),
+    },
+  );
+
   return [
     tabsListTool as unknown as StructuredToolInterface,
     tabsGetActiveTool as unknown as StructuredToolInterface,
@@ -1686,6 +1875,10 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     webmcpDiscoverTool as unknown as StructuredToolInterface,
     webmcpInvokeTool as unknown as StructuredToolInterface,
     skillsProposeTool as unknown as StructuredToolInterface,
+    domainMemorySaveTool as unknown as StructuredToolInterface,
+    domainMemoryLoadTool as unknown as StructuredToolInterface,
+    domainMemorySetEnabledTool as unknown as StructuredToolInterface,
+    domainMemoryDeleteTool as unknown as StructuredToolInterface,
     clickAliasTool,
     clickElementAliasTool,
     highlightAliasTool,

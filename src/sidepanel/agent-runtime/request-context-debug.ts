@@ -32,6 +32,7 @@ export interface RequestContextDebugShape {
   browserContextAttachedSnapshotsChars: number;
   workflowDemonstrationChars: number;
   matchedDomainSkillsChars: number;
+  matchedDomainMemoryChars: number;
   selectedSkillMentionChars: number;
   carriedForwardToolSummaryChars: number;
   selectedContextTabCount: number;
@@ -98,6 +99,7 @@ function formatRequestShape(shape: RequestContextDebugShape): string {
     `Attached snapshot section chars: ${formatSectionChars(shape.browserContextAttachedSnapshotsChars, shape.browserContextChars)}`,
     `Workflow demonstration chars: ${shape.workflowDemonstrationChars.toLocaleString()}`,
     `Matched Domain Skill chars: ${shape.matchedDomainSkillsChars.toLocaleString()}`,
+    `Matched Domain Memory chars: ${shape.matchedDomainMemoryChars.toLocaleString()}`,
     `Selected Skill Mention chars: ${shape.selectedSkillMentionChars.toLocaleString()}`,
     `Carried-forward tool summary chars: ${shape.carriedForwardToolSummaryChars.toLocaleString()}`,
     `Selected context tabs: ${shape.selectedContextTabCount.toLocaleString()}`,

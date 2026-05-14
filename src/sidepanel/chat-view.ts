@@ -27,12 +27,14 @@ import {
   saveSystemPrompt,
 } from './chat-view/config-store';
 import { saveDomainSkillProposalEntries } from './domain-skill-proposals';
+import { hasDisallowedDomainMemoryContent, saveDomainMemoryEntries } from './domain-memory';
 import {
   loadSavedConversations,
   removeSavedConversation,
   upsertSavedConversation,
 } from './chat-view/conversation-store';
 import type { ContextTabOption, SavedConversation, SavedConversationMessage } from './chat-view/types';
+import { escapeHtml as escapeMessageHtml, formatAssistantMessage } from './message-format';
 import {
   isToolVisibleToModel,
   type MCPAppRenderRequest,
@@ -53,6 +55,7 @@ import {
 } from './skills-registry';
 import type { WorkflowRecordingStartResult, WorkflowRecordingStopResult } from '../shared/messages';
 import type {
+  DomainMemoryEntry,
   DomainSkillProposal,
   InteractionSkillEntry,
   SkillMention,
@@ -179,8 +182,10 @@ export class ChatView {
   // Prompt skills registry
   private skillRegistry: SkillRegistryEntry[] = [];
   private domainSkillProposals: DomainSkillProposal[] = [];
+  private domainMemoryEntries: DomainMemoryEntry[] = [];
   private interactionSkillRegistry: InteractionSkillEntry[] = [];
   private editingSkillId: string | null = null;
+  private editingDomainMemoryId: string | null = null;
   private isSkillEditorOpen = false;
   private skillEditorSlugDirty = false;
 
@@ -307,6 +312,53 @@ export class ChatView {
     }, 1800);
   }
 
+  private createMessageCopyButton(getText: () => string): HTMLButtonElement {
+    const button = document.createElement('button');
+    button.className = 'message-copy-button';
+    button.type = 'button';
+    button.title = 'Copy message';
+    button.setAttribute('aria-label', 'Copy message');
+    button.innerHTML = this.messageCopySvg();
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void this.copyMessageToClipboard(button, getText);
+    });
+    return button;
+  }
+
+  private async copyMessageToClipboard(
+    button: HTMLButtonElement,
+    getText: () => string,
+  ): Promise<void> {
+    const text = getText();
+    if (!text) return;
+
+    button.disabled = true;
+    button.classList.remove('is-copied', 'is-copy-failed');
+
+    try {
+      await navigator.clipboard.writeText(text);
+      button.classList.add('is-copied');
+      button.innerHTML = this.messageCopiedSvg();
+      button.title = 'Copied';
+      button.setAttribute('aria-label', 'Message copied');
+    } catch (err) {
+      console.warn('[chat-view] Failed to copy message:', err);
+      button.classList.add('is-copy-failed');
+      button.innerHTML = this.messageCopyFailedSvg();
+      button.title = 'Copy failed';
+      button.setAttribute('aria-label', 'Copy message failed');
+    }
+
+    window.setTimeout(() => {
+      button.disabled = false;
+      button.classList.remove('is-copied', 'is-copy-failed');
+      button.innerHTML = this.messageCopySvg();
+      button.title = 'Copy message';
+      button.setAttribute('aria-label', 'Copy message');
+    }, 1400);
+  }
+
   public updateRequestBudget(estimate: RequestBudgetEstimate | null): void {
     if (!this.requestBudgetIndicator || !this.requestBudgetRingFill) return;
 
@@ -423,6 +475,7 @@ export class ChatView {
       }
       const newWords = (' ' + message).split(/( +)/);
       this.streamingWordQueue.push(...newWords);
+      this.streamingElement.dataset.copyText = `${this.streamingAccumulated}${this.streamingWordQueue.join('')}`;
       this.startStreamingWords();
       return;
     }
@@ -435,9 +488,11 @@ export class ChatView {
 
     const el = document.createElement('div');
     el.className = 'message assistant-message';
+    el.dataset.copyText = message;
     el.innerHTML = `
       <div class="message-content"><span class="streaming-text"></span><span class="streaming-cursor">|</span></div>
       <div class="message-time">${new Date().toLocaleTimeString()}</div>`;
+    el.appendChild(this.createMessageCopyButton(() => el.dataset.copyText ?? ''));
     this.messagesContainer.appendChild(el);
     this.streamingElement = el;
     this.streamingAccumulated = '';
@@ -457,6 +512,7 @@ export class ChatView {
         this.streamingWordQueue = [];
         textSpan.innerHTML = this.formatMessage(this.streamingAccumulated);
       }
+      this.streamingElement.dataset.copyText = this.streamingAccumulated;
       const cursor = this.streamingElement.querySelector('.streaming-cursor');
       if (cursor) cursor.remove();
       this.streamingElement = null;
@@ -610,6 +666,10 @@ export class ChatView {
       time.className = 'message-time';
       time.textContent = message.time;
       el.appendChild(time);
+    }
+
+    if (message.content) {
+      el.appendChild(this.createMessageCopyButton(() => message.content));
     }
 
     this.messagesContainer.appendChild(el);
@@ -3051,6 +3111,14 @@ export class ChatView {
           </div>
         </div>
         <div class="skills-registry-list"></div>
+        <details class="domain-memory-advanced">
+          <summary>Advanced · Domain Memory</summary>
+          <div class="domain-memory-panel">
+            <p class="skills-registry-subtitle">Agent-managed operational memory for site mechanics. Hidden by default; Brow can save, update, disable, or delete these cards while working.</p>
+            <div class="domain-memory-count">0 domain memory card(s)</div>
+            <div class="domain-memory-list"></div>
+          </div>
+        </details>
         <hr class="config-divider" />
         <div class="skills-registry-header">
           <div class="skills-registry-heading">
@@ -3188,15 +3256,17 @@ export class ChatView {
   }
 
   private populatePromptFields(): void {
-    void loadPromptEditorState().then(({ systemPrompt, domainSkills, domainSkillProposals, interactionSkills }) => {
+    void loadPromptEditorState().then(({ systemPrompt, domainSkills, domainSkillProposals, domainMemory, interactionSkills }) => {
       this.skillRegistry = domainSkills;
       this.domainSkillProposals = domainSkillProposals;
+      this.domainMemoryEntries = domainMemory;
       this.interactionSkillRegistry = interactionSkills;
       this.setPromptInput('llm-config-system-prompt', systemPrompt || DEFAULT_SYSTEM_PROMPT);
       this.refreshSystemPromptPreview(this.promptPanel);
       this.setSystemPromptPreviewMode(this.systemPromptPreviewMode, this.promptPanel);
       this.isSkillEditorOpen = false;
       this.editingSkillId = null;
+      this.editingDomainMemoryId = null;
       this.renderSkillRegistry();
       this.closeSkillEditor(false);
     });
@@ -3230,13 +3300,16 @@ export class ChatView {
     const proposalCount = this.promptPanel.querySelector('.domain-skill-proposals-count') as HTMLElement | null;
     const list = this.promptPanel.querySelector('.skills-registry-list') as HTMLElement | null;
     const count = this.promptPanel.querySelector('.skills-registry-count') as HTMLElement | null;
+    const domainMemoryList = this.promptPanel.querySelector('.domain-memory-list') as HTMLElement | null;
+    const domainMemoryCount = this.promptPanel.querySelector('.domain-memory-count') as HTMLElement | null;
     const interactionList = this.promptPanel.querySelector('.interaction-skills-list') as HTMLElement | null;
     const interactionCount = this.promptPanel.querySelector('.interaction-skills-count') as HTMLElement | null;
     const dock = this.promptPanel.querySelector('.skill-editor-dock') as HTMLElement | null;
     const editorPanel = this.promptPanel.querySelector('.skill-editor-panel') as HTMLElement | null;
-    if (!proposalList || !proposalCount || !list || !count || !interactionList || !interactionCount || !dock || !editorPanel) return;
+    if (!proposalList || !proposalCount || !list || !count || !domainMemoryList || !domainMemoryCount || !interactionList || !interactionCount || !dock || !editorPanel) return;
 
     this.renderDomainSkillProposalRegistry(proposalList, proposalCount);
+    this.renderDomainMemoryRegistry(domainMemoryList, domainMemoryCount);
     count.textContent = `${this.skillRegistry.length} domain skill${this.skillRegistry.length !== 1 ? 's' : ''}`;
     list.innerHTML = '';
     interactionCount.textContent = `${this.interactionSkillRegistry.length} interaction skill${this.interactionSkillRegistry.length !== 1 ? 's' : ''}`;
@@ -3402,6 +3475,139 @@ export class ChatView {
       card.querySelector('.skill-proposal-reject-btn')?.addEventListener('click', (e) => {
         e.stopPropagation();
         this.rejectDomainSkillProposal(proposal.id);
+      });
+
+      list.appendChild(card);
+    }
+  }
+
+  private renderDomainMemoryRegistry(list: HTMLElement, count: HTMLElement): void {
+    count.textContent = `${this.domainMemoryEntries.length} domain memory card${this.domainMemoryEntries.length !== 1 ? 's' : ''}`;
+    list.innerHTML = '';
+
+    if (this.domainMemoryEntries.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'skills-empty-state';
+      empty.textContent = 'No Domain Memory cards yet.';
+      list.appendChild(empty);
+      return;
+    }
+
+    for (const memory of this.domainMemoryEntries) {
+      const isEditing = this.editingDomainMemoryId === memory.id;
+      const card = document.createElement('div');
+      card.className = `skill-card domain-memory-card${memory.enabled ? ' enabled' : ' disabled'}${isEditing ? ' is-editing' : ''}`;
+
+      if (isEditing) {
+        card.innerHTML = `
+          <div class="skill-card-header">
+            <div class="skill-card-title-group">
+              <div class="skill-card-title">Edit Domain Memory</div>
+              <div class="skill-card-slug">${this.escapeHtml(memory.id)}</div>
+            </div>
+          </div>
+          <div class="config-fields domain-memory-editor-fields">
+            <div class="config-field">
+              <label>Title</label>
+              <input type="text" class="domain-memory-title-input" value="${this.escapeHtml(memory.title)}" autocomplete="off" />
+            </div>
+            <div class="config-field">
+              <label>Lesson</label>
+              <textarea class="domain-memory-lesson-input" spellcheck="false">${this.escapeHtml(memory.lesson)}</textarea>
+            </div>
+            <div class="config-field">
+              <label>Applies When</label>
+              <input type="text" class="domain-memory-applies-input" value="${this.escapeHtml(memory.appliesWhen ?? '')}" autocomplete="off" />
+            </div>
+            <div class="config-field">
+              <label>Tags</label>
+              <input type="text" class="domain-memory-tags-input" value="${this.escapeHtml(formatSkillTagsInput(memory.tags))}" autocomplete="off" />
+            </div>
+            <div class="config-field">
+              <label>Evidence</label>
+              <input type="text" class="domain-memory-evidence-input" value="${this.escapeHtml(formatSkillTagsInput(memory.evidence))}" autocomplete="off" />
+            </div>
+            <div class="config-field">
+              <label>Match Domain</label>
+              <input type="text" class="domain-memory-domain-input" value="${this.escapeHtml(memory.matcher?.domain ?? '')}" autocomplete="off" />
+            </div>
+            <div class="config-field">
+              <label>Path Patterns</label>
+              <input type="text" class="domain-memory-paths-input" value="${this.escapeHtml(this.formatSkillMatcherInput(memory.matcher?.pathPatterns))}" autocomplete="off" />
+            </div>
+            <div class="config-field">
+              <label>Page Patterns</label>
+              <input type="text" class="domain-memory-pages-input" value="${this.escapeHtml(this.formatSkillMatcherInput(memory.matcher?.pagePatterns))}" autocomplete="off" />
+            </div>
+            <div class="config-field">
+              <label>Confidence</label>
+              <input type="number" class="domain-memory-confidence-input" min="0" max="1" step="0.01" value="${this.escapeHtml(String(memory.confidence))}" />
+            </div>
+          </div>
+          <div class="skill-editor-actions">
+            <button class="config-apply-btn domain-memory-save-btn" type="button">Save Memory</button>
+            <button class="skill-cancel-btn domain-memory-cancel-btn" type="button">Cancel</button>
+          </div>`;
+
+        card.querySelector('.domain-memory-save-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.saveDomainMemoryFromCard(memory.id, card);
+        });
+        card.querySelector('.domain-memory-cancel-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.editingDomainMemoryId = null;
+          this.renderSkillRegistry();
+        });
+        list.appendChild(card);
+        continue;
+      }
+
+      const tags = this.renderSkillTagHtml(memory.tags, memory.matcher);
+      const evidence = memory.evidence.length > 0
+        ? `<div class="skill-card-tags">${memory.evidence.map((item) => `<span class="skill-tag">${this.escapeHtml(item)}</span>`).join('')}</div>`
+        : '';
+      const scope = [
+        memory.matcher?.domain ? `domain:${memory.matcher.domain}` : '',
+        ...(memory.matcher?.pathPatterns ?? []).map((pattern) => `path:${pattern}`),
+        ...(memory.matcher?.pagePatterns ?? []).map((pattern) => `page:${pattern}`),
+      ].filter(Boolean).join(' · ') || 'No scope';
+      const stats = `${Math.round(memory.confidence * 100)}% confidence · ${memory.useCount} use${memory.useCount !== 1 ? 's' : ''} · ${memory.successCount} success · ${memory.failureCount} failure`;
+
+      card.innerHTML = `
+        <div class="skill-card-header">
+          <div class="skill-card-title-group">
+            <div class="skill-card-title">${this.escapeHtml(memory.title)}</div>
+            <div class="skill-card-slug">${this.escapeHtml(scope)}</div>
+          </div>
+          <button class="skill-remove-btn domain-memory-remove-btn" type="button" aria-label="Remove memory" title="Remove memory">×</button>
+        </div>
+        <div class="skill-card-description">${this.escapeHtml(memory.lesson)}</div>
+        ${memory.appliesWhen ? `<div class="skill-card-meta">Applies when: ${this.escapeHtml(memory.appliesWhen)}</div>` : ''}
+        ${tags}
+        ${evidence}
+        <div class="skill-card-footer">
+          <div class="skill-card-meta">${this.escapeHtml(stats)} · Updated ${this.formatRelativeTime(new Date(memory.updatedAt))}</div>
+          <div class="skill-card-actions">
+            <button class="skill-toggle-btn${memory.enabled ? ' is-enabled' : ''}" type="button">${memory.enabled ? 'Active' : 'Inactive'}</button>
+            <button class="skill-edit-btn domain-memory-edit-btn" type="button">Edit</button>
+          </div>
+        </div>`;
+
+      card.querySelector('.skill-toggle-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.domainMemoryEntries = this.domainMemoryEntries.map((entry) =>
+          entry.id === memory.id ? { ...entry, enabled: !entry.enabled, updatedAt: Date.now() } : entry,
+        );
+        this.persistDomainMemory(memory.enabled ? 'Domain Memory disabled.' : 'Domain Memory enabled.');
+      });
+      card.querySelector('.domain-memory-edit-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.editingDomainMemoryId = memory.id;
+        this.renderSkillRegistry();
+      });
+      card.querySelector('.domain-memory-remove-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.removeDomainMemory(memory.id);
       });
 
       list.appendChild(card);
@@ -3751,6 +3957,70 @@ export class ChatView {
     });
   }
 
+  private saveDomainMemoryFromCard(memoryId: string, card: HTMLElement): void {
+    const existing = this.domainMemoryEntries.find((entry) => entry.id === memoryId);
+    if (!existing) return;
+
+    const title = (card.querySelector('.domain-memory-title-input') as HTMLInputElement | null)?.value.trim() ?? '';
+    const lesson = (card.querySelector('.domain-memory-lesson-input') as HTMLTextAreaElement | null)?.value.trim() ?? '';
+    const appliesWhen = (card.querySelector('.domain-memory-applies-input') as HTMLInputElement | null)?.value.trim() || undefined;
+    const tags = parseSkillTagsInput((card.querySelector('.domain-memory-tags-input') as HTMLInputElement | null)?.value ?? '');
+    const evidence = parseSkillTagsInput((card.querySelector('.domain-memory-evidence-input') as HTMLInputElement | null)?.value ?? '');
+    const domain = (card.querySelector('.domain-memory-domain-input') as HTMLInputElement | null)?.value.trim().toLowerCase() || undefined;
+    const pathPatterns = this.parseSkillMatcherInput((card.querySelector('.domain-memory-paths-input') as HTMLInputElement | null)?.value ?? '');
+    const pagePatterns = this.parseSkillMatcherInput((card.querySelector('.domain-memory-pages-input') as HTMLInputElement | null)?.value ?? '');
+    const confidenceRaw = Number((card.querySelector('.domain-memory-confidence-input') as HTMLInputElement | null)?.value ?? existing.confidence);
+    const confidence = Number.isFinite(confidenceRaw) ? Math.max(0, Math.min(1, confidenceRaw)) : existing.confidence;
+    const matcher = domain || pathPatterns || pagePatterns ? { domain, pathPatterns, pagePatterns } : undefined;
+
+    if (!title || !lesson || !matcher?.domain) {
+      this.setPromptStatus('Domain Memory requires title, lesson, and match domain.', 'error');
+      return;
+    }
+    if (hasDisallowedDomainMemoryContent([title, lesson, appliesWhen, ...tags, ...evidence])) {
+      this.setPromptStatus('Domain Memory cannot store secrets, account content, or private user data.', 'error');
+      return;
+    }
+
+    this.domainMemoryEntries = this.domainMemoryEntries.map((entry) =>
+      entry.id === memoryId
+        ? {
+          ...entry,
+          title,
+          lesson,
+          appliesWhen,
+          tags,
+          evidence,
+          matcher,
+          confidence,
+          updatedAt: Date.now(),
+        }
+        : entry,
+    );
+    this.editingDomainMemoryId = null;
+    this.persistDomainMemory('Domain Memory updated.');
+  }
+
+  private removeDomainMemory(memoryId: string): void {
+    const removedMemory = this.domainMemoryEntries.find((entry) => entry.id === memoryId);
+    if (!removedMemory) return;
+    this.domainMemoryEntries = this.domainMemoryEntries.filter((entry) => entry.id !== memoryId);
+    if (this.editingDomainMemoryId === memoryId) {
+      this.editingDomainMemoryId = null;
+    }
+    this.persistDomainMemory(`Domain Memory "${removedMemory.title}" removed.`);
+  }
+
+  private persistDomainMemory(message?: string): void {
+    void saveDomainMemoryEntries(this.domainMemoryEntries).then((entries) => {
+      this.domainMemoryEntries = entries;
+      this.renderSkillRegistry();
+      if (message) {
+        this.setPromptStatus(message, 'success');
+      }
+    });
+  }
+
   private setPromptStatus(message: string, tone: '' | 'success' | 'error' = ''): void {
     const statusEl = this.promptPanel.querySelector('.prompt-status') as HTMLElement | null;
     if (!statusEl) return;
@@ -4085,6 +4355,10 @@ export class ChatView {
       if (this.streamingWordQueue.length > 0) {
         this.streamingAccumulated += this.streamingWordQueue.shift()!;
         textSpan.innerHTML = this.formatMessage(this.streamingAccumulated);
+        this.streamingElement?.setAttribute(
+          'data-copy-text',
+          `${this.streamingAccumulated}${this.streamingWordQueue.join('')}`,
+        );
         this.scrollToBottom();
       } else {
         if (this.streamingTimer !== null) {
@@ -4096,18 +4370,11 @@ export class ChatView {
   }
 
   private escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return escapeMessageHtml(text);
   }
 
   private formatMessage(message: string): string {
-    return message
-      .replace(/(https?:\/\/[^\s),]+)/gi, '<a href="$1" target="_blank">$1</a>')
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      .replace(/`(.*?)`/g, '<code>$1</code>')
-      .replace(/\n/g, '<br>');
+    return formatAssistantMessage(message);
   }
 
   private scrollToBottom(): void {
@@ -4127,6 +4394,18 @@ export class ChatView {
 
   private chevronSvg(expanded: boolean, className = 'tool-steps-chevron'): string {
     return `<svg class="${className}${expanded ? ' rotated' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+  }
+
+  private messageCopySvg(): string {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="10" height="10"></rect><path d="M5 15V5h10"></path></svg>';
+  }
+
+  private messageCopiedSvg(): string {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 13l4 4L19 7"></path></svg>';
+  }
+
+  private messageCopyFailedSvg(): string {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"></path></svg>';
   }
 
   private checkSvg(): string {

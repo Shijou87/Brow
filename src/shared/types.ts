@@ -622,6 +622,44 @@ export interface DomainSkillProposalDraft {
   evidence?: string[];
 }
 
+// ─── Brow Domain Memory ────────────────────────────────────────────────────
+
+export type DomainMemoryOutcome = 'neutral' | 'success' | 'failure';
+
+export interface DomainMemoryEntry {
+  id: string;
+  version: 1;
+  title: string;
+  lesson: string;
+  appliesWhen?: string;
+  matcher?: DomainSkillMatcher;
+  tags: string[];
+  evidence: string[];
+  confidence: number;
+  enabled: boolean;
+  useCount: number;
+  successCount: number;
+  failureCount: number;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt?: number;
+  lastSucceededAt?: number;
+  lastFailedAt?: number;
+}
+
+export interface DomainMemoryDraft {
+  id?: string;
+  title: string;
+  lesson: string;
+  appliesWhen?: string;
+  matcher?: DomainSkillMatcher;
+  tags?: string[];
+  evidence?: string[];
+  confidence?: number;
+  enabled?: boolean;
+  outcome?: DomainMemoryOutcome;
+}
+
 export interface DomainTrustSetting {
   id: string;
   domain: string;
