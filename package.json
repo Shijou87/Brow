@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "webpack --mode development --watch",
     "build": "webpack --mode production",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test:prepare": "node scripts/build-test-fixtures.mjs",
+    "test": "npm run test:prepare && node --test tests/*.test.js",
+    "verify": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",
@@ -26,6 +30,7 @@
     "@langchain/core": "^0.3.0",
     "@langchain/langgraph": "^0.2.0",
     "@langchain/openai": "^0.3.0",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/ext-apps": "^1.6.0",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

@@ -10,6 +10,8 @@ module.exports = {
     'page-bridge': './src/content-script/page-bridge.ts',
     'webmcp-polyfill': './src/content-script/webmcp-polyfill.ts',
     'options': './src/options/index.ts',
+    'mcp-app-sandbox': './src/sidepanel/mcp-app-sandbox.ts',
+    'page-automation-runtime': './src/sidepanel/tab-tools/page-automation/runtime-entry.ts',
   },
   output: {
     path: path.resolve(__dirname, 'dist'),
@@ -22,6 +24,11 @@ module.exports = {
         test: /\.ts$/,
         use: 'ts-loader',
         exclude: /node_modules/,
+      },
+      {
+        test: /\.html$/,
+        include: path.resolve(__dirname, 'src/sidepanel/templates'),
+        type: 'asset/source',
       },
       {
         test: /\.scss$/,
@@ -43,6 +50,7 @@ module.exports = {
         { from: 'manifest.json', to: '.' },
         { from: 'sidepanel.html', to: '.' },
         { from: 'options.html', to: '.' },
+        { from: 'mcp-app-sandbox.html', to: '.' },
         { from: 'icons', to: 'icons', noErrorOnMissing: true },
       ],
     }),

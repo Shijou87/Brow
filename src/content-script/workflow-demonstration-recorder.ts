@@ -18,6 +18,13 @@ import type {
   WorkflowRecordingStopResult,
 } from '../shared/messages';
 import { StepBuilder, type WorkflowRawValueInput } from '../shared/workflow-demonstration';
+import {
+  buildWorkflowTargetSelector as buildSelector,
+  cleanOptionalDomText as cleanInlineText,
+  getControlLabelText as labelTextForControl,
+  getTrackedElementAttributes as trackedAttributes,
+  inferWorkflowTargetRole as inferRole,
+} from './dom-evidence';
 
 interface RecorderStartOptions {
   title?: string;
@@ -43,12 +50,6 @@ const TEXT_INPUT_TYPES = new Set(['', 'email', 'number', 'search', 'tel', 'text'
 const PICKER_INPUT_TYPES = new Set(['color', 'date', 'datetime-local', 'month', 'time', 'week']);
 const INTERACTIVE_TAG_NAMES = new Set(['a', 'button', 'canvas', 'form', 'input', 'label', 'option', 'select', 'summary', 'textarea']);
 const GENERIC_CONTAINER_TAG_NAMES = new Set(['div', 'g', 'path', 'span', 'svg']);
-
-function cleanInlineText(value: string | null | undefined, max = 160): string | undefined {
-  const text = (value ?? '').replace(/\s+/g, ' ').trim();
-  if (!text) return undefined;
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
 
 function stableId(prefix: string): string {
   return globalThis.crypto?.randomUUID?.()
@@ -116,156 +117,6 @@ function keyboardEvidenceFromEvent(event: KeyboardEvent): WorkflowDemonstrationK
     metaKey: event.metaKey || undefined,
     shiftKey: event.shiftKey || undefined,
   };
-}
-
-function escapeSelectorValue(value: string): string {
-  if (globalThis.CSS?.escape) return globalThis.CSS.escape(value);
-  return value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
-}
-
-function escapeAttributeValue(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-function canUseHashIdSelector(value: string): boolean {
-  return /^-?[_a-zA-Z][_a-zA-Z0-9-]*$/.test(value);
-}
-
-function buildIdSelector(value: string): string {
-  return canUseHashIdSelector(value)
-    ? `#${escapeSelectorValue(value)}`
-    : `[id="${escapeAttributeValue(value)}"]`;
-}
-
-function isUniqueSelectorFor(selector: string, element: Element): boolean {
-  try {
-    const matches = Array.from(element.ownerDocument.querySelectorAll(selector));
-    return matches.length === 1 && matches[0] === element;
-  } catch {
-    return false;
-  }
-}
-
-function buildDomPathSelector(element: Element): string | undefined {
-  const parts: string[] = [];
-  let current: Element | null = element;
-
-  while (current && current !== current.ownerDocument.body && parts.length < 7) {
-    const tagName = current.tagName.toLowerCase();
-    const parent = current.parentElement;
-    let part = tagName;
-
-    if (current.id) {
-      const idSelector = buildIdSelector(current.id);
-      const anchoredSelector = parts.length > 0 ? `${idSelector} > ${parts.join(' > ')}` : idSelector;
-      if (isUniqueSelectorFor(anchoredSelector, element)) return anchoredSelector;
-    }
-
-    if (parent) {
-      const sameTagSiblings = (Array.from(parent.children) as Element[])
-        .filter((sibling) => sibling.tagName === current!.tagName);
-      if (sameTagSiblings.length > 1) {
-        part += `:nth-of-type(${sameTagSiblings.indexOf(current) + 1})`;
-      }
-    }
-
-    parts.unshift(part);
-    const candidate = parts.join(' > ');
-    if (isUniqueSelectorFor(candidate, element)) return candidate;
-    current = parent;
-  }
-
-  return parts.length > 0 ? parts.join(' > ') : undefined;
-}
-
-function buildSelector(element: Element): string | undefined {
-  const tagName = element.tagName.toLowerCase();
-
-  if (element.id) {
-    const selector = buildIdSelector(element.id);
-    if (isUniqueSelectorFor(selector, element)) return selector;
-  }
-
-  const dataTestId = element.getAttribute('data-testid') ?? element.getAttribute('data-test');
-  if (dataTestId) {
-    for (const attrName of ['data-testid', 'data-test']) {
-      const value = element.getAttribute(attrName);
-      if (!value) continue;
-      const selector = `[${attrName}="${escapeAttributeValue(value)}"]`;
-      if (isUniqueSelectorFor(selector, element)) return selector;
-      const tagSelector = `${tagName}${selector}`;
-      if (isUniqueSelectorFor(tagSelector, element)) return tagSelector;
-    }
-  }
-
-  const name = element.getAttribute('name');
-  if (name) {
-    const selector = `${tagName}[name="${escapeAttributeValue(name)}"]`;
-    if (isUniqueSelectorFor(selector, element)) return selector;
-  }
-
-  for (const attrName of ['aria-label', 'placeholder', 'title', 'alt']) {
-    const value = element.getAttribute(attrName);
-    if (!value) continue;
-    const selector = `${tagName}[${attrName}="${escapeAttributeValue(value)}"]`;
-    if (isUniqueSelectorFor(selector, element)) return selector;
-  }
-
-  const classes = Array.from(element.classList).slice(0, 2);
-  if (classes.length > 0) {
-    const selector = `${tagName}.${classes.map((item) => escapeSelectorValue(item)).join('.')}`;
-    if (isUniqueSelectorFor(selector, element)) return selector;
-  }
-
-  return buildDomPathSelector(element) ?? tagName;
-}
-
-function inferRole(element: Element): string {
-  const explicitRole = cleanInlineText(element.getAttribute('role'));
-  if (explicitRole) return explicitRole;
-
-  const tagName = element.tagName.toLowerCase();
-  if (tagName === 'button') return 'button';
-  if (tagName === 'a' && (element as HTMLAnchorElement).href) return 'link';
-  if (tagName === 'select') return 'combobox';
-  if (tagName === 'textarea') return 'textbox';
-  if (tagName === 'form') return 'form';
-  if (tagName === 'canvas') return 'region';
-  if (tagName === 'summary') return 'button';
-
-  if (tagName === 'input') {
-    const type = (element as HTMLInputElement).type.toLowerCase();
-    if (type === 'checkbox') return 'checkbox';
-    if (type === 'radio') return 'radio';
-    if (type === 'submit' || type === 'button' || type === 'reset') return 'button';
-    if (type === 'file') return 'button';
-    return 'textbox';
-  }
-
-  if ((element as HTMLElement).isContentEditable) return 'textbox';
-  return 'region';
-}
-
-function trackedAttributes(element: Element): Record<string, string> | undefined {
-  const names = ['id', 'data-testid', 'data-test', 'aria-label', 'name', 'placeholder', 'title', 'alt'];
-  const entries = names
-    .map((name) => [name, element.getAttribute(name)] as const)
-    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0);
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function labelTextForControl(element: Element): string | undefined {
-  if (
-    element instanceof HTMLInputElement
-    || element instanceof HTMLTextAreaElement
-    || element instanceof HTMLSelectElement
-  ) {
-    const labelText = Array.from(element.labels ?? [])
-      .map((label) => label.textContent ?? '')
-      .join(' ');
-    return cleanInlineText(labelText, 120);
-  }
-  return undefined;
 }
 
 function directElementName(element: Element, max = 120): string | undefined {

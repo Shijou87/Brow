@@ -3,6 +3,7 @@
 Chrome extension (Manifest V3) that runs a **LangGraph.js React agent** in the browser side-panel with support for:
 
 - **MCP Servers** – connect to remote MCP (Model Context Protocol) HTTP servers, discover their tools, and invoke them from the agent
+- **MCP Apps** – render approved app-backed MCP tool results inline in chat through a sandboxed iframe host
 - **WebMCP** – dynamically discover tools exposed by the active tab via the WebMCP page-level protocol
 - **Tab Tools** – built-in browser tools for listing tabs, reading content, inspecting interactive elements, clicking, typing, filling forms, navigating, and screenshot analysis
 - **Configurable LLM** – switch between OpenAI-compatible endpoints from the options page
@@ -32,10 +33,11 @@ Chrome extension (Manifest V3) that runs a **LangGraph.js React agent** in the b
 | `src/options/` | Options page for LLM configuration |
 | `src/shared/` | Shared types and logger |
 | `test-page/` | Local HTML page that exposes sample WebMCP tools |
+| `test/fastmcp-app/` | Manual FastMCP MCP Apps harness for inline app rendering |
 
 ## Prerequisites
 
-- **Node.js** ≥ 18
+- **Node.js** ≥ 20
 - **npm** ≥ 9
 
 ## Getting Started

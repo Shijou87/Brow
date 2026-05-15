@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Search Results</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px auto;
+      max-width: 820px;
+      line-height: 1.5;
+    }
+
+    .result {
+      border: 1px solid #c9d3e4;
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin-block: 14px;
+    }
+
+    a {
+      color: #0b57d0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Fixture Search Results</h1>
+  <p id="query-summary" role="status">Showing results.</p>
+
+  <div class="result">
+    <a id="docs-result" href="docs-target.html">Browser Snapshot Reference</a>
+    <p>Stable documentation result for navigation and result disambiguation tests.</p>
+  </div>
+
+  <div class="result">
+    <a id="news-result" href="https://example.com/news">Breaking browser news</a>
+    <p>Decoy result that is intentionally less relevant than the documentation target.</p>
+  </div>
+
+  <p><a id="back-to-search" href="search-home.html">Back to fixture search</a></p>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const query = params.get('q') || 'fixture query';
+    document.getElementById('query-summary').textContent = `Showing results for “${query}”.`;
+    const docsResult = document.getElementById('docs-result');
+    docsResult.href = `docs-target.html?q=${encodeURIComponent(query)}`;
+  </script>
+</body>
+</html>

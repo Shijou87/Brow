@@ -1,0 +1,175 @@
+@use './base-layout' as *;
+
+.mcp-app-container {
+  margin: 10px 0;
+  flex-shrink: 0;
+  border-radius: 0;
+  border: 2px solid $outline-variant;
+  overflow: hidden;
+  background: $surface-high;
+  box-shadow: $panel-shadow;
+
+  &.mcp-app-error {
+    border-color: rgba(255, 110, 132, 0.7);
+  }
+
+  &.mcp-app-live.borderless {
+    border-color: transparent;
+    box-shadow: none;
+  }
+
+  .mcp-app-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .mcp-app-header,
+  .mcp-app-live-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .mcp-app-header strong,
+  .mcp-app-live-header strong {
+    display: block;
+    color: $text-primary;
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+
+  .mcp-app-header p {
+    margin-top: 4px;
+    color: $text-secondary;
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .mcp-app-header > span,
+  .mcp-app-live-header > span {
+    flex-shrink: 0;
+    border: 1px solid rgba(47, 248, 1, 0.6);
+    padding: 3px 6px;
+    color: $secondary;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .mcp-app-status,
+  .mcp-app-error-text {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    color: $text-secondary;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .mcp-app-error-text {
+    color: #ffb7c4;
+    overflow-wrap: anywhere;
+  }
+
+  .mcp-app-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(186, 201, 204, 0.25);
+    border-top-color: $secondary;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  .mcp-app-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .mcp-app-meta-grid div {
+    min-width: 0;
+    border: 1px solid rgba(132, 147, 150, 0.35);
+    background: rgba(0, 0, 0, 0.18);
+    padding: 8px;
+  }
+
+  .mcp-app-meta-grid span {
+    display: block;
+    margin-bottom: 3px;
+    color: $text-faint;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .mcp-app-meta-grid strong {
+    display: block;
+    color: $text-primary;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  .mcp-app-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .mcp-app-approve-btn,
+  .mcp-app-skip-btn {
+    min-height: 34px;
+    border: 2px solid $outline-variant;
+    border-radius: 0;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .mcp-app-approve-btn {
+    border-color: $secondary;
+    background: $secondary;
+    color: #071007;
+  }
+
+  .mcp-app-skip-btn {
+    background: transparent;
+    color: $text-secondary;
+  }
+
+  .mcp-app-live-header {
+    padding: 8px 10px;
+    border-bottom: 2px solid $outline-variant;
+    background: rgba(0, 0, 0, 0.2);
+  }
+
+  .mcp-app-live-header > span {
+    border-color: rgba(132, 147, 150, 0.35);
+    color: $text-secondary;
+  }
+
+  .mcp-app-frame-shell {
+    background: #fff;
+  }
+
+  .mcp-app-iframe {
+    display: block;
+    width: 100%;
+    min-height: 240px;
+    border: none;
+    background: #fff;
+  }
+}

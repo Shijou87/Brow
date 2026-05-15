@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Travel Redirect</title>
+</head>
+<body>
+  <p id="redirect-status" role="status">Preparing travel results…</p>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    params.set('redirected', '1');
+    window.location.replace(`travel-results.html?${params.toString()}`);
+  </script>
+</body>
+</html>

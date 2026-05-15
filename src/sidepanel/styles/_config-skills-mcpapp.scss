@@ -1,0 +1,699 @@
+@use './base-layout' as *;
+
+.llm-config-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  overflow-y: auto;
+  padding: 18px;
+}
+
+.config-panel-inner,
+.tools-panel-inner,
+.mcp-panel-inner,
+.conversations-panel-inner {
+  position: relative;
+  min-height: 100%;
+  padding: 20px 18px 18px;
+  border-radius: 0;
+  border: 2px solid $outline-variant;
+  background: $surface-high;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.2);
+}
+
+.config-panel-inner {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: auto;
+  flex: 1 0 auto;
+  gap: 14px;
+}
+
+.prompt-panel-note,
+.skills-registry-subtitle,
+.skills-empty-state,
+.skill-card-meta {
+  color: $text-secondary;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.skills-registry-header,
+.skill-editor-header,
+.skill-editor-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skills-registry-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skills-registry-count {
+  color: $accent;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.skills-import-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skills-import-url-row {
+  display: flex;
+  gap: 8px;
+
+  input {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.skills-import-url-btn {
+  flex-shrink: 0;
+}
+
+.skills-dropzone {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+  padding: 12px 14px;
+  border: 2px dashed $outline-variant;
+  background: rgba(255, 255, 255, 0.02);
+  color: $text-secondary;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+
+  &:hover,
+  &.is-dragover {
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
+    color: $text-primary;
+  }
+
+  code {
+    display: inline-block;
+    margin: 0 2px;
+    padding: 1px 6px;
+    border: 1px solid $outline-variant;
+    background: $surface-high;
+    color: $accent;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 11px;
+  }
+}
+
+.skills-file-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.skills-registry-list {
+  display: grid;
+  gap: 12px;
+}
+
+.domain-memory-advanced {
+  border: 2px solid $outline-variant;
+  background: rgba(255, 255, 255, 0.02);
+
+  summary {
+    cursor: pointer;
+    padding: 12px 14px;
+    color: $accent;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+}
+
+.domain-memory-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
+.domain-memory-count {
+  color: $accent;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.domain-memory-list {
+  display: grid;
+  gap: 12px;
+}
+
+.domain-memory-editor-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.domain-memory-lesson-input {
+  min-height: 120px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.skill-editor-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.skills-empty-state {
+  padding: 16px;
+  border: 2px dashed $outline-variant;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 2px solid $outline-variant;
+  background: $bg;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.18);
+}
+
+.skill-card.enabled {
+  border-color: rgba(168, 85, 247, 0.45);
+}
+
+.skill-card.is-editing {
+  border-color: $accent;
+  box-shadow: 4px 4px 0 0 rgba(168, 85, 247, 0.16);
+}
+
+.skill-card.disabled {
+  opacity: 0.72;
+}
+
+.skill-card-header,
+.skill-card-title-group,
+.skill-card-footer,
+.skill-card-actions,
+.skill-card-tags {
+  display: flex;
+  gap: 8px;
+}
+
+.skill-card-header {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.skill-card-footer {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skill-card-title-group {
+  flex-direction: column;
+  min-width: 0;
+}
+
+.skill-card-title {
+  color: $accent;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.skill-card-slug {
+  color: $text-secondary;
+  font-size: 11px;
+  word-break: break-word;
+}
+
+.skill-card-description {
+  color: $text-primary;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.skill-card-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.skill-card-tags {
+  flex-wrap: wrap;
+}
+
+.skill-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  background: rgba(168, 85, 247, 0.08);
+  color: $accent;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.skills-new-btn,
+.skills-import-url-btn,
+.skill-toggle-btn,
+.skill-edit-btn,
+.skill-proposal-reject-btn,
+.skill-remove-btn,
+.skill-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  background: $bg;
+  color: $text-secondary;
+  cursor: pointer;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+
+  &:hover {
+    border-color: $accent;
+    color: $accent;
+    background: rgba(168, 85, 247, 0.08);
+  }
+}
+
+.skill-remove-btn {
+  align-self: flex-end;
+  min-width: 34px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.skill-toggle-btn.is-enabled {
+  border-color: $accent;
+  color: $accent;
+  background: rgba(168, 85, 247, 0.12);
+}
+
+.skill-proposal-reject-btn {
+  border-color: rgba(255, 110, 132, 0.38);
+  color: $error;
+  background: rgba(255, 110, 132, 0.04);
+
+  &:hover {
+    border-color: $error;
+    color: $error;
+    background: rgba(255, 110, 132, 0.12);
+  }
+}
+
+.skill-card-inline-editor {
+  margin-top: -4px;
+}
+
+.skill-editor-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 2px solid $accent;
+  background: rgba(9, 10, 18, 0.98);
+  box-shadow: 4px 4px 0 0 $shadow-purple;
+}
+
+.skill-editor-title {
+  margin: 0;
+  color: $accent;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.skill-editor-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.skill-content-input,
+.skill-content-preview {
+  min-height: 260px;
+}
+
+.skill-content-input {
+  resize: vertical;
+  line-height: 1.55;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.skill-editor-actions {
+  align-items: center;
+}
+
+.skill-editor-actions .config-apply-btn {
+  width: auto;
+  margin-top: 0;
+}
+
+.config-mode-toggle {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 0;
+  background: $bg;
+  border: 2px solid $outline-variant;
+
+  .config-mode-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 8px 0;
+    border: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: $text-secondary;
+    cursor: pointer;
+    font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    transition:
+      background 0.12s ease,
+      color 0.12s ease,
+      border-color 0.12s ease;
+
+    &.active {
+      background: rgba(168, 85, 247, 0.2);
+      color: $accent;
+      border-color: $accent;
+    }
+
+    &:hover:not(.active) {
+      color: $text-primary;
+      background: rgba(168, 85, 247, 0.06);
+    }
+  }
+}
+
+.provider-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex-shrink: 0;
+  image-rendering: auto;
+}
+
+.config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  label {
+    color: $text-secondary;
+    font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  input,
+  select,
+  textarea {
+    width: 100%;
+    padding: 11px 12px;
+    border: 2px solid $outline-variant;
+    border-radius: 0;
+    background: $bg;
+    color: $text-primary;
+    outline: none;
+    transition:
+      border-color 0.12s ease,
+      box-shadow 0.12s ease;
+
+    &::placeholder {
+      color: rgba(186, 201, 204, 0.4);
+    }
+
+    &:focus {
+      border-color: $accent;
+      box-shadow: 4px 4px 0 0 $shadow-purple;
+    }
+  }
+}
+
+.config-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.config-editor-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 2px solid $outline-variant;
+  background: $bg;
+}
+
+.config-editor-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 74px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 2px solid transparent;
+  background: transparent;
+  color: $text-secondary;
+  cursor: pointer;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+
+  &.active {
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.18);
+    color: $accent;
+  }
+
+  &:hover:not(.active) {
+    color: $text-primary;
+    background: rgba(168, 85, 247, 0.06);
+  }
+}
+
+.config-system-prompt-input,
+.config-system-prompt-preview {
+  min-height: 420px;
+}
+
+.config-system-prompt-input {
+  resize: vertical;
+  line-height: 1.55;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.config-system-prompt-preview {
+  overflow-y: auto;
+  padding: 14px 16px;
+  border: 2px solid $outline-variant;
+  background: $bg;
+  color: $text-primary;
+  line-height: 1.6;
+
+  h4 {
+    margin: 0 0 10px;
+    color: $accent;
+    font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  p {
+    margin: 0 0 10px;
+  }
+
+  ul,
+  ol {
+    margin: 0 0 12px 18px;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  code {
+    display: inline-block;
+    padding: 1px 6px;
+    background: $surface-high;
+    border: 1px solid $outline-variant;
+    color: $secondary;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 12px;
+  }
+
+  a {
+    color: $accent;
+  }
+}
+
+.config-endpoint-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: nowrap;
+
+  input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+}
+
+.config-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  flex-shrink: 0;
+  background: $bg;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  color: $text-secondary;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease;
+
+  &:hover {
+    color: $accent;
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
+  }
+
+  &.spinning svg {
+    animation: spin 0.8s linear infinite;
+  }
+}
+
+.config-divider {
+  border: 0;
+  border-top: 2px solid $outline-variant;
+  margin: 4px 0 0;
+}
+
+.config-section-title {
+  color: $accent;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
+}
+
+.config-apply-btn,
+.conversations-new-btn,
+.mcp-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 10px 16px;
+  border: 2px solid $accent;
+  border-radius: 0;
+  background: $accent;
+  color: $surface-low;
+  cursor: pointer;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 4px 4px 0 0 $shadow-purple;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
+
+  &:hover:not(:disabled) {
+    transform: translate(2px, 2px);
+    box-shadow: none;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.config-apply-btn {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.config-status,
+.mcp-add-status {
+  min-height: 18px;
+  text-align: center;
+  font-size: 12px;
+  color: $text-secondary;
+
+  &.success {
+    color: $success;
+  }
+
+  &.error {
+    color: $error;
+  }
+}
+
+.config-model-select {
+  width: 100%;
+}

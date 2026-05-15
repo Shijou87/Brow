@@ -1,0 +1,409 @@
+@use './base-layout' as *;
+
+.bottom-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 8px;
+  padding: 8px 12px 14px;
+  border: 2px solid $outline-variant;
+  border-top: 4px solid $accent;
+  border-radius: 0;
+  background: $surface-low;
+  box-shadow: 0 -4px 0 0 $shadow-purple;
+  flex-shrink: 0;
+}
+
+.bottom-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  background: transparent;
+  color: $text-secondary;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    background 0.12s ease,
+    border-color 0.12s ease,
+    transform 0.12s ease;
+
+  &:hover {
+    color: $accent;
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.08);
+  }
+
+  &:active {
+    transform: translate(2px, 2px);
+  }
+
+  &.active {
+    color: $surface-low;
+    background: $accent;
+    border-color: $accent;
+    box-shadow: 4px 4px 0 0 $shadow-purple;
+  }
+
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.chat-home-btn.active {
+  color: $surface-low;
+  background: $accent;
+  border-color: $accent;
+  box-shadow: 4px 4px 0 0 $shadow-purple;
+}
+
+#send-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 0;
+  cursor: pointer;
+  background: $accent;
+  border: 2px solid $accent;
+  color: $surface-low;
+  box-shadow: 4px 4px 0 0 $shadow-purple;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease,
+    opacity 0.12s ease;
+
+  &:hover:not(:disabled) {
+    transform: translate(2px, 2px);
+    box-shadow: none;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.35;
+    box-shadow: none;
+  }
+}
+
+#send-button {
+
+  &.is-stop {
+    background: $error;
+    border-color: $error;
+    box-shadow: 4px 4px 0 0 rgba(120, 14, 36, 0.85);
+  }
+}
+
+.tool-steps-tracker {
+  width: 100%;
+  align-self: stretch;
+  flex-shrink: 0;
+  margin: 4px 0;
+  border: 2px solid rgba(168, 85, 247, 0.3);
+  border-radius: 0;
+  background: $surface-low;
+  box-shadow: 4px 4px 0 0 rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+
+  .tool-steps-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: background 0.18s ease;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    &.static {
+      cursor: default;
+
+      &:hover {
+        background: transparent;
+      }
+    }
+  }
+
+  .tool-steps-header-left,
+  .tool-steps-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .tool-steps-header-text {
+    color: $text-primary;
+    font-weight: 600;
+  }
+
+  .tool-steps-count,
+  .tool-step-duration,
+  .tool-steps-toggle {
+    color: $text-secondary;
+    font-size: 12px;
+  }
+
+  .tool-steps-chevron {
+    width: 16px;
+    height: 16px;
+    color: $text-secondary;
+    transition: transform 0.2s ease;
+
+    &.rotated {
+      transform: rotate(180deg);
+    }
+  }
+
+  .tool-steps-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    max-height: 520px;
+    border-top: 1px solid $outline-variant;
+    transition:
+      max-height 0.2s ease,
+      opacity 0.15s ease;
+    opacity: 1;
+
+    &.collapsed {
+      max-height: 0;
+      opacity: 0;
+      border-top: none;
+    }
+  }
+
+  .tool-steps-timeline {
+    position: relative;
+    max-height: 420px;
+    overflow-y: auto;
+    padding: 8px 16px 0;
+    overscroll-behavior: contain;
+  }
+
+  .tool-step-item {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 0 12px;
+
+    &:not(:last-of-type)::before {
+      content: '';
+      position: absolute;
+      left: 9px;
+      top: 28px;
+      bottom: -8px;
+      width: 2px;
+      background: $outline-variant;
+    }
+
+    &.completed:not(:last-of-type)::before {
+      background: $secondary;
+    }
+
+    &.error:not(:last-of-type)::before {
+      background: #d86a6a;
+    }
+
+    &.awaiting_approval:not(:last-of-type)::before {
+      background: #e3b341;
+    }
+  }
+
+  .tool-step-connector,
+  .tool-step-icon {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+
+  .tool-step-check,
+  .tool-step-approval,
+  .tool-step-error,
+  .tool-step-spinner {
+    width: 18px;
+    height: 18px;
+  }
+
+  .tool-step-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .tool-step-label {
+    color: $text-primary;
+    font-weight: 600;
+  }
+
+  .tool-step-description {
+    color: $secondary;
+    font-size: 12px;
+
+    &.error {
+      color: #f0a3a3;
+    }
+
+    &.approval {
+      color: #f3cf78;
+    }
+  }
+
+  .tool-step-approval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .tool-step-approval-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    padding: 0 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 0;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition:
+      transform 0.12s ease,
+      border-color 0.12s ease,
+      background 0.12s ease;
+
+    &:hover {
+      transform: translate(1px, 1px);
+    }
+
+    &.allow {
+      background: #16b3a7;
+      border-color: #2ce0d1;
+      color: #041614;
+      box-shadow: 3px 3px 0 0 rgba(7, 51, 47, 0.7);
+    }
+
+    &.allow-all {
+      background: rgba(227, 179, 65, 0.15);
+      border-color: rgba(227, 179, 65, 0.75);
+      color: #f3cf78;
+      box-shadow: 3px 3px 0 0 rgba(77, 56, 9, 0.7);
+    }
+
+    &.skip {
+      background: rgba(255, 255, 255, 0.04);
+      border-color: rgba(255, 255, 255, 0.15);
+      color: $text-secondary;
+      box-shadow: 3px 3px 0 0 rgba(0, 0, 0, 0.35);
+    }
+  }
+
+  .tool-step-detail-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    width: fit-content;
+    margin-top: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: $text-secondary;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+
+    &:hover {
+      color: $text-primary;
+    }
+  }
+
+  .tool-step-detail-chevron {
+    width: 12px;
+    height: 12px;
+    transition: transform 0.2s ease;
+
+    &.rotated {
+      transform: rotate(180deg);
+    }
+  }
+
+  .tool-step-details {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+
+    &.collapsed {
+      display: none;
+    }
+  }
+
+  .tool-step-detail-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.025);
+
+    &.error {
+      border-color: rgba(216, 106, 106, 0.45);
+      background: rgba(216, 106, 106, 0.08);
+    }
+  }
+
+  .tool-step-detail-label {
+    color: $text-secondary;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .tool-step-detail-content {
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    color: $text-primary;
+    font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .tool-steps-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    padding: 10px 16px 14px;
+    cursor: pointer;
+
+    &:hover {
+      color: $text-primary;
+    }
+
+    .tool-steps-chevron {
+      width: 14px;
+      height: 14px;
+    }
+  }
+}

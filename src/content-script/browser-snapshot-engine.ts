@@ -4,8 +4,14 @@ import {
   isGenericSnapshotTag,
   selectSnapshotEntriesForDisplay,
 } from '../shared/browser-snapshot-selection';
-import { scoreElementSignature } from '../shared/browser-snapshot-signature';
 import { prioritizeFormSnapshotControls } from './form-snapshot-priority';
+import { createBrowserSnapshotResolutionRuntime } from './browser-snapshot-resolution';
+import {
+  buildBrowserSnapshotSelector as buildSelector,
+  cleanDomText as cleanText,
+  getSnapshotLabelText as getLabelText,
+  inferBrowserSnapshotRole as inferRole,
+} from './dom-evidence';
 import type {
   BrowserComboboxControlledPopup,
   BrowserComboboxOption,
@@ -24,9 +30,6 @@ import type {
   BrowserSnapshotOptions,
   BrowserViewportInfo,
   BrowserViewportRect,
-  BrowserVisualRegion,
-  BrowActionRepairCandidate,
-  BrowReplayTargetEvidence,
 } from '../shared/types';
 
 const STATE_KEY = '__browBrowserSnapshotState__';
@@ -34,7 +37,6 @@ const BROW_REF_PREFIX = 'brow-ref://';
 const MAX_STORED_SNAPSHOTS = 5;
 const MAX_REGISTRY_ELEMENTS = 1000;
 const MIN_MEMORY_MATCH_SCORE = 38;
-let selectorUniquenessCacheByDocument: WeakMap<Document, Map<string, Element | null>> = new WeakMap();
 
 type StoredSnapshot = {
   snapshotId: string;
@@ -72,11 +74,6 @@ function isElementNode(value: unknown): value is Element {
     && typeof value === 'object'
     && (value as Node).nodeType === 1
     && typeof (value as Element).getBoundingClientRect === 'function';
-}
-
-function cleanText(value: string | null | undefined, max = 160): string {
-  const cleaned = (value ?? '').replace(/\s+/g, ' ').trim();
-  return cleaned.length > max ? `${cleaned.slice(0, max)}...` : cleaned;
 }
 
 function round(value: number): number {
@@ -130,104 +127,6 @@ function isVisible(el: Element): boolean {
   return true;
 }
 
-function escapeAttributeValue(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-function escapeCss(value: string): string {
-  if (globalThis.CSS?.escape) return globalThis.CSS.escape(value);
-  return value.replace(/["\\]/g, '\\$&');
-}
-
-function hasReliableValue(value: string | null | undefined): value is string {
-  if (!value) return false;
-  const trimmed = value.trim();
-  return Boolean(trimmed) && !['undefined', 'null', 'nan'].includes(trimmed.toLowerCase());
-}
-
-function canUseHashIdSelector(value: string): boolean {
-  return /^-?[_a-zA-Z][_a-zA-Z0-9-]*$/.test(value);
-}
-
-function buildIdSelector(value: string): string {
-  return canUseHashIdSelector(value)
-    ? `#${escapeCss(value)}`
-    : `[id="${escapeAttributeValue(value)}"]`;
-}
-
-function isUniqueSelectorFor(selector: string, el: Element): boolean {
-  try {
-    const ownerDocument = el.ownerDocument ?? document;
-    let selectorCache = selectorUniquenessCacheByDocument.get(ownerDocument);
-    if (!selectorCache) {
-      selectorCache = new Map<string, Element | null>();
-      selectorUniquenessCacheByDocument.set(ownerDocument, selectorCache);
-    }
-    if (!selectorCache.has(selector)) {
-      const matches = Array.from(ownerDocument.querySelectorAll(selector));
-      selectorCache.set(selector, matches.length === 1 ? matches[0] : null);
-    }
-    return selectorCache.get(selector) === el;
-  } catch {
-    return false;
-  }
-}
-
-function buildAttributeSelector(tag: string, attrName: string, attrValue: string | null): string | null {
-  return hasReliableValue(attrValue)
-    ? `${tag}[${attrName}="${escapeAttributeValue(attrValue)}"]`
-    : null;
-}
-
-function buildDomPath(el: Element): string {
-  const parts: string[] = [];
-  let current: Element | null = el;
-
-  while (current && current !== document.body && parts.length < 7) {
-    const htmlEl = current as HTMLElement;
-    if (hasReliableValue(htmlEl.id)) {
-      const idSelector = buildIdSelector(htmlEl.id);
-      const anchoredSelector = parts.length > 0 ? `${idSelector} > ${parts.join(' > ')}` : idSelector;
-      if (isUniqueSelectorFor(anchoredSelector, el)) return anchoredSelector;
-    }
-
-    let part = current.tagName.toLowerCase();
-    const parent = current.parentElement;
-    if (parent) {
-      const siblings = Array.from(parent.children as HTMLCollectionOf<Element>).filter(
-        (child: Element) => child.tagName === current!.tagName,
-      );
-      if (siblings.length > 1) {
-        part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
-      }
-    }
-    parts.unshift(part);
-    current = parent;
-  }
-
-  return parts.join(' > ') || el.tagName.toLowerCase();
-}
-
-function buildSelector(el: Element): string {
-  const tag = el.tagName.toLowerCase();
-  const htmlEl = el as HTMLElement;
-  const attrCandidates: Array<string | null> = [
-    hasReliableValue(htmlEl.id) ? buildIdSelector(htmlEl.id) : null,
-    buildAttributeSelector(tag, 'data-testid', el.getAttribute('data-testid')),
-    buildAttributeSelector(tag, 'data-test', el.getAttribute('data-test')),
-    buildAttributeSelector(tag, 'aria-label', el.getAttribute('aria-label')),
-    buildAttributeSelector(tag, 'name', el.getAttribute('name')),
-    buildAttributeSelector(tag, 'placeholder', el.getAttribute('placeholder')),
-    buildAttributeSelector(tag, 'title', el.getAttribute('title')),
-  ];
-
-  for (const candidate of attrCandidates) {
-    if (candidate && isUniqueSelectorFor(candidate, el)) return candidate;
-  }
-
-  return buildDomPath(el);
-}
-
 function getDepth(el: Element): number {
   let depth = 0;
   let current = el.parentElement;
@@ -236,17 +135,6 @@ function getDepth(el: Element): number {
     current = current.parentElement;
   }
   return depth;
-}
-
-function getLabelText(el: Element): string {
-  const input = el as HTMLInputElement;
-  const labels = input.labels ? Array.from(input.labels) : [];
-  const labelText = labels.map((label) => cleanText(label.textContent || label.innerText, 80)).find(Boolean);
-  if (labelText) return labelText;
-
-  const wrappingLabel = el.closest('label');
-  if (wrappingLabel) return cleanText(wrappingLabel.textContent || wrappingLabel.innerText, 80);
-  return '';
 }
 
 function getAriaLabelledByText(el: Element): string {
@@ -265,45 +153,6 @@ function getAriaDescribedByText(el: Element): string {
     const target = ownerDocument.getElementById(id);
     return target?.textContent || target?.innerText || '';
   }).join(' '), 180);
-}
-
-function inferRole(el: Element): string {
-  const explicit = cleanText(el.getAttribute('role'), 50);
-  if (explicit) return explicit;
-
-  const tag = el.tagName.toLowerCase();
-  if (tag === 'a' && (el as HTMLAnchorElement).href) return 'link';
-  if (tag === 'button') return 'button';
-  if (tag === 'textarea') return 'textbox';
-  if (tag === 'select') return 'combobox';
-  if (tag === 'summary') return 'button';
-  if (tag === 'img') return 'image';
-  if (tag === 'nav') return 'navigation';
-  if (tag === 'main') return 'main';
-  if (tag === 'header') return 'banner';
-  if (tag === 'footer') return 'contentinfo';
-  if (tag === 'form') return 'form';
-  if (tag === 'table') return 'table';
-  if (tag === 'tr') return 'row';
-  if (tag === 'th') return 'columnheader';
-  if (tag === 'td') return 'cell';
-  if (tag === 'ul' || tag === 'ol') return 'list';
-  if (tag === 'li') return 'listitem';
-  if (tag === 'article') return 'article';
-  if (tag === 'section') return 'region';
-  if (tag === 'canvas' || tag === 'svg' || tag === 'video') return 'region';
-  if (/^h[1-6]$/.test(tag)) return 'heading';
-  if (tag === 'input') {
-    const type = ((el as HTMLInputElement).type || 'text').toLowerCase();
-    if (type === 'checkbox') return 'checkbox';
-    if (type === 'radio') return 'radio';
-    if (type === 'range') return 'slider';
-    if (type === 'search') return 'searchbox';
-    if (['button', 'submit', 'reset'].includes(type)) return 'button';
-    return 'textbox';
-  }
-  if ((el as HTMLElement).isContentEditable) return 'textbox';
-  return 'text';
 }
 
 function getElementText(el: Element, max = 160): string {
@@ -702,7 +551,6 @@ function normalizeOptions(options?: BrowserSnapshotOptions): Required<Pick<Brows
 
 function captureSnapshot(tabId: number, options?: BrowserSnapshotOptions): CaptureResult {
   const normalized = normalizeOptions(options);
-  selectorUniquenessCacheByDocument = new WeakMap();
   const storedRoot = normalized.rootRef
     ? resolveStoredElement(normalized.rootRef, normalized.snapshotId)
     : null;
@@ -1296,353 +1144,34 @@ function captureFormSnapshot(tabId: number, options?: BrowserFormSnapshotOptions
   };
 }
 
-function findBySelector(entry: BrowserSnapshotElement): Element | null {
-  if (!entry.selector) return null;
-  try {
-    const matches = Array.from(document.querySelectorAll(entry.selector)).filter((candidate) => isVisible(candidate));
-    if (matches.length !== 1) return null;
-    return matches[0];
-  } catch {
-    return null;
-  }
-}
-
-function scoreRecoveryCandidate(oldEntry: BrowserSnapshotElement, candidate: BrowserSnapshotElement): number {
-  let score = 0;
-  if (candidate.tagName === oldEntry.tagName) score += 4;
-  if (candidate.role === oldEntry.role) score += 6;
-  if (candidate.type && candidate.type === oldEntry.type) score += 4;
-  if (candidate.name && oldEntry.name && candidate.name === oldEntry.name) score += 24;
-  if (candidate.text && oldEntry.text && candidate.text === oldEntry.text) score += 10;
-  if (candidate.attributes?.id && candidate.attributes.id === oldEntry.attributes?.id) score += 30;
-  if (candidate.attributes?.['data-testid'] && candidate.attributes['data-testid'] === oldEntry.attributes?.['data-testid']) score += 30;
-  if (candidate.attributes?.name && candidate.attributes.name === oldEntry.attributes?.name) score += 12;
-  if (candidate.attributes?.placeholder && candidate.attributes.placeholder === oldEntry.attributes?.placeholder) score += 12;
-
-  const dx = Math.abs(candidate.bounds.left - oldEntry.bounds.left);
-  const dy = Math.abs(candidate.bounds.top - oldEntry.bounds.top);
-  if (dx <= 4 && dy <= 4) score += 8;
-  else if (dx <= 32 && dy <= 32) score += 4;
-
-  return score;
-}
-
-function scoreTargetEvidenceCandidate(target: BrowReplayTargetEvidence, candidate: BrowserSnapshotElement): number {
-  const signature = target.signature ?? {};
-  let score = 0;
-
-  if (target.selector && candidate.selector === target.selector) score += 42;
-  if (signature.selector && candidate.selector === signature.selector) score += 24;
-  if (signature.role && candidate.role === signature.role) score += 16;
-  if (signature.tagName && candidate.tagName === signature.tagName) score += 10;
-  if (signature.type && candidate.type === signature.type) score += 8;
-
-  const candidateName = (candidate.name ?? '').replace(/\s+/g, ' ').trim();
-  const signatureName = (signature.name ?? '').replace(/\s+/g, ' ').trim();
-  if (signatureName && candidateName) {
-    if (candidateName === signatureName) score += 36;
-    else if (candidateName.toLowerCase() === signatureName.toLowerCase()) score += 24;
-    else if (candidateName.toLowerCase().includes(signatureName.toLowerCase())) score += 10;
-  }
-
-  const candidateText = (candidate.text ?? '').replace(/\s+/g, ' ').trim();
-  const signatureText = (signature.text ?? '').replace(/\s+/g, ' ').trim();
-  if (signatureText && candidateText) {
-    if (candidateText === signatureText) score += 14;
-    else if (candidateText.toLowerCase() === signatureText.toLowerCase()) score += 8;
-    else if (candidateText.toLowerCase().includes(signatureText.toLowerCase())) score += 4;
-  }
-
-  const attrs = signature.attributes ?? {};
-  const candidateAttrs = candidate.attributes ?? {};
-  const weightedAttrs: Array<[string, number]> = [
-    ['id', 30],
-    ['data-testid', 30],
-    ['data-test', 26],
-    ['aria-label', 22],
-    ['name', 16],
-    ['placeholder', 16],
-    ['title', 14],
-    ['alt', 14],
-  ];
-  for (const [name, weight] of weightedAttrs) {
-    if (attrs[name] && attrs[name] === candidateAttrs[name]) score += weight;
-  }
-
-  if (target.bounds) {
-    const dx = Math.abs(candidate.bounds.left - target.bounds.left);
-    const dy = Math.abs(candidate.bounds.top - target.bounds.top);
-    if (dx <= 4 && dy <= 4) score += 8;
-    else if (dx <= 32 && dy <= 32) score += 4;
-  }
-
-  return score;
-}
-
-function repairCandidateFromEntry(entry: BrowserSnapshotElement, score: number): BrowActionRepairCandidate {
-  return {
-    ref: entry.ref,
-    selector: entry.selector,
-    role: entry.role,
-    name: entry.name,
-    tagName: entry.tagName,
-    score,
-    bounds: entry.bounds,
-    attributes: entry.attributes,
-  };
-}
-
-function recoverRef(
-  oldEntry: BrowserSnapshotElement,
-  currentEntries: BrowserSnapshotElement[],
-  requireActionable: boolean,
-): BrowserSnapshotElement | null {
-  const selectorMatch = findBySelector(oldEntry);
-  if (selectorMatch) {
-    const entry = currentEntries.find((candidate) => candidate.selector === buildSelector(selectorMatch));
-    if (entry && (!requireActionable || entry.actionable)) {
-      const score = scoreRecoveryCandidate(oldEntry, entry);
-      if (score >= 18) return entry;
-    }
-  }
-
-  const scored = currentEntries
-    .filter((candidate) => !requireActionable || candidate.actionable)
-    .map((candidate) => ({ candidate, score: scoreRecoveryCandidate(oldEntry, candidate) }))
-    .filter((item) => item.score >= 24)
-    .sort((left, right) => right.score - left.score);
-
-  if (scored.length === 0) return null;
-  const [best, second] = scored;
-  if (second && best.score - second.score < 8) return null;
-  return best.candidate;
-}
-
-function requireEditableForEntry(entry: BrowserSnapshotElement): boolean {
-  return ['textbox', 'searchbox'].includes(entry.role);
-}
-
-function resolutionSelector(snapshotId: string, ref: string): string {
-  return `${BROW_REF_PREFIX}${snapshotId}/${ref}`;
-}
-
-function makeRegion(snapshotId: string, entry: BrowserSnapshotElement, viewport: BrowserViewportInfo): BrowserVisualRegion {
-  return {
-    source: 'ref',
-    ref: entry.ref,
-    snapshotId,
-    rect: entry.bounds,
-    viewport,
-  };
-}
-
-function resolveMemory(operation: Extract<BrowserSnapshotOperation, { kind: 'resolveMemory' }>): BrowserRefResolution {
-  const current = captureSnapshot(operation.tabId, { mode: 'compact', maxElements: 80 });
-  const requireActionable = Boolean(operation.requireActionable);
-  const scored = current.allEntries
-    .filter((candidate) => !requireActionable || candidate.actionable)
-    .map((candidate) => ({
-      candidate,
-      score: Math.max(
-        scoreElementSignature(operation.target.signature, candidate),
-        operation.target.selector && candidate.selector === operation.target.selector ? 42 : 0,
-      ),
-    }))
-    .filter((item) => item.score >= MIN_MEMORY_MATCH_SCORE)
-    .sort((left, right) => right.score - left.score);
-
-  if (scored.length === 0) {
-    return {
-      ok: false,
-      error: 'Cached action target was not found on the current page.',
-      snapshot: current.snapshot,
-    };
-  }
-
-  const [best, second] = scored;
-  if (second && best.score - second.score < 8) {
-    return {
-      ok: false,
-      error: 'Cached action target matched multiple similar elements.',
-      matchScore: best.score,
-      snapshot: current.snapshot,
-    };
-  }
-
-  const requireEditable = requireEditableForEntry(best.candidate);
-  const preconditions = evaluateActionability(
-    current.nodesByRef[best.candidate.ref],
-    best.candidate.role,
-    requireEditable,
-  );
-
-  const passesResolutionPreconditions = preconditions.visible === true
-    && preconditions.enabled === true
-    && preconditions.receivesEvents === true
-    && (!requireActionable || preconditions.actionable === true)
-    && (!requireEditable || preconditions.editable === true);
-
-  if (!passesResolutionPreconditions) {
-    return {
-      ok: false,
-      error: 'Cached action target failed actionability checks.',
-      ref: best.candidate.ref,
-      snapshotId: current.snapshot.snapshotId,
-      entry: best.candidate,
-      matchScore: best.score,
-      snapshot: current.snapshot,
-      preconditions,
-    };
-  }
-
-  return {
-    ok: true,
-    selector: resolutionSelector(current.snapshot.snapshotId, best.candidate.ref),
-    ref: best.candidate.ref,
-    snapshotId: current.snapshot.snapshotId,
-    entry: best.candidate,
-    matchScore: best.score,
-    snapshot: current.snapshot,
-    preconditions,
-  };
-}
-
-function resolveTarget(operation: Extract<BrowserSnapshotOperation, { kind: 'resolveTarget' }>): BrowserRefResolution {
-  const current = captureSnapshot(operation.tabId, { mode: 'compact', maxElements: 100 });
-  const requireActionable = Boolean(operation.requireActionable);
-  const scored = current.allEntries
-    .filter((candidate) => !requireActionable || candidate.actionable)
-    .map((candidate) => ({
-      candidate,
-      score: scoreTargetEvidenceCandidate(operation.target, candidate),
-    }))
-    .filter((item) => item.score >= MIN_MEMORY_MATCH_SCORE)
-    .sort((left, right) => right.score - left.score);
-
-  if (scored.length === 0) {
-    return {
-      ok: false,
-      error: 'Target evidence did not match a current visible element.',
-      snapshot: current.snapshot,
-    };
-  }
-
-  const [best, second] = scored;
-  const repairCandidates = scored.slice(0, 5).map((item) => repairCandidateFromEntry(item.candidate, item.score));
-  if (second && best.score - second.score < 8) {
-    return {
-      ok: false,
-      error: 'Target evidence matched multiple similar current elements.',
-      matchScore: best.score,
-      snapshot: current.snapshot,
-      repairCandidates,
-    };
-  }
-
-  const requireEditable = requireEditableForEntry(best.candidate);
-  const preconditions = evaluateActionability(
-    current.nodesByRef[best.candidate.ref],
-    best.candidate.role,
-    requireEditable,
-  );
-
-  return {
-    ok: true,
-    selector: resolutionSelector(current.snapshot.snapshotId, best.candidate.ref),
-    ref: best.candidate.ref,
-    snapshotId: current.snapshot.snapshotId,
-    entry: best.candidate,
-    matchScore: best.score,
-    snapshot: current.snapshot,
-    preconditions,
-    repairCandidates,
-    region: makeRegion(current.snapshot.snapshotId, best.candidate, current.snapshot.viewport),
-  };
-}
-
-function resolveRef(operation: Extract<BrowserSnapshotOperation, { kind: 'resolve' }>): BrowserRefResolution {
-  const stored = resolveStoredElement(operation.ref, operation.snapshotId);
-  const requireActionable = Boolean(operation.requireActionable);
-
-  if (isElementNode(stored?.node) && isVisible(stored.node)) {
-    const entry = createEntry(stored.node, operation.ref);
-    const preconditions = evaluateActionability(stored.node, entry.role, requireEditableForEntry(entry));
-    if (requireActionable && !entry.actionable) {
-      const actionTarget = findActionTarget(stored.node);
-      if (actionTarget) {
-        const targetEntry = createEntry(actionTarget, operation.ref);
-        const targetPreconditions = evaluateActionability(actionTarget, targetEntry.role, requireEditableForEntry(targetEntry));
-        stored.snapshot.nodesByRef[operation.ref] = actionTarget;
-        stored.snapshot.entriesByRef[operation.ref] = targetEntry;
-        return {
-          ok: true,
-          ref: operation.ref,
-          snapshotId: stored.snapshotId,
-          selector: resolutionSelector(stored.snapshotId, operation.ref),
-          entry: targetEntry,
-          recovered: false,
-          preconditions: targetPreconditions,
-          promotedFrom: entry,
-          message: `Ref ${operation.ref} pointed at a non-actionable child; using nearest actionable ${targetEntry.role}.`,
-          region: makeRegion(stored.snapshotId, targetEntry, getViewport()),
-        } as BrowserRefResolution;
-      }
+const {
+  resolveMemory,
+  resolveTarget,
+  resolveRef,
+} = createBrowserSnapshotResolutionRuntime({
+  browRefPrefix: BROW_REF_PREFIX,
+  minMemoryMatchScore: MIN_MEMORY_MATCH_SCORE,
+  isElementNode,
+  isVisible,
+  getViewport,
+  createEntry,
+  findActionTarget,
+  evaluateActionability: (el, role, requireEditable) => {
+    if (!el) {
       return {
+        visible: false,
+        enabled: false,
+        receivesEvents: false,
+        actionable: false,
+        editable: false,
         ok: false,
-        error: `Ref ${operation.ref} resolves to a visible element, but it is not actionable.`,
-        ref: operation.ref,
-        snapshotId: stored.snapshotId,
-        entry,
       };
     }
-    return {
-      ok: true,
-      ref: operation.ref,
-      snapshotId: stored.snapshotId,
-      selector: resolutionSelector(stored.snapshotId, operation.ref),
-      entry,
-      recovered: false,
-      preconditions,
-      region: makeRegion(stored.snapshotId, entry, getViewport()),
-    };
-  }
-
-  const oldEntry = stored?.entry;
-  if (!oldEntry) {
-    return {
-      ok: false,
-      error: `Unknown element ref: ${operation.ref}. Take a fresh browser_snapshot and try again.`,
-      ref: operation.ref,
-      snapshotId: operation.snapshotId,
-    };
-  }
-
-  const current = captureSnapshot(operation.tabId, { mode: 'compact', maxElements: 80 });
-  const recovered = recoverRef(oldEntry, current.allEntries, requireActionable);
-  if (!recovered) {
-    return {
-      ok: false,
-      error: `Ref ${operation.ref} is stale and could not be safely rematched. Take a fresh browser_snapshot and choose a new ref.`,
-      ref: operation.ref,
-      snapshotId: operation.snapshotId ?? stored?.snapshotId,
-      snapshot: current.snapshot,
-    };
-  }
-
-  return {
-    ok: true,
-    ref: recovered.ref,
-    originalRef: operation.ref,
-    snapshotId: current.snapshot.snapshotId,
-    selector: resolutionSelector(current.snapshot.snapshotId, recovered.ref),
-    entry: recovered,
-    recovered: true,
-    snapshot: current.snapshot,
-    matchScore: scoreRecoveryCandidate(oldEntry, recovered),
-    preconditions: evaluateActionability(current.nodesByRef[recovered.ref], recovered.role, requireEditableForEntry(recovered)),
-    region: makeRegion(current.snapshot.snapshotId, recovered, current.snapshot.viewport),
-  };
-}
+    return evaluateActionability(el, role, requireEditable);
+  },
+  captureSnapshot,
+  resolveStoredElement,
+});
 
 export function runBrowserSnapshotOperation(operation: BrowserSnapshotOperation): BrowserSnapshotOperationResult {
   if (operation.kind === 'snapshot') {

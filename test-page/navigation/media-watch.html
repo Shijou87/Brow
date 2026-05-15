@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Media Watch</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px auto;
+      max-width: 760px;
+      line-height: 1.5;
+    }
+
+    button {
+      font: inherit;
+      padding: 10px 14px;
+    }
+  </style>
+</head>
+<body>
+  <p><a id="media-results-link" href="media-results.html">Back to results</a></p>
+  <h1 id="watch-title">Browser automation demo</h1>
+  <p id="watch-query-summary">Watch page ready.</p>
+  <button id="play-button" type="button">Play</button>
+  <p id="playback-status" role="status">paused</p>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const query = params.get('q');
+    if (query) {
+      document.getElementById('watch-title').textContent = `${query} watch page`;
+      document.getElementById('watch-query-summary').textContent = `Watch page for “${query}”.`;
+      document.getElementById('media-results-link').href = `media-results.html?q=${encodeURIComponent(query)}`;
+    }
+
+    document.getElementById('play-button').addEventListener('click', () => {
+      document.getElementById('playback-status').textContent = 'playing';
+    });
+  </script>
+</body>
+</html>

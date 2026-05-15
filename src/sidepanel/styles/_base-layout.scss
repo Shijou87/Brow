@@ -1,0 +1,360 @@
+// ─── Pixel Brutalist Purple Theme ─────────────────────────────────────
+$bg: #0e0e0e;
+$bg-deep: #000000;
+$surface-low: #131313;
+$surface: #131313;
+$surface-high: #1c1b1b;
+$surface-bright: #2a2a2a;
+$text-primary: #e5e2e1;
+$text-secondary: #bac9cc;
+$text-faint: rgba(186, 201, 204, 0.5);
+$accent: #A855F7;
+$accent-strong: #7c3aed;
+$accent-soft: rgba(168, 85, 247, 0.15);
+$accent-border: rgba(168, 85, 247, 0.3);
+$secondary: #2ff801;
+$secondary-dim: #2ae500;
+$success: #2ff801;
+$warning: #ffbe5c;
+$error: #ff6e84;
+$border: #3b494c;
+$border-strong: #849396;
+$outline-variant: #3b494c;
+$shadow-purple: #4a1282;
+$panel-shadow: 4px 4px 0 0 $shadow-purple;
+$panel-shadow-lg: 8px 8px 0 0 $shadow-purple;
+$inner-highlight: none;
+$pixel-font: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  overflow: hidden;
+  position: relative;
+  background: $bg;
+  background-image:
+    linear-gradient(to right, rgba(168, 85, 247, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(168, 85, 247, 0.05) 1px, transparent 1px);
+  background-size: 20px 20px;
+  color: $text-primary;
+  font: 13px/1.55 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+}
+
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+body::before {
+  background: linear-gradient(
+    to bottom,
+    rgba(168, 85, 247, 0.03) 50%,
+    rgba(0, 0, 0, 0.15) 50%
+  );
+  background-size: 100% 4px;
+  opacity: 0.8;
+}
+
+body::after {
+  background-image: radial-gradient(#A855F7 0.5px, transparent 0.5px);
+  background-size: 4px 4px;
+  opacity: 0.08;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+a {
+  color: $accent;
+}
+
+#app {
+  position: relative;
+  z-index: 1;
+  height: 100vh;
+}
+
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100vh;
+  padding: 14px;
+}
+
+.chat-header,
+.chat-body,
+.llm-config-panel {
+  position: relative;
+  overflow: hidden;
+}
+
+.chat-header,
+.chat-body,
+.llm-config-panel {
+  flex-shrink: 0;
+  border: 2px solid $outline-variant;
+  box-shadow: $panel-shadow;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: 0;
+  background: $surface-low;
+  border-bottom: 4px solid $accent;
+}
+
+.header-brand {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.brand-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.brand-icon {
+  display: block;
+  width: auto;
+  height: 34px;
+  max-width: 72px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 0 6px rgba(168, 85, 247, 0.7));
+}
+
+.brand-label {
+  color: $accent;
+  font-family: $pixel-font;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
+}
+
+.chat-header h3 {
+  color: $accent;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
+}
+
+.header-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.connection-status,
+.webmcp-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 5px 10px;
+  border-radius: 0;
+  background: rgba(168, 85, 247, 0.08);
+  border: 2px solid $accent;
+  color: $accent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: $pixel-font;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connection-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: $accent;
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.75);
+  flex-shrink: 0;
+}
+
+.connection-status {
+  min-width: 0;
+}
+
+.webmcp-indicator {
+  min-width: 0;
+  color: $text-secondary;
+  border-color: $outline-variant;
+  background: $bg;
+  flex-shrink: 0;
+}
+
+.webmcp-indicator .status-dot {
+  margin-top: 1px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+
+  &.available {
+    background: $success;
+    box-shadow: 0 0 10px rgba(47, 248, 1, 0.6);
+  }
+
+  &.unavailable {
+    background: #6a6870;
+  }
+}
+
+.new-chat-btn,
+.refresh-webmcp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  color: $text-secondary;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease;
+
+  &:hover {
+    color: $accent;
+    border-color: $accent;
+    background: rgba(168, 85, 247, 0.1);
+  }
+}
+
+.new-chat-btn {
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-color: $accent-border;
+  background: rgba(168, 85, 247, 0.08);
+  color: $accent;
+  font-family: $pixel-font;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+
+  &:hover {
+    background: $accent;
+    color: $surface-low;
+  }
+}
+
+.refresh-webmcp-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+}
+
+.chat-body,
+.llm-config-panel {
+  flex: 1;
+  min-height: 0;
+  border: 2px solid $outline-variant;
+  border-radius: 0;
+  box-shadow: $panel-shadow;
+  background: $surface-low;
+}
+
+.chat-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-messages,
+.tool-steps-timeline,
+.tools-panel,
+.mcp-panel,
+.mcp-panel-inner,
+.conversations-panel,
+.llm-config-panel {
+  scrollbar-width: thin;
+  scrollbar-color: $accent $bg;
+
+  &::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: $bg;
+    border-left: 2px solid $outline-variant;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: $accent;
+    border: 2px solid $bg;
+  }
+}
+
+.chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 22px 18px 14px;
+}
+

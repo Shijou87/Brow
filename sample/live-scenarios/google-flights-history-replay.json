@@ -1,0 +1,77 @@
+{
+  "description": "History-dependent Google Flights replay that previously caused Qwen to loop on already-satisfied fields instead of finding the real submit/results action.",
+  "scenarioSlug": "live-google-flights-round-trip",
+  "allowedTools": [
+    "browser_snapshot",
+    "browser_form_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_key"
+  ],
+  "systemMessages": [
+    "Browser context snapshot:\nOpen tabs (39 total):\n39. [ACTIVE, SELECTED] tabId=699956886 title=\"Trouvez et réservez des vols pas chers – Google Flights\" url=https://www.google.com/travel/flights?...\nCurrent visible/selected tab:\ntabId=699956886\ntitle=\"Trouvez et réservez des vols pas chers – Google Flights\"\nurl=https://www.google.com/travel/flights?...\nstatus=complete"
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "search a flight from paris to rabat for 12/05/2026 to 19/05/2026 using google flight"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "tc1",
+          "type": "function",
+          "function": {
+            "name": "browser_type",
+            "arguments": "{\"tabId\":699956886,\"ref\":\"e212\",\"text\":\"19/05/2026\",\"submit\":false,\"snapshotId\":\"smp2nonfe59npzd\",\"intent\":\"type return date 19/05/2026\",\"postconditions\":[{\"type\":\"valueEquals\",\"value\":\"19/05/2026\",\"ref\":\"e212\",\"snapshotId\":\"smp2nonfe59npzd\"}],\"useActionMemory\":false}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "tc1",
+      "content": "{\"ok\":false,\"error\":\"Type postcondition failed\",\"repairNeeded\":true,\"postconditions\":[{\"ok\":false,\"condition\":{\"type\":\"valueEquals\",\"value\":\"19/05/2026\",\"ref\":\"e212\",\"snapshotId\":\"smp2nonfe59npzd\"},\"actual\":\"Retour\"}],\"snapshotText\":\"Browser snapshot snapshotId=smp2nox2ma13if1 tabId=699956886 title=\\\"Trouvez et réservez des vols pas chers – Google Flights\\\" url=https://www.google.com/travel/flights?... viewport=1118x917\\n          - textbox \\\"Départ\\\" [ref=e207] [type=text]\\n          - textbox \\\"Retour\\\" [ref=e221] [type=text]\\n          - combobox \\\"De\\\" [ref=e171] [type=text]\\n          - combobox \\\"À\\\" [ref=e187] [type=text]\"}"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "tc2",
+          "type": "function",
+          "function": {
+            "name": "browser_type",
+            "arguments": "{\"tabId\":699956886,\"ref\":\"e221\",\"text\":\"19/05/2026\",\"submit\":false,\"snapshotId\":\"smp2nox2ma13if1\",\"intent\":\"type return date 19/05/2026\",\"postconditions\":[{\"type\":\"valueEquals\",\"value\":\"19/05/2026\",\"ref\":\"e221\",\"snapshotId\":\"smp2nox2ma13if1\"}],\"useActionMemory\":false}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "tc2",
+      "content": "{\"ok\":true,\"repairNeeded\":false,\"postconditions\":[{\"ok\":true,\"condition\":{\"type\":\"valueEquals\",\"value\":\"19/05/2026\",\"ref\":\"e221\",\"snapshotId\":\"smp2nox2ma13if1\"},\"actual\":\"19/05/2026\"}],\"snapshotText\":\"Browser snapshot snapshotId=smp2np75laku94b tabId=699956886 title=\\\"Trouvez et réservez des vols pas chers – Google Flights\\\" url=https://www.google.com/travel/flights?... viewport=1118x917\\n          - textbox \\\"Départ\\\" [ref=e207] [type=text] [text=12/05/2026]\\n          - textbox \\\"Retour\\\" [ref=e221] [type=text] [text=19/05/2026]\\n          - combobox \\\"De\\\" [ref=e171] [type=text] [text=Paris]\\n          - button \\\"Inverser le point de départ et la destination\\\" [ref=e177] [type=submit]\\n          - combobox \\\"À\\\" [ref=e187] [type=text] [text=Rabat]\\n          - button \\\"1 passager\\\" [ref=e144] [type=submit]\\n          - navigation \\\"VoyagerExplorerVolsHôtelsLocations de vacances\\\" [ref=e22]\"}"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "tc3",
+          "type": "function",
+          "function": {
+            "name": "browser_type",
+            "arguments": "{\"tabId\":699956886,\"ref\":\"e207\",\"text\":\"12/05/2026\",\"submit\":false,\"snapshotId\":\"smp2np75laku94b\",\"intent\":\"type departure date 12/05/2026\",\"postconditions\":[{\"type\":\"valueEquals\",\"value\":\"12/05/2026\",\"ref\":\"e207\",\"snapshotId\":\"smp2np75laku94b\"}],\"useActionMemory\":false}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "tc3",
+      "content": "{\"ok\":false,\"repairNeeded\":true,\"error\":\"Requested field value already matches the target state. Do not keep acting on this field; take a fresh browser_snapshot with mode=\\\"full\\\" or browser_form_snapshot to find the next actionable control.\",\"postconditions\":[{\"ok\":true,\"condition\":{\"type\":\"valueEquals\",\"value\":\"12/05/2026\",\"ref\":\"e207\",\"snapshotId\":\"smp2np75laku94b\"},\"actual\":\"12/05/2026\"}],\"snapshotText\":\"Browser snapshot snapshotId=smp2np75laku94b tabId=699956886 title=\\\"Trouvez et réservez des vols pas chers – Google Flights\\\" url=https://www.google.com/travel/flights?... viewport=1118x917\\n          - textbox \\\"Départ\\\" [ref=e207] [type=text] [text=12/05/2026]\\n          - textbox \\\"Retour\\\" [ref=e221] [type=text] [text=19/05/2026]\\n          - combobox \\\"De\\\" [ref=e171] [type=text] [text=Paris]\\n          - button \\\"Inverser le point de départ et la destination\\\" [ref=e177] [type=submit]\\n          - combobox \\\"À\\\" [ref=e187] [type=text] [text=Rabat]\\n          - button \\\"1 passager\\\" [ref=e144] [type=submit]\\n          - navigation \\\"VoyagerExplorerVolsHôtelsLocations de vacances\\\" [ref=e22]\"}"
+    }
+  ]
+}

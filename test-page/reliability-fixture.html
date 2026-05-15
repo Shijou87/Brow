@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brow Reliability Fixture</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px;
+      line-height: 1.4;
+    }
+
+    section {
+      margin-block: 20px;
+      padding: 16px;
+      border: 1px solid #ccd3df;
+      border-radius: 8px;
+    }
+
+    .moving-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .overlay-case {
+      position: relative;
+      width: max-content;
+    }
+
+    .overlay-case::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: auto;
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    iframe {
+      width: 360px;
+      height: 130px;
+      border: 1px solid #8892a0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Brow Reliability Fixture</h1>
+
+  <section>
+    <h2>Repeatable Action</h2>
+    <button id="primary-action" data-testid="primary-action">Continue</button>
+    <p id="primary-status" role="status">Waiting</p>
+  </section>
+
+  <section>
+    <h2>Page Change Simulation</h2>
+    <div class="moving-row" id="moving-row">
+      <button id="rename-target" data-testid="rename-target">Save draft</button>
+      <button id="move-target" data-testid="move-target">Move me</button>
+    </div>
+    <p id="change-status" role="status">Unchanged</p>
+  </section>
+
+  <section>
+    <h2>Form</h2>
+    <form id="demo-form">
+      <label>
+        Email address
+        <input name="email" type="email" placeholder="Email address" autocomplete="off" />
+      </label>
+      <label>
+        Plan
+        <select name="plan">
+          <option>Starter</option>
+          <option>Team</option>
+        </select>
+      </label>
+      <label>
+        <input name="agree" type="checkbox" />
+        Accept terms
+      </label>
+      <button type="submit">Submit form</button>
+    </form>
+    <p id="form-status" role="status">Form idle</p>
+  </section>
+
+  <section>
+    <h2>Actionability</h2>
+    <button id="disabled-action" disabled>Disabled action</button>
+    <div class="overlay-case">
+      <button id="covered-action">Covered action</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Open Shadow Root</h2>
+    <shadow-demo></shadow-demo>
+  </section>
+
+  <section>
+    <h2>Same-origin Iframe</h2>
+    <iframe
+      title="Fixture iframe"
+      srcdoc='
+        <!doctype html>
+        <html lang="en">
+          <body>
+            <button id="frame-action" data-testid="frame-action">Frame continue</button>
+            <p id="frame-status" role="status">Frame waiting</p>
+            <script>
+              document.getElementById("frame-action").addEventListener("click", () => {
+                document.getElementById("frame-status").textContent = "Frame clicked";
+              });
+            </script>
+          </body>
+        </html>
+      '>
+    </iframe>
+  </section>
+
+  <script>
+    document.getElementById('primary-action').addEventListener('click', () => {
+      document.getElementById('primary-status').textContent = 'Continued';
+    });
+
+    document.getElementById('rename-target').addEventListener('click', () => {
+      document.getElementById('rename-target').textContent = 'Draft saved';
+      document.getElementById('change-status').textContent = 'Renamed';
+    });
+
+    document.getElementById('move-target').addEventListener('click', () => {
+      document.getElementById('moving-row').prepend(document.getElementById('move-target'));
+      document.getElementById('change-status').textContent = 'Moved';
+    });
+
+    document.getElementById('demo-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      document.getElementById('form-status').textContent = 'Form submitted';
+    });
+
+    class ShadowDemo extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = `
+          <button id="shadow-action" data-testid="shadow-action">Shadow continue</button>
+          <p id="shadow-status" role="status">Shadow waiting</p>
+        `;
+        root.getElementById('shadow-action').addEventListener('click', () => {
+          root.getElementById('shadow-status').textContent = 'Shadow clicked';
+        });
+      }
+    }
+
+    customElements.define('shadow-demo', ShadowDemo);
+  </script>
+</body>
+</html>

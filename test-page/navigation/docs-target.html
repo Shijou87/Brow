@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Documentation Target</title>
+  <style>
+    body {
+      font-family: Georgia, serif;
+      margin: 24px auto;
+      max-width: 760px;
+      line-height: 1.6;
+    }
+
+    article {
+      border-left: 4px solid #0b57d0;
+      padding-left: 18px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <p><a id="docs-back-link" href="search-results.html">Back to results</a></p>
+    <h1>Browser Snapshot Reference</h1>
+    <p id="docs-query-summary" role="status">Reference landing page.</p>
+  </header>
+
+  <article>
+    <h2>What this page simulates</h2>
+    <p>A stable documentation or reference domain chosen from a public search engine.</p>
+  </article>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const query = params.get('q');
+    if (query) {
+      document.getElementById('docs-query-summary').textContent = `Reference landing page for “${query}”.`;
+      document.getElementById('docs-back-link').href = `search-results.html?q=${encodeURIComponent(query)}`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Search Home</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px auto;
+      max-width: 760px;
+      line-height: 1.5;
+    }
+
+    form,
+    section {
+      border: 1px solid #c9d3e4;
+      border-radius: 10px;
+      padding: 18px;
+      margin-block: 18px;
+    }
+
+    label,
+    input,
+    button {
+      display: block;
+      width: 100%;
+      max-width: 420px;
+    }
+
+    input,
+    button {
+      font: inherit;
+      padding: 10px 12px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Fixture Search</h1>
+  <p>Local navigation fixture that simulates a generic public search home page.</p>
+
+  <form id="search-form" action="search-results.html" method="get">
+    <label for="query-input">Search the docs web</label>
+    <input id="query-input" name="q" type="search" placeholder="browser snapshot docs" autocomplete="off" />
+    <button id="search-submit" type="submit">Search</button>
+  </form>
+
+  <section>
+    <h2>Suggested searches</h2>
+    <ul>
+      <li><a href="search-results.html?q=browser+snapshot+docs">Browser snapshot docs</a></li>
+      <li><a href="search-results.html?q=workflow+demonstration+guide">Workflow demonstration guide</a></li>
+    </ul>
+  </section>
+</body>
+</html>

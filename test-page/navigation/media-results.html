@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Media Results</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px auto;
+      max-width: 820px;
+      line-height: 1.5;
+    }
+
+    .result {
+      border: 1px solid #c9d3e4;
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin-block: 14px;
+    }
+
+    a {
+      color: #0b57d0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Fixture Media Results</h1>
+  <p id="media-query-summary" role="status">Showing media results.</p>
+
+  <div class="result">
+    <a id="watch-result" href="media-watch.html">Watch: Browser automation demo</a>
+    <p>Preferred watch-page result for playback verification.</p>
+  </div>
+
+  <div class="result">
+    <a id="channel-result" href="media-channel.html">Browser automation demo channel</a>
+    <p>Decoy channel result that should not be chosen for playback tasks.</p>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const query = params.get('q') || 'fixture video';
+    document.getElementById('media-query-summary').textContent = `Showing media results for “${query}”.`;
+    document.getElementById('watch-result').href = `media-watch.html?q=${encodeURIComponent(query)}`;
+    document.getElementById('channel-result').href = `media-channel.html?q=${encodeURIComponent(query)}`;
+  </script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+<div class="mcp-panel" style="display: none;">
+  <div class="mcp-panel-inner">
+    <p class="mcp-panel-subtitle">Connect to remote MCP servers (HTTP/SSE)</p>
+    <div class="mcp-add-form">
+      <div class="mcp-add-row">
+        <input type="text" class="mcp-add-name" placeholder="Server name" autocomplete="off" />
+      </div>
+      <div class="mcp-add-row">
+        <input type="text" class="mcp-add-url" placeholder="http://host:port/mcp" autocomplete="off" />
+      </div>
+      <div class="mcp-add-row">
+        <input type="password" class="mcp-add-token" placeholder="Auth token (optional)" autocomplete="off" />
+      </div>
+      <button class="mcp-add-btn" data-action="connect-server">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        Connect
+      </button>
+      <div class="mcp-add-status"></div>
+    </div>
+    <div class="mcp-servers-list" data-slot="mcp-servers-list"></div>
+  </div>
+</div>

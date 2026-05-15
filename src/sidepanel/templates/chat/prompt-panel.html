@@ -1,0 +1,116 @@
+<div class="llm-config-panel prompt-panel" style="display: none;">
+  <div class="config-panel-inner prompt-panel-inner">
+    <p class="prompt-panel-note">Domain Skills are user-managed site knowledge. Interaction Skills are Brow-built cross-site mechanics. Agent-generated Domain Skill proposals stay pending until you approve them here. The agent can inspect active skills later with the <code>skills_load</code> tool.</p>
+    <div class="skills-registry-header">
+      <div class="skills-registry-heading">
+        <h3 class="config-section-title">Pending Domain Skill Proposals</h3>
+        <p class="skills-registry-subtitle">Agent-generated suggestions for reusable site knowledge. Approve one to save it into the Domain Skill registry.</p>
+      </div>
+    </div>
+    <div class="domain-skill-proposals-count">0 pending proposal(s)</div>
+    <div class="domain-skill-proposals-list"></div>
+    <hr class="config-divider" />
+    <div class="skills-registry-header">
+      <div class="skills-registry-heading">
+        <h3 class="config-section-title">Domain Skills</h3>
+        <p class="skills-registry-subtitle">User-managed reusable site knowledge. Enable a Domain Skill to inject its name and description into the agent prompt.</p>
+      </div>
+      <button class="skills-new-btn" data-action="new-skill" type="button">New Domain Skill</button>
+    </div>
+    <div class="skills-import-toolbar">
+      <div class="skills-import-url-row">
+        <input type="text" class="skills-import-url" placeholder="https://example.com/SKILL.md" autocomplete="off" />
+        <button class="skills-import-url-btn" data-action="import-skill-url" type="button">Load URL</button>
+      </div>
+      <div class="skills-dropzone" tabindex="0" role="button" aria-label="Drop markdown file here or click to browse">
+        <span>Drop <code>.md</code> file here or click to browse</span>
+        <input type="file" class="skills-file-input" accept=".md,text/markdown" />
+      </div>
+    </div>
+    <div class="skills-registry-count">0 domain skill(s)</div>
+    <div class="skill-editor-dock">
+      <div class="skill-editor-panel" style="display: none;">
+        <div class="skill-editor-header">
+          <h4 class="skill-editor-title">New Domain Skill</h4>
+          <div class="config-editor-toggle" role="tablist" aria-label="Skill content view">
+            <button type="button" class="config-editor-btn active" data-skill-view="edit">Edit</button>
+            <button type="button" class="config-editor-btn" data-skill-view="preview">Preview</button>
+          </div>
+        </div>
+        <div class="config-fields skill-editor-fields">
+          <div class="config-field">
+            <label for="skill-display-name">Display Name</label>
+            <input type="text" id="skill-display-name" placeholder="My Custom Skill" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="skill-slug">Slug</label>
+            <input type="text" id="skill-slug" placeholder="my-custom-skill" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="skill-description">Description</label>
+            <input type="text" id="skill-description" placeholder="Short description for card display" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="skill-tags">Tags</label>
+            <input type="text" id="skill-tags" placeholder="debugging, testing, performance" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="skill-match-domain">Match Domain</label>
+            <input type="text" id="skill-match-domain" placeholder="github.com" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="skill-match-paths">Path Patterns</label>
+            <input type="text" id="skill-match-paths" placeholder="/owner/repo/*, /owner/repo/pull/*" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="skill-match-pages">Page Patterns</label>
+            <input type="text" id="skill-match-pages" placeholder="pull request, settings" autocomplete="off" />
+          </div>
+          <div class="config-field">
+            <label for="skill-content">Skill Content (Markdown)</label>
+            <textarea id="skill-content" class="skill-content-input" spellcheck="false" placeholder="# My Skill&#10;&#10;Paste or type the full SKILL.md content here..."></textarea>
+            <div id="skill-content-preview" class="config-system-prompt-preview skill-content-preview" style="display: none;"></div>
+          </div>
+        </div>
+        <div class="skill-editor-actions">
+          <button class="config-apply-btn skill-save-btn" data-action="save-skill" type="button">Save Domain Skill</button>
+          <button class="skill-cancel-btn" data-action="cancel-skill" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div class="skills-registry-list"></div>
+    <details class="domain-memory-advanced">
+      <summary>Advanced · Domain Memory</summary>
+      <div class="domain-memory-panel">
+        <p class="skills-registry-subtitle">Agent-managed operational memory for site mechanics. Hidden by default; Brow can save, update, disable, or delete these cards while working.</p>
+        <div class="domain-memory-count">0 domain memory card(s)</div>
+        <div class="domain-memory-list"></div>
+      </div>
+    </details>
+    <hr class="config-divider" />
+    <div class="skills-registry-header">
+      <div class="skills-registry-heading">
+        <h3 class="config-section-title">Interaction Skills</h3>
+        <p class="skills-registry-subtitle">Built-in cross-site browser mechanics. These are read-only and always available to Brow.</p>
+      </div>
+    </div>
+    <div class="interaction-skills-count">0 interaction skill(s)</div>
+    <div class="interaction-skills-list"></div>
+    <div class="config-fields config-prompt-fields">
+      <h3 class="config-section-title">System Prompt</h3>
+      <div class="config-field config-system-prompt-field">
+        <div class="config-field-header">
+          <label for="llm-config-system-prompt">Prompt</label>
+          <div class="config-editor-toggle" role="tablist" aria-label="System prompt view">
+            <button type="button" class="config-editor-btn active" data-view="edit">Edit</button>
+            <button type="button" class="config-editor-btn" data-view="preview">Preview</button>
+          </div>
+        </div>
+        <textarea id="llm-config-system-prompt" class="config-system-prompt-input" spellcheck="false"></textarea>
+        <div id="llm-config-system-prompt-preview" class="config-system-prompt-preview" style="display: none;"></div>
+      </div>
+    </div>
+    <button class="config-apply-btn prompt-apply-btn" data-action="apply-prompt">Apply Prompt</button>
+    <div class="config-status prompt-status"></div>
+  </div>
+</div>

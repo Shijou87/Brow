@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Media Home</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px auto;
+      max-width: 760px;
+      line-height: 1.5;
+    }
+
+    form {
+      border: 1px solid #c9d3e4;
+      border-radius: 10px;
+      padding: 18px;
+    }
+
+    input,
+    button {
+      font: inherit;
+      width: 100%;
+      max-width: 420px;
+      padding: 10px 12px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Fixture Media</h1>
+  <p>Local navigation fixture that simulates a media-site search home.</p>
+
+  <form id="media-search-form" action="media-results.html" method="get">
+    <label for="media-query">Search for a video</label>
+    <input id="media-query" name="q" type="search" placeholder="browser automation demo" autocomplete="off" />
+    <button id="media-search-submit" type="submit">Search videos</button>
+  </form>
+</body>
+</html>

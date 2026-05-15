@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Travel Results</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px auto;
+      max-width: 820px;
+      line-height: 1.5;
+    }
+
+    .summary,
+    .result {
+      border: 1px solid #c9d3e4;
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin-block: 14px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Fixture Travel Results</h1>
+  <div class="summary">
+    <p id="travel-route" role="status">Route pending.</p>
+    <p id="travel-dates">Dates pending.</p>
+    <p id="travel-redirect-status">Redirect not detected.</p>
+  </div>
+
+  <div class="result">
+    <h2>Fixture fare</h2>
+    <p>Local result card used to verify that the structured search reached the results state.</p>
+  </div>
+
+  <p><a id="modify-search" href="travel-search.html">Modify search</a></p>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const route = `${params.get('from') || 'From'} to ${params.get('to') || 'To'}`;
+    const dates = `${params.get('departure') || 'Departure'} to ${params.get('return') || 'Return'}`;
+    document.getElementById('travel-route').textContent = `Route: ${route}`;
+    document.getElementById('travel-dates').textContent = `Dates: ${dates}`;
+    if (params.get('redirected') === '1') {
+      document.getElementById('travel-redirect-status').textContent = 'Reached results through redirect.';
+    }
+    document.getElementById('modify-search').href = `travel-search.html?${params.toString()}`;
+  </script>
+</body>
+</html>

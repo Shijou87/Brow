@@ -1,0 +1,49 @@
+<div class="chat-input-container">
+  <div class="chat-context-bar">
+    <div class="chat-context-tabs" data-slot="context-tabs"></div>
+    <div class="workflow-demonstrations-dock hidden" data-slot="workflow-demonstrations-dock"></div>
+    <button
+      class="context-add-button"
+      data-slot="context-add-button"
+      data-action="context-add"
+      type="button"
+      title="Add a tab to context"
+      aria-label="Add a tab to context"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+        <line x1="12" y1="5" x2="12" y2="19"></line>
+        <line x1="5" y1="12" x2="19" y2="12"></line>
+      </svg>
+    </button>
+    <button id="record-button" data-slot="record-button" type="button" disabled></button>
+  </div>
+  <div class="context-picker hidden" data-slot="context-picker"></div>
+  <div class="chat-input-main" data-slot="composer-main-row">
+    <div class="skill-mention-composer-slot" data-slot="skill-mention-composer-slot"></div>
+    <textarea
+      id="chat-input"
+      data-slot="message-input"
+      placeholder="Ask the agent anything…"
+      disabled
+      rows="1"
+      spellcheck="true"
+    ></textarea>
+    <button id="send-button" data-slot="send-button" type="button" disabled></button>
+  </div>
+  <div
+    class="request-budget-indicator"
+    data-slot="request-budget-indicator"
+    title="Estimated Request Budget: 0%"
+    aria-label="Estimated Request Budget: 0%"
+  >
+    <span class="request-budget-label">Request Budget</span>
+    <button class="request-budget-copy-btn" data-action="copy-context" type="button">Copy Context</button>
+    <span class="request-budget-value" data-slot="request-budget-value">0%</span>
+    <span class="request-budget-ring" aria-hidden="true">
+      <svg viewBox="0 0 40 40" focusable="false">
+        <circle class="request-budget-ring-track" cx="20" cy="20" r="14"></circle>
+        <circle class="request-budget-ring-fill" data-slot="request-budget-ring-fill" cx="20" cy="20" r="14"></circle>
+      </svg>
+    </span>
+  </div>
+</div>

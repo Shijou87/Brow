@@ -22,11 +22,20 @@ import { buildSelectedSkillMentionContext, buildSystemPrompt } from './agent-run
 import {
   formatRequestContextDebugText,
   type RequestContextDebugEntry,
-  type RequestContextDebugMessage,
-  type RequestContextDebugShape,
   type RequestContextDebugSnapshot,
   type RequestContextDebugTimings,
 } from './agent-runtime/request-context-debug';
+import {
+  decodeLangGraphStreamChunk,
+  extractAssistantMessageStreamText,
+  extractLlmText,
+} from './agent-runtime/live-stream';
+import {
+  buildRequestContextDebugSnapshot,
+  createRequestBudgetRuntime,
+  type AssembledQueryContext,
+  type RequestBudgetEstimate,
+} from './agent-runtime/request-budget-runtime';
 import { buildApprovalAwaitingDescription } from './agent-runtime/approval-description';
 import { wrapUntrustedContextBlock } from './agent-runtime/untrusted-context';
 import { buildToolContextCarryForwardMessage } from './agent-runtime/tool-context-carry-forward';
@@ -98,13 +107,9 @@ import type { DomainSkillProposalDraft } from '../shared/types';
 export { DEFAULT_AGENT_RECURSION_LIMIT, DEFAULT_SYSTEM_PROMPT } from '../shared/config';
 export { buildToolContextCarryForwardMessage } from './agent-runtime/tool-context-carry-forward';
 export type { ToolManifestEntry } from './agent-runtime/tooling';
+export type { RequestBudgetEstimate } from './agent-runtime/request-budget-runtime';
 
 const AUTOMATION_TOOL_TIMEOUT_MS = 30_000;
-const REQUEST_BUDGET_COMPACTION_THRESHOLD = 0.9;
-const REQUEST_BUDGET_COMPACTION_TARGET = 0.75;
-const MIN_VERBATIM_TURNS_AFTER_COMPACTION = 4;
-const MIN_COMPACTION_SUMMARY_TOKENS = 96;
-const COMPACTION_SUMMARY_TOKEN_RATIO = 0.18;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -136,26 +141,6 @@ type AgentMessage = {
   role: 'user' | 'assistant' | 'system';
   content: string;
 };
-
-interface AssembledQueryContext {
-  systemPrompt: string;
-  messages: AgentMessage[];
-  augmentedUserQuery: string;
-  browserContext: string;
-  browserContextMetrics: BrowserContextSnapshotMetrics;
-  workflowDemonstrationContext: string;
-  matchedDomainSkills: string;
-  matchedDomainMemory: string;
-  selectedSkillMentionContext: string;
-}
-
-export interface RequestBudgetEstimate {
-  estimatedTokens: number;
-  contextWindow: number;
-  usageRatio: number;
-  usagePercent: number;
-  messageCount: number;
-}
 
 export interface RequestBudgetCompactionEvent {
   before: RequestBudgetEstimate;
@@ -262,93 +247,6 @@ function formatToolPayload(value: unknown): string | undefined {
   }
 }
 
-function estimateTextTokens(text: string): number {
-  const trimmed = text.trim();
-  if (!trimmed) return 0;
-
-  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-  const charEstimate = Math.ceil(trimmed.length / 4);
-  const wordEstimate = Math.ceil(wordCount * 0.8);
-  return Math.max(charEstimate, wordEstimate);
-}
-
-function estimateMessageTokens(message: AgentMessage): number {
-  return 8 + estimateTextTokens(message.role) + estimateTextTokens(message.content);
-}
-
-function estimateConversationTokens(systemPrompt: string, messages: AgentMessage[]): number {
-  return 16 + estimateMessageTokens({ role: 'system', content: systemPrompt })
-    + messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
-}
-
-function sumMessageContentChars(messages: RequestContextDebugMessage[]): number {
-  return messages.reduce((sum, message) => sum + message.content.length, 0);
-}
-
-function countCarriedForwardToolSummaryChars(messages: RequestContextDebugMessage[]): number {
-  return messages.reduce((sum, message) => {
-    return message.content.startsWith('Previous turn tool-result summary.')
-      ? sum + message.content.length
-      : sum;
-  }, 0);
-}
-
-function buildRequestContextDebugShape(params: {
-  history: ChatTurn[];
-  assembled: AssembledQueryContext;
-  exactPromptMessages: RequestContextDebugMessage[];
-}): RequestContextDebugShape {
-  return {
-    rawHistoryMessageCount: params.history.length,
-    rawHistoryChars: params.history.reduce((sum, turn) => sum + turn.content.length, 0),
-    exactPromptMessageCount: params.exactPromptMessages.length,
-    exactPromptChars: sumMessageContentChars(params.exactPromptMessages),
-    systemPromptChars: params.assembled.systemPrompt.length,
-    browserContextChars: params.assembled.browserContext.length,
-    browserContextFrameChars: params.assembled.browserContextMetrics.frameChars,
-    browserContextOpenTabsChars: params.assembled.browserContextMetrics.openTabsSectionChars,
-    browserContextActiveTabChars: params.assembled.browserContextMetrics.activeTabSectionChars,
-    browserContextAttachedSnapshotsChars: params.assembled.browserContextMetrics.attachedSnapshotsSectionChars,
-    workflowDemonstrationChars: params.assembled.workflowDemonstrationContext.length,
-    matchedDomainSkillsChars: params.assembled.matchedDomainSkills.length,
-    matchedDomainMemoryChars: params.assembled.matchedDomainMemory.length,
-    selectedSkillMentionChars: params.assembled.selectedSkillMentionContext.length,
-    carriedForwardToolSummaryChars: countCarriedForwardToolSummaryChars(params.exactPromptMessages),
-    selectedContextTabCount: params.assembled.browserContextMetrics.selectedTabCount,
-    attachedContextTabCount: params.assembled.browserContextMetrics.attachedTabCount,
-    attachedSnapshotCount: params.assembled.browserContextMetrics.attachedSnapshotCount,
-  };
-}
-
-function buildRequestContextDebugSnapshot(params: {
-  query: string;
-  history: ChatTurn[];
-  assembled: AssembledQueryContext;
-  contextWindow: number;
-  timings?: RequestContextDebugTimings;
-  liveUpdates?: RequestContextDebugEntry[];
-}): RequestContextDebugSnapshot {
-  const exactPromptMessages: RequestContextDebugMessage[] = [
-    { role: 'system', content: params.assembled.systemPrompt },
-    ...params.assembled.messages,
-  ];
-
-  return {
-    query: params.query,
-    estimatedTokens: estimateConversationTokens(params.assembled.systemPrompt, params.assembled.messages),
-    contextWindow: params.contextWindow,
-    rawHistory: params.history.map((turn) => ({ role: turn.role, content: turn.content })),
-    exactPromptMessages,
-    requestShape: buildRequestContextDebugShape({
-      history: params.history,
-      assembled: params.assembled,
-      exactPromptMessages,
-    }),
-    timings: params.timings,
-    liveUpdates: params.liveUpdates,
-  };
-}
-
 function formatActiveDebugMessageContent(message: any): string | null {
   const sections: string[] = [];
   const content = formatToolPayload(message?.content)?.trim();
@@ -373,30 +271,6 @@ function formatToolDebugMessageContent(toolMessage: any): string | null {
   const payload = formatToolPayload(toolMessage?.content)?.trim();
   if (payload) parts.push(payload);
   return parts.length > 0 ? parts.join('\n') : null;
-}
-
-function estimateHistoryTurnTokens(turns: ChatTurn[]): number {
-  return turns.reduce((sum, turn) => sum + estimateMessageTokens({ role: turn.role, content: turn.content }), 0);
-}
-
-function extractLlmText(value: unknown): string {
-  if (typeof value === 'string') return value.trim();
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => {
-        if (typeof item === 'string') return item;
-        if (item && typeof item === 'object' && typeof (item as any).text === 'string') {
-          return (item as any).text as string;
-        }
-        return '';
-      })
-      .join('\n')
-      .trim();
-  }
-  if (value && typeof value === 'object' && typeof (value as any).content !== 'undefined') {
-    return extractLlmText((value as any).content);
-  }
-  return '';
 }
 
 function extractToolCallInput(call: unknown): string | undefined {
@@ -494,6 +368,7 @@ export class Agent implements AgentAPI {
   private lastTurnToolContextMessage: string | null = null;
   private activeRequestContextDebugSnapshot: RequestContextDebugSnapshot | null = null;
   private compiledSystemPromptCache: string | null = null;
+  private readonly requestBudgetRuntime: ReturnType<typeof createRequestBudgetRuntime>;
 
   private appendActiveRequestDebugEntry(roleLabel: string, content: string): void {
     if (!this.activeRequestContextDebugSnapshot) return;
@@ -548,80 +423,36 @@ export class Agent implements AgentAPI {
     }
   }
 
-  private getEffectiveConversationCompactionState(history: ChatTurn[]): ConversationCompactionState | null {
-    if (!this.conversationCompactionState?.summary.trim()) return null;
-    const compactedTurnCount = Math.min(this.conversationCompactionState.compactedTurnCount, history.length);
-    if (compactedTurnCount <= 0) return null;
-    return {
-      ...this.conversationCompactionState,
-      compactedTurnCount,
-    };
+  constructor() {
+    this.builtinTools = createBuiltinTools({
+      getVLMConfig: () => this.vlmConfig,
+      findSkill: (identifier) => this.findSkill(identifier),
+      submitDomainSkillProposal: (draft) => this.submitDomainSkillProposal(draft),
+    }).map((builtinTool) => this.wrapAutomationToolWithApproval(builtinTool));
+    this.requestBudgetRuntime = createRequestBudgetRuntime({
+      getConfiguredContextWindow: () => this.getConfiguredContextWindow(),
+      getConversationCompactionState: () => this.getConversationCompactionState(),
+      setConversationCompactionState: (state) => this.setConversationCompactionState(state),
+      emitRequestBudgetCompaction: (event) => this.emitRequestBudgetCompaction(event),
+      buildCompiledSystemPrompt: () => this.buildCompiledSystemPrompt(),
+      buildMatchedDomainSkillContext: (contextTabIds) => this.buildMatchedDomainSkillContext(contextTabIds),
+      buildMatchedDomainMemoryContext: (contextTabIds) => this.buildMatchedDomainMemoryContext(contextTabIds),
+      generateCompactionSummary: (history, compactedTurnCount, existingSummary) => (
+        this.generateCompactionSummaryFromLlm(history, compactedTurnCount, existingSummary)
+      ),
+    });
+
+    void ensureLlm()
+      .then(() => this.rebuildAgent())
+      .catch((err) => console.warn('[agent] LLM not yet configured:', err.message));
   }
 
-  private buildCompactionSummaryMessage(state: ConversationCompactionState): AgentMessage {
-    return {
-      role: 'system',
-      content: [
-        `Earlier conversation summary replacing the first ${state.compactedTurnCount} chat turns:`,
-        state.summary.trim(),
-        'Treat this summary as the authoritative context for the compacted earlier conversation.',
-      ].join('\n\n'),
-    };
-  }
-
-  private buildEffectiveHistoryMessages(history: ChatTurn[]): AgentMessage[] {
-    const compactionState = this.getEffectiveConversationCompactionState(history);
-    const effectiveHistory = compactionState
-      ? history.slice(compactionState.compactedTurnCount)
-      : history;
-
-    return [
-      ...(compactionState ? [this.buildCompactionSummaryMessage(compactionState)] : []),
-      ...effectiveHistory.map((turn) => ({ role: turn.role, content: turn.content })),
-    ];
-  }
-
-  private estimateProjectedSummaryTokens(history: ChatTurn[], compactedTurnCount: number): number {
-    const sourceTokens = estimateHistoryTurnTokens(history.slice(0, compactedTurnCount));
-    return Math.max(MIN_COMPACTION_SUMMARY_TOKENS, Math.ceil(sourceTokens * COMPACTION_SUMMARY_TOKEN_RATIO));
-  }
-
-  private getNextCompactionTargetTurnCount(
+  private async generateCompactionSummaryFromLlm(
     history: ChatTurn[],
-    estimate: RequestBudgetEstimate,
-  ): number {
-    const maxCompactedTurnCount = Math.max(0, history.length - Math.min(history.length, MIN_VERBATIM_TURNS_AFTER_COMPACTION));
-    const currentState = this.getEffectiveConversationCompactionState(history);
-    const currentCompactedTurnCount = currentState?.compactedTurnCount ?? 0;
-
-    if (maxCompactedTurnCount <= currentCompactedTurnCount) {
-      return currentCompactedTurnCount;
-    }
-
-    const currentSummaryTokens = currentState
-      ? estimateMessageTokens(this.buildCompactionSummaryMessage(currentState))
-      : 0;
-
-    let targetTurnCount = currentCompactedTurnCount;
-    while (targetTurnCount < maxCompactedTurnCount) {
-      const increment = maxCompactedTurnCount - targetTurnCount === 1 ? 1 : 2;
-      targetTurnCount = Math.min(maxCompactedTurnCount, targetTurnCount + increment);
-
-      const projectedSummaryTokens = this.estimateProjectedSummaryTokens(history, targetTurnCount);
-      const newlyCompactedTokens = estimateHistoryTurnTokens(history.slice(currentCompactedTurnCount, targetTurnCount));
-      const projectedTokens = estimate.estimatedTokens - currentSummaryTokens - newlyCompactedTokens + projectedSummaryTokens;
-
-      if ((projectedTokens / estimate.contextWindow) <= REQUEST_BUDGET_COMPACTION_TARGET) {
-        break;
-      }
-    }
-
-    return targetTurnCount;
-  }
-
-  private async generateCompactionSummary(history: ChatTurn[], compactedTurnCount: number): Promise<string> {
+    compactedTurnCount: number,
+    existingSummary?: string,
+  ): Promise<string> {
     const llm = await ensureLlm();
-    const existingSummary = this.conversationCompactionState?.summary.trim();
     const transcript = history
       .slice(0, compactedTurnCount)
       .map((turn, index) => `Turn ${index + 1} (${turn.role}):\n${turn.content}`)
@@ -654,152 +485,6 @@ export class Agent implements AgentAPI {
       throw new Error('Compaction summary was empty.');
     }
     return summary;
-  }
-
-  private async compactConversationIfNeeded(
-    userQuery: string,
-    history: ChatTurn[] = [],
-    contextTabIds?: number[],
-    workflowDemonstrations: WorkflowDemonstration[] = [],
-    skillMention: SkillMention | null = null,
-  ): Promise<void> {
-    let before = await this.estimateRequestBudget(
-      userQuery,
-      history,
-      contextTabIds,
-      workflowDemonstrations,
-      skillMention,
-    );
-
-    while (before.usageRatio > REQUEST_BUDGET_COMPACTION_THRESHOLD) {
-      const targetTurnCount = this.getNextCompactionTargetTurnCount(history, before);
-      const currentCompactedTurnCount = this.getEffectiveConversationCompactionState(history)?.compactedTurnCount ?? 0;
-
-      if (targetTurnCount <= currentCompactedTurnCount) {
-        return;
-      }
-
-      try {
-        const summary = await this.generateCompactionSummary(history, targetTurnCount);
-        this.conversationCompactionState = {
-          summary,
-          compactedTurnCount: targetTurnCount,
-          updatedAt: Date.now(),
-        };
-      } catch (err: any) {
-        console.warn('[agent] Failed to compact conversation:', err?.message ?? err);
-        return;
-      }
-
-      const after = await this.estimateRequestBudget(
-        userQuery,
-        history,
-        contextTabIds,
-        workflowDemonstrations,
-        skillMention,
-      );
-
-      this.emitRequestBudgetCompaction({
-        before,
-        after,
-        compactionState: { ...this.conversationCompactionState },
-      });
-
-      if (after.usageRatio <= REQUEST_BUDGET_COMPACTION_TARGET) {
-        return;
-      }
-
-      before = after;
-    }
-  }
-
-  private async assembleQueryContext(
-    userQuery: string,
-    history: ChatTurn[] = [],
-    contextTabIds?: number[],
-    workflowDemonstrations: WorkflowDemonstration[] = [],
-    skillMention: SkillMention | null = null,
-  ): Promise<AssembledQueryContext> {
-    const browserContextResult = await buildBrowserContextSnapshotResult(contextTabIds).catch((err: any) => {
-      console.warn('[agent] Failed to build browser context snapshot:', err?.message ?? err);
-      return {
-        text: 'Browser context snapshot: unavailable.',
-        metrics: {
-          openTabCount: 0,
-          listedTabCount: 0,
-          extraTabCount: 0,
-          selectedTabCount: 0,
-          attachedTabCount: 0,
-          omittedAttachedTabCount: 0,
-          attachedSnapshotCount: 0,
-          frameChars: 0,
-          openTabsSectionChars: 0,
-          activeTabSectionChars: 0,
-          attachedSnapshotsSectionChars: 0,
-        },
-      };
-    });
-    const browserContext = wrapUntrustedContextBlock(
-      'Browser context snapshot from the current tabs.',
-      browserContextResult.text,
-    );
-    const workflowDemonstrationContext = buildWorkflowDemonstrationContext(workflowDemonstrations);
-    const matchedDomainSkills = await this.buildMatchedDomainSkillContext(contextTabIds).catch((err: any) => {
-      console.warn('[agent] Failed to resolve matched Domain Skills:', err?.message ?? err);
-      return '';
-    });
-    const matchedDomainMemory = await this.buildMatchedDomainMemoryContext(contextTabIds).catch((err: any) => {
-      console.warn('[agent] Failed to resolve matched Domain Memory:', err?.message ?? err);
-      return '';
-    });
-    const selectedSkillMentionContext = skillMention
-      ? buildSelectedSkillMentionContext(skillMention)
-      : '';
-
-    const augmentedUserQuery = userQuery;
-
-    const messages: AgentMessage[] = [
-      ...this.buildEffectiveHistoryMessages(history),
-      { role: 'system', content: browserContext },
-    ];
-
-    if (workflowDemonstrationContext) {
-      messages.push({ role: 'system', content: workflowDemonstrationContext });
-    }
-    if (matchedDomainSkills) {
-      messages.push({ role: 'system', content: matchedDomainSkills });
-    }
-    if (matchedDomainMemory) {
-      messages.push({ role: 'system', content: matchedDomainMemory });
-    }
-    if (selectedSkillMentionContext) {
-      messages.push({ role: 'system', content: selectedSkillMentionContext });
-    }
-    messages.push({ role: 'user', content: augmentedUserQuery });
-
-    return {
-      systemPrompt: this.buildCompiledSystemPrompt(),
-      messages,
-      augmentedUserQuery,
-      browserContext,
-      browserContextMetrics: browserContextResult.metrics,
-      workflowDemonstrationContext,
-      matchedDomainSkills,
-      matchedDomainMemory,
-      selectedSkillMentionContext,
-    };
-  }
-
-  constructor() {
-    this.builtinTools = createBuiltinTools({
-      getVLMConfig: () => this.vlmConfig,
-      findSkill: (identifier) => this.findSkill(identifier),
-      submitDomainSkillProposal: (draft) => this.submitDomainSkillProposal(draft),
-    }).map((builtinTool) => this.wrapAutomationToolWithApproval(builtinTool));
-
-    void ensureLlm()
-      .then(() => this.rebuildAgent())
-      .catch((err) => console.warn('[agent] LLM not yet configured:', err.message));
   }
 
   updateWebMCPTools(tabId: number, descriptors: WebMCPToolDescriptor[], url?: string, title?: string): void {
@@ -1041,19 +726,13 @@ export class Agent implements AgentAPI {
     workflowDemonstrations: WorkflowDemonstration[] = [],
     skillMention: SkillMention | null = null,
   ): Promise<string> {
-    const assembled = await this.assembleQueryContext(
+    return await this.requestBudgetRuntime.buildRequestContextDebugText(
       query,
       history,
       contextTabIds,
       workflowDemonstrations,
       skillMention,
     );
-    return formatRequestContextDebugText(buildRequestContextDebugSnapshot({
-      query,
-      history,
-      assembled,
-      contextWindow: this.getConfiguredContextWindow(),
-    }));
   }
 
   findSkill(identifier: string): SkillRegistryEntry | InteractionSkillEntry | null {
@@ -1442,7 +1121,7 @@ export class Agent implements AgentAPI {
     }
 
     const compactionStartedAt = Date.now();
-    await this.compactConversationIfNeeded(
+    await this.requestBudgetRuntime.compactConversationIfNeeded(
       userQuery,
       history,
       contextTabIds,
@@ -1452,7 +1131,7 @@ export class Agent implements AgentAPI {
     const compactionMs = Date.now() - compactionStartedAt;
 
     const requestAssemblyStartedAt = Date.now();
-    const assembled = await this.assembleQueryContext(
+    const assembled = await this.requestBudgetRuntime.assembleQueryContext(
       userQuery,
       history,
       contextTabIds,
@@ -1494,6 +1173,7 @@ export class Agent implements AgentAPI {
     let firstAssistantTextMs: number | undefined;
     let firstToolStartedAt: number | undefined;
     let lastToolCompletedAt: number | undefined;
+    let streamedAssistantText = '';
 
     async function* abortableStream<T>(
       stream: AsyncIterable<T>,
@@ -1528,10 +1208,10 @@ export class Agent implements AgentAPI {
     try {
       const rawStream = await this.currentAgent.stream(
         { messages },
-        { streamMode: 'updates', recursionLimit: this.recursionLimit, signal: abortSignal },
+        { streamMode: ['updates', 'messages'], recursionLimit: this.recursionLimit, signal: abortSignal },
       );
 
-      for await (const chunk of abortableStream(rawStream, abortSignal)) {
+      for await (const rawChunk of abortableStream(rawStream, abortSignal)) {
         await this.waitIfPaused();
 
         if (firstAgentUpdateMs == null) {
@@ -1544,6 +1224,22 @@ export class Agent implements AgentAPI {
           break;
         }
 
+        const { mode, payload } = decodeLangGraphStreamChunk(rawChunk);
+
+        if (mode === 'messages') {
+          const assistantTextDelta = extractAssistantMessageStreamText(payload);
+          if (assistantTextDelta) {
+            if (firstAssistantTextMs == null) {
+              firstAssistantTextMs = Date.now() - agentStreamStartedAt;
+              this.mergeActiveRequestDebugTimings({ firstAssistantTextMs });
+            }
+            streamedAssistantText += assistantTextDelta;
+            this.emitStreamText(streamedAssistantText);
+          }
+          continue;
+        }
+
+        const chunk = payload as any;
         if (chunk.agent?.messages) {
           for (const message of chunk.agent.messages) {
             const debugContent = formatActiveDebugMessageContent(message);
@@ -1586,13 +1282,13 @@ export class Agent implements AgentAPI {
               }
             }
 
-            if (message.content && typeof message.content === 'string' && !message.tool_calls?.length) {
+            const assistantMessageText = extractLlmText(message.content);
+            if (assistantMessageText && !message.tool_calls?.length) {
               if (firstAssistantTextMs == null) {
                 firstAssistantTextMs = Date.now() - agentStreamStartedAt;
                 this.mergeActiveRequestDebugTimings({ firstAssistantTextMs });
               }
-              finalContent = message.content;
-              this.emitStreamText(message.content);
+              finalContent = assistantMessageText;
             }
           }
         }
@@ -1730,24 +1426,13 @@ export class Agent implements AgentAPI {
     workflowDemonstrations: WorkflowDemonstration[] = [],
     skillMention: SkillMention | null = null,
   ): Promise<RequestBudgetEstimate> {
-    const assembled = await this.assembleQueryContext(
+    return await this.requestBudgetRuntime.estimateRequestBudget(
       userQuery,
       history,
       contextTabIds,
       workflowDemonstrations,
       skillMention,
     );
-    const estimatedTokens = estimateConversationTokens(assembled.systemPrompt, assembled.messages);
-    const contextWindow = this.getConfiguredContextWindow();
-    const usageRatio = estimatedTokens / contextWindow;
-
-    return {
-      estimatedTokens,
-      contextWindow,
-      usageRatio,
-      usagePercent: Math.round(usageRatio * 100),
-      messageCount: assembled.messages.length + 1,
-    };
   }
 
   private rebuildAgent(): void {

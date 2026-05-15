@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixture Travel Search</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px auto;
+      max-width: 780px;
+      line-height: 1.5;
+    }
+
+    form {
+      display: grid;
+      gap: 12px;
+      border: 1px solid #c9d3e4;
+      border-radius: 10px;
+      padding: 18px;
+    }
+
+    input,
+    button {
+      font: inherit;
+      padding: 10px 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Fixture Travel Search</h1>
+  <p>Local travel form fixture that redirects before showing results.</p>
+
+  <form id="travel-search-form" action="travel-redirect.html" method="get">
+    <label>
+      From
+      <input id="travel-from" name="from" type="text" placeholder="Paris" autocomplete="off" />
+    </label>
+    <label>
+      To
+      <input id="travel-to" name="to" type="text" placeholder="Rabat" autocomplete="off" />
+    </label>
+    <label>
+      Departure date
+      <input id="travel-departure" name="departure" type="text" placeholder="12/05/2026" autocomplete="off" />
+    </label>
+    <label>
+      Return date
+      <input id="travel-return" name="return" type="text" placeholder="19/05/2026" autocomplete="off" />
+    </label>
+    <button id="travel-search-submit" type="submit">Search flights</button>
+  </form>
+</body>
+</html>
