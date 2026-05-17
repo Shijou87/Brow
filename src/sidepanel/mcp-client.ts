@@ -8,7 +8,7 @@ import { tool } from '@langchain/core/tools';
 import { getToolUiResourceUri } from '@modelcontextprotocol/ext-apps/app-bridge';
 import { z } from 'zod';
 import { logInfo, logError } from '../shared/logger';
-import { jsonSchemaToZod } from '../shared/json-schema';
+import { jsonSchemaToZod, normalizeJsonSchemaParsedObject } from '../shared/json-schema';
 import {
   MCP_SERVERS_STORAGE_KEY,
   getStorageValue,
@@ -99,6 +99,10 @@ function readSessionId(res: Response): string | undefined {
   return res.headers.get('mcp-session-id') ?? res.headers.get('Mcp-Session-Id') ?? undefined;
 }
 
+/**
+ * Sends one MCP JSON-RPC request over Brow's configured HTTP transport and
+ * returns the decoded result payload.
+ */
 export async function rpcCall(
   url: string,
   method: string,
@@ -373,11 +377,12 @@ export function createMCPServerTools(
 
     return tool(
       async (args: Record<string, unknown>) => {
-        const result = await mcpCallTool(config, descriptor.name, args);
+        const normalizedArgs = normalizeJsonSchemaParsedObject(args);
+        const result = await mcpCallTool(config, descriptor.name, normalizedArgs);
         const resourceUri = getMCPToolUIResourceUri(descriptor);
         if (resourceUri) {
           options.onAppToolResult?.(
-            createAppRenderRequest(config, descriptor, descriptors, args, result, resourceUri),
+            createAppRenderRequest(config, descriptor, descriptors, normalizedArgs, result, resourceUri),
           );
         }
         return JSON.stringify(result, null, 2);

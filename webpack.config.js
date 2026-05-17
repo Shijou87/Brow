@@ -4,6 +4,7 @@ const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 
 module.exports = {
   entry: {
+    'html-app-view': './src/html-app-view/index.ts',
     'sidepanel': './src/sidepanel/index.ts',
     'background': './src/background/index.ts',
     'content-script': './src/content-script/index.ts',
@@ -51,6 +52,7 @@ module.exports = {
         { from: 'sidepanel.html', to: '.' },
         { from: 'options.html', to: '.' },
         { from: 'mcp-app-sandbox.html', to: '.' },
+        { from: 'html-app-view.html', to: '.' },
         { from: 'icons', to: 'icons', noErrorOnMissing: true },
       ],
     }),

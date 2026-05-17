@@ -4,6 +4,9 @@ import type {
   BrowElementSignature,
   BrowserViewportRect,
   ConversationCompactionState,
+  HtmlAppArtifact,
+  HtmlAppArtifactMessageRef,
+  HtmlAppArtifactRevision,
   SkillMentionReference,
   WorkflowDemonstration,
   WorkflowDemonstrationKeyboardEvidence,
@@ -84,14 +87,94 @@ function normalizeSavedConversationMessage(raw: unknown): SavedConversation['mes
   const role = normalizeMessageRole(raw.role);
   if (!role || typeof raw.content !== 'string' || typeof raw.time !== 'string') return undefined;
   const workflowDemonstrationIds = normalizeStringArray(raw.workflowDemonstrationIds);
+  const htmlAppArtifactRefs = normalizeHtmlAppArtifactMessageRefs(raw.htmlAppArtifactRefs);
   const skillMention = normalizeSkillMentionReference(raw.skillMention);
   return {
     role,
     content: raw.content,
     time: raw.time,
     ...(workflowDemonstrationIds.length > 0 ? { workflowDemonstrationIds } : {}),
+    ...(htmlAppArtifactRefs.length > 0 ? { htmlAppArtifactRefs } : {}),
     ...(skillMention ? { skillMention } : {}),
   };
+}
+
+function normalizeHtmlAppArtifactMessageRef(raw: unknown): HtmlAppArtifactMessageRef | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (typeof raw.artifactId !== 'string' || typeof raw.revisionId !== 'string') return undefined;
+  if (!raw.artifactId.trim() || !raw.revisionId.trim()) return undefined;
+  return {
+    artifactId: raw.artifactId,
+    revisionId: raw.revisionId,
+  };
+}
+
+function normalizeHtmlAppArtifactMessageRefs(raw: unknown): HtmlAppArtifactMessageRef[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => normalizeHtmlAppArtifactMessageRef(entry))
+    .filter((entry): entry is HtmlAppArtifactMessageRef => Boolean(entry));
+}
+
+function normalizeHtmlAppArtifactRevision(raw: unknown): HtmlAppArtifactRevision | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (
+    typeof raw.id !== 'string'
+    || typeof raw.title !== 'string'
+    || typeof raw.html !== 'string'
+    || typeof raw.createdAt !== 'number'
+  ) {
+    return undefined;
+  }
+
+  const renderTargetHint =
+    raw.renderTargetHint === 'inline' || raw.renderTargetHint === 'tab' || raw.renderTargetHint === 'both'
+      ? raw.renderTargetHint
+      : 'inline';
+
+  return {
+    id: raw.id,
+    title: raw.title,
+    html: raw.html,
+    summary: typeof raw.summary === 'string' ? raw.summary : undefined,
+    renderTargetHint,
+    createdAt: raw.createdAt,
+  };
+}
+
+function normalizeHtmlAppArtifact(raw: unknown): HtmlAppArtifact | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (
+    typeof raw.id !== 'string'
+    || typeof raw.title !== 'string'
+    || typeof raw.latestRevisionId !== 'string'
+    || typeof raw.createdAt !== 'number'
+    || typeof raw.updatedAt !== 'number'
+    || !Array.isArray(raw.revisions)
+  ) {
+    return undefined;
+  }
+
+  const revisions = raw.revisions
+    .map((entry) => normalizeHtmlAppArtifactRevision(entry))
+    .filter((entry): entry is HtmlAppArtifactRevision => Boolean(entry));
+  if (revisions.length === 0) return undefined;
+
+  return {
+    id: raw.id,
+    title: raw.title,
+    latestRevisionId: raw.latestRevisionId,
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+    revisions,
+  };
+}
+
+function normalizeHtmlAppArtifacts(raw: unknown): HtmlAppArtifact[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => normalizeHtmlAppArtifact(entry))
+    .filter((entry): entry is HtmlAppArtifact => Boolean(entry));
 }
 
 function normalizeConversationCompactionState(raw: unknown): ConversationCompactionState | null {
@@ -301,6 +384,7 @@ function normalizeSavedConversation(raw: unknown): SavedConversation | undefined
   return {
     id: raw.id,
     title: raw.title,
+    favorite: raw.favorite === true,
     createdAt,
     updatedAt,
     messages: raw.messages
@@ -314,6 +398,7 @@ function normalizeSavedConversation(raw: unknown): SavedConversation | undefined
         .map((entry) => normalizeWorkflowDemonstration(entry))
         .filter((entry): entry is SavedConversation['workflowDemonstrations'][number] => Boolean(entry))
       : [],
+    htmlAppArtifacts: normalizeHtmlAppArtifacts(raw.htmlAppArtifacts),
     stagedWorkflowDemonstrationIds: normalizeStringArray(raw.stagedWorkflowDemonstrationIds),
     compactionState: normalizeConversationCompactionState(raw.compactionState),
   };
@@ -330,6 +415,18 @@ export async function loadSavedConversations(): Promise<SavedConversation[]> {
   return normalizeConversations(await getStorageValue<unknown>(CONVERSATIONS_STORAGE_KEY));
 }
 
+export function sortSavedConversationsForDisplay(conversations: SavedConversation[]): SavedConversation[] {
+  return [...conversations].sort((a, b) => {
+    const favoriteOrder = Number(b.favorite === true) - Number(a.favorite === true);
+    if (favoriteOrder !== 0) return favoriteOrder;
+
+    const updatedAtOrder = b.updatedAt - a.updatedAt;
+    if (updatedAtOrder !== 0) return updatedAtOrder;
+
+    return b.createdAt - a.createdAt;
+  });
+}
+
 export async function upsertSavedConversation(nextConversation: SavedConversation): Promise<void> {
   const conversations = await loadSavedConversations();
   const existingIndex = conversations.findIndex((conversation) => conversation.id === nextConversation.id);
@@ -340,6 +437,23 @@ export async function upsertSavedConversation(nextConversation: SavedConversatio
     conversations.push(nextConversation);
   }
   await setStorageValues({ [CONVERSATIONS_STORAGE_KEY]: conversations });
+}
+
+export async function setSavedConversationFavorite(id: string, favorite: boolean): Promise<boolean> {
+  const conversations = await loadSavedConversations();
+  const existingIndex = conversations.findIndex((conversation) => conversation.id === id);
+  if (existingIndex < 0) return false;
+
+  if (conversations[existingIndex].favorite === favorite) {
+    return true;
+  }
+
+  conversations[existingIndex] = {
+    ...conversations[existingIndex],
+    favorite,
+  };
+  await setStorageValues({ [CONVERSATIONS_STORAGE_KEY]: conversations });
+  return true;
 }
 
 export async function removeSavedConversation(id: string): Promise<void> {

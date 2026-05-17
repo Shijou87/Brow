@@ -1,3 +1,8 @@
+// ─── Shared Storage Helpers ────────────────────────────────────────────────
+// Centralizes chrome.storage keys and normalization logic for Brow's persisted
+// runtime state. Cross-runtime callers should prefer these helpers over raw
+// storage access so schema drift and migration logic stay contained here.
+
 import {
   DEFAULT_AGENT_RECURSION_LIMIT,
   DEFAULT_CLAUDE_FIELDS,
@@ -12,7 +17,13 @@ import {
   type ProviderFields,
   type SidepanelRuntimeConfig,
 } from './config';
-import type { DirectLLMConfig, ExtensionSettings, MCPConfig, VLMConfig } from './types';
+import type {
+  DirectLLMConfig,
+  ExtensionSettings,
+  HtmlAppExecutionPreferences,
+  MCPConfig,
+  VLMConfig,
+} from './types';
 
 export const SIDEPANEL_CONFIG_STORAGE_KEY = 'agent-webmcp-config';
 export const EXTENSION_SETTINGS_STORAGE_KEY = 'agent-webmcp-settings';
@@ -26,6 +37,7 @@ export const DOMAIN_SKILL_PROPOSALS_STORAGE_KEY = 'agent-webmcp-domain-skill-pro
 export const DOMAIN_MEMORY_STORAGE_KEY = 'agent-webmcp-domain-memory';
 export const DOMAIN_TRUST_SETTINGS_STORAGE_KEY = 'agent-webmcp-domain-trust-settings';
 export const BROW_ACTION_MEMORY_STORAGE_KEY = 'agent-webmcp-action-memory';
+export const HTML_APP_EXECUTION_PREFERENCES_STORAGE_KEY = 'agent-webmcp-html-app-execution-preferences';
 
 export interface SidepanelConfigRecord {
   activeMode: LLMProviderMode;
@@ -127,6 +139,9 @@ function normalizeSidepanelConfig(rawConfig: unknown, rawSettings: unknown): Sid
     runtime: {
       recursionLimit: normalizeRecursionLimit(recursionLimitValue),
       systemPrompt,
+      animatedBrow: typeof runtimeRecord.animatedBrow === 'boolean'
+        ? runtimeRecord.animatedBrow
+        : false,
     },
     vlm: toVLMConfig(config.vlm ?? settings.vlm),
   };
@@ -141,11 +156,25 @@ function serializeSidepanelConfig(config: SidepanelConfigRecord): LooseRecord {
     runtime: {
       recursionLimit: normalizeRecursionLimit(config.runtime.recursionLimit),
       systemPrompt: config.runtime.systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
+      animatedBrow: config.runtime.animatedBrow === true,
     },
     vlm: config.vlm,
   };
 }
 
+function normalizeHtmlAppExecutionPreferences(raw: unknown): HtmlAppExecutionPreferences {
+  const record = isRecord(raw) ? raw : {};
+  return {
+    alwaysAllowExecution: typeof record.alwaysAllowExecution === 'boolean'
+      ? record.alwaysAllowExecution
+      : false,
+  };
+}
+
+/**
+ * Reads one value from chrome.storage.local and preserves the caller's target
+ * type at the API boundary.
+ */
 export function getStorageValue<T>(key: string): Promise<T | undefined> {
   return new Promise((resolve) => {
     chrome.storage.local.get(key, (result) => {
@@ -162,12 +191,19 @@ export function getStorageValues(keys: string[]): Promise<Record<string, unknown
   });
 }
 
+/**
+ * Writes one or more values to chrome.storage.local.
+ */
 export function setStorageValues(values: Record<string, unknown>): Promise<void> {
   return new Promise((resolve) => {
     chrome.storage.local.set(values, () => resolve());
   });
 }
 
+/**
+ * Loads the side-panel configuration record and normalizes legacy or partial
+ * stored values into the current runtime shape.
+ */
 export async function loadSidepanelConfig(): Promise<SidepanelConfigRecord> {
   const values = await getStorageValues([SIDEPANEL_CONFIG_STORAGE_KEY, EXTENSION_SETTINGS_STORAGE_KEY]);
   return normalizeSidepanelConfig(
@@ -237,4 +273,23 @@ export async function loadDisabledTools(): Promise<string[] | null> {
 
 export function saveDisabledTools(disabledTools: string[]): Promise<void> {
   return setStorageValues({ [DISABLED_TOOLS_STORAGE_KEY]: disabledTools });
+}
+
+export async function loadHtmlAppExecutionPreferences(): Promise<HtmlAppExecutionPreferences> {
+  const saved = await getStorageValue<unknown>(HTML_APP_EXECUTION_PREFERENCES_STORAGE_KEY);
+  return normalizeHtmlAppExecutionPreferences(saved);
+}
+
+export async function saveHtmlAppExecutionPreferences(
+  updates: Partial<HtmlAppExecutionPreferences>,
+): Promise<HtmlAppExecutionPreferences> {
+  const current = await loadHtmlAppExecutionPreferences();
+  const next = normalizeHtmlAppExecutionPreferences({
+    ...current,
+    ...updates,
+  });
+  await setStorageValues({
+    [HTML_APP_EXECUTION_PREFERENCES_STORAGE_KEY]: next,
+  });
+  return next;
 }

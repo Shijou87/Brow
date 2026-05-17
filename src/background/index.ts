@@ -1,7 +1,9 @@
 // ─── Background Service Worker (MV3) ────────────────────────────────────────
-// Observes tab lifecycle / navigation events, triggers WebMCP discovery via
-// content scripts, relays results to the side panel, and manages the
-// per-tab WebMCP registry.
+// Routing hub between the side panel and tab-scoped page logic. The worker
+// owns tab lifecycle observation, WebMCP discovery scheduling, bridge-script
+// readiness checks, and message relay into content-script runtimes. It should
+// not accumulate page semantics that belong in content-script or sidepanel
+// modules.
 
 import { logDiscovery, logInfo } from '../shared/logger';
 import {

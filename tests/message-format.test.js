@@ -29,7 +29,30 @@ test('does not turn markdown image syntax into a rendered image', () => {
   const formatted = formatAssistantMessage('![leak](https://example.com/image.png)');
 
   assert.doesNotMatch(formatted, /<img\b/i);
-  assert.match(formatted, /^!\[leak\]\(<a href="https:\/\/example\.com\/image\.png"/);
+  assert.match(formatted, /!\[leak\]\(<a href="https:\/\/example\.com\/image\.png"/);
+});
+
+test('renders markdown headings instead of leaving heading markers visible', () => {
+  const formatted = formatAssistantMessage('### Patterns & Observations');
+
+  assert.doesNotMatch(formatted, /###/);
+  assert.match(formatted, /<h3>Patterns &amp; Observations<\/h3>/);
+});
+
+test('renders fenced code blocks with language class and preserved code text', () => {
+  const formatted = formatAssistantMessage([
+    '```typescript',
+    'function factorial(n: number): number {',
+    '  return n;',
+    '}',
+    '```',
+  ].join('\n'));
+
+  assert.match(formatted, /<pre><code class="language-typescript">/);
+  assert.match(formatted, /function factorial\(n: number\): number \{/);
+  assert.match(formatted, /return n;/);
+  assert.match(formatted, /<\/code><\/pre>/);
+  assert.doesNotMatch(formatted, /```/);
 });
 
 test('escapes apostrophes for attribute-safe reuse', () => {

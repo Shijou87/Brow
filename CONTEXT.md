@@ -104,6 +104,18 @@ _Avoid_: iframe URL, widget HTML, template string
 One user-approved live iframe instance of an **MCP App** rendered inline in Brow chat.
 _Avoid_: persistent trusted app, restored iframe, tab content
 
+**HTML App Artifact**:
+A Brow-authored, conversation-scoped, self-contained HTML document with inline CSS and JavaScript that Brow can save, reopen, render, download, and revise.
+_Avoid_: MCP App, remote website, code block, data URL tab
+
+**HTML App Revision**:
+One saved revision of an **HTML App Artifact** that captures a specific HTML source snapshot and render hint.
+_Avoid_: live tab state, MCP resource version, diff patch
+
+**HTML App View**:
+One user-approved live render of an **HTML App Artifact**, shown either inline in Brow chat or in a dedicated Brow-hosted browser tab.
+_Avoid_: MCP App View, restored live iframe, raw browser tab
+
 **App-backed MCP Tool**:
 An MCP server tool whose descriptor points at a **UI Resource** through `_meta.ui.resourceUri` or the deprecated `_meta["ui/resourceUri"]`.
 _Avoid_: WebMCP Page Tool, browser automation action
@@ -155,7 +167,11 @@ _Avoid_: tool chip, raw descriptor, WebMCP Page Tool
 - An **MCP Server Card** contains zero or more **MCP Tool Cards**.
 - An **MCP Tool Card** may represent an **App-backed MCP Tool** when its descriptor points at a **UI Resource**.
 - An **MCP App View** may call app-visible tools and read resources only through the same MCP server that supplied its **UI Resource**.
+- An **HTML App Artifact** is Brow-authored and conversation-scoped; it is not supplied by an MCP server.
+- An **HTML App Artifact** may have many **HTML App Revisions**, and the latest revision is the default reopen target.
+- An **HTML App View** reuses Brow's sandboxed HTML host internally, but it is distinct from an **MCP App View** in product language and permissions.
 - A **WebMCP Page Tool** belongs to a tab page; an **MCP App View** belongs to a chat render and is not restored as live HTML from saved conversations.
+- A saved conversation may retain **HTML App Artifact** data and placeholder references, but it should not auto-run an **HTML App View** on load.
 
 ## Example Dialogue
 
@@ -177,4 +193,5 @@ _Avoid_: tool chip, raw descriptor, WebMCP Page Tool
 - "skill" used to blur site knowledge and browser mechanics; resolved: **Domain Skill** means reusable site knowledge, while **Interaction Skill** means a Brow-built cross-site browser mechanic.
 - "slash skill" could mean a command, attachment, or prompt edit; resolved: **Skill Mention** means the visible per-message skill reference selected from the leading slash picker.
 - "MCP app" can sound like a page-exposed WebMCP tool; resolved: **MCP App** means server-supplied MCP Apps UI, while **WebMCP Page Tool** means page-supplied tab capability.
+- "HTML app" could blur Brow-authored artifacts and server-supplied app UI; resolved: **HTML App Artifact** means Brow-authored saved HTML, while **MCP App** remains server-supplied UI.
 - "tool card" can refer to page tools or MCP server tools; resolved: **MCP Tool Card** means a sidepanel card for a tool discovered from a configured remote MCP server.

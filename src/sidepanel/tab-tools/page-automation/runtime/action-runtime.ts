@@ -7,6 +7,9 @@ export function createPageAutomationActionRuntime() {
   const base = createBaseRuntime();
   const selectors = createSelectorRuntime(base);
   const interactions = createInteractionRuntime(base);
+  const dismissPageAutomationOverlay = (delay?: number) => {
+    interactions.dismissOverlay(delay);
+  };
 
   async function runPageAutomationAction(action: PageAutomationAction): Promise<unknown> {
     if (action.kind === 'highlight') {
@@ -23,7 +26,11 @@ export function createPageAutomationActionRuntime() {
 
       const durationMs = base.clamp(Math.round(action.durationMs ?? 2200), 600, 10000);
       const message = (action.message ?? `Brow highlighting ${base.describeElement(el)}`).trim();
-      await interactions.previewHighlight(el, message || `Brow highlighting ${base.describeElement(el)}`);
+      await interactions.previewHighlight(
+        el,
+        message || `Brow highlighting ${base.describeElement(el)}`,
+        action.visualSettings,
+      );
       interactions.cleanupOverlay(durationMs);
 
       return {
@@ -81,14 +88,14 @@ export function createPageAutomationActionRuntime() {
         return { ok: false, error: 'Matched element has no visible click target' };
       }
 
-      await interactions.previewClick(el, `Brow clicking ${base.describeElement(el)}`);
+      await interactions.previewClick(el, `Brow clicking ${base.describeElement(el)}`, action.visualSettings);
       const finalPlan = interactions.resolveClickPlan(el, action.clickPoint) ?? initialPlan;
       const dispatchPlan = action.clickMode === 'programmatic'
         ? { ...finalPlan, dispatchMode: 'programmatic' as const }
         : finalPlan;
       dispatchPlan.target.focus({ preventScroll: true });
       interactions.dispatchClick(el, dispatchPlan);
-      interactions.cleanupOverlay();
+      interactions.cleanupOverlay(action.visualSettings?.animatedBrow === true ? 220 : undefined);
 
       return {
         ok: true,
@@ -383,7 +390,11 @@ export function createPageAutomationActionRuntime() {
 
       const typeTarget = interactions.findTypeTarget(el);
       if (typeTarget) {
-        await interactions.previewFieldEdit(typeTarget, `Brow typing into ${base.describeElement(typeTarget)}`);
+        await interactions.previewFieldEdit(
+          typeTarget,
+          `Brow typing into ${base.describeElement(typeTarget)}`,
+          action.visualSettings,
+        );
         typeTarget.focus({ preventScroll: true });
         await interactions.animateTypeableElementValue(typeTarget, action.text);
         if (action.submit) {
@@ -391,7 +402,7 @@ export function createPageAutomationActionRuntime() {
           await base.sleep(40);
           interactions.dispatchEnter(typeTarget);
         }
-        interactions.cleanupOverlay();
+        interactions.cleanupOverlay(action.visualSettings?.animatedBrow === true ? 220 : undefined);
         return {
           ok: true,
           typed: summarize(typeTarget),
@@ -459,7 +470,11 @@ export function createPageAutomationActionRuntime() {
       try {
         if (mode === 'text') {
           if (tagName === 'input' || tagName === 'textarea') {
-            await interactions.previewFieldEdit(el, `Brow typing into ${base.describeElement(el)}`);
+            await interactions.previewFieldEdit(
+              el,
+              `Brow typing into ${base.describeElement(el)}`,
+              action.visualSettings,
+            );
             const inputEl = el as HTMLInputElement | HTMLTextAreaElement;
             await interactions.animateTypeableElementValue(inputEl, String(field.value));
             await interactions.commitFilledTextField(inputEl);
@@ -481,7 +496,11 @@ export function createPageAutomationActionRuntime() {
 
         if (mode === 'contenteditable') {
           if (el.isContentEditable) {
-            await interactions.previewFieldEdit(el, `Brow typing into ${base.describeElement(el)}`);
+            await interactions.previewFieldEdit(
+              el,
+              `Brow typing into ${base.describeElement(el)}`,
+              action.visualSettings,
+            );
             await interactions.animateTypeableElementValue(el, String(field.value));
             successfulFieldElements.push(el);
             results.push({ selector: resolvedSelector, ok: true, mode, tagName, type, value: field.value });
@@ -525,7 +544,11 @@ export function createPageAutomationActionRuntime() {
               continue;
             }
 
-            await interactions.previewFieldEdit(el, `Brow selecting ${option.label || option.text}`);
+            await interactions.previewFieldEdit(
+              el,
+              `Brow selecting ${option.label || option.text}`,
+              action.visualSettings,
+            );
             selectEl.value = option.value;
             option.selected = true;
             selectEl.dispatchEvent(new Event('input', { bubbles: true }));
@@ -551,7 +574,11 @@ export function createPageAutomationActionRuntime() {
           if (tagName === 'input' && (el as HTMLInputElement).type === mode) {
             const inputEl = el as HTMLInputElement;
             const nextChecked = Boolean(field.value);
-            await interactions.previewClick(el, `${nextChecked ? 'Brow selecting' : 'Brow clearing'} ${base.describeElement(el)}`);
+            await interactions.previewClick(
+              el,
+              `${nextChecked ? 'Brow selecting' : 'Brow clearing'} ${base.describeElement(el)}`,
+              action.visualSettings,
+            );
             if (inputEl.checked !== nextChecked) {
               if (nextChecked) {
                 inputEl.click();
@@ -607,7 +634,11 @@ export function createPageAutomationActionRuntime() {
         const resolvedSubmit = selectors.resolveActionElement(action.submitSelector);
         if (resolvedSubmit?.element && base.isHTMLElementLike(resolvedSubmit.element)) {
           const submitEl = resolvedSubmit.element;
-          await interactions.previewClick(submitEl, `Brow submitting ${base.describeElement(submitEl)}`);
+          await interactions.previewClick(
+            submitEl,
+            `Brow submitting ${base.describeElement(submitEl)}`,
+            action.visualSettings,
+          );
           submitEl.focus({ preventScroll: true });
           submitEl.click();
           submitted = true;
@@ -624,7 +655,11 @@ export function createPageAutomationActionRuntime() {
       } else {
         const inferredSubmit = interactions.inferSubmitControl(successfulFieldElements);
         if (inferredSubmit) {
-          await interactions.previewClick(inferredSubmit, `Brow submitting ${base.describeElement(inferredSubmit)}`);
+          await interactions.previewClick(
+            inferredSubmit,
+            `Brow submitting ${base.describeElement(inferredSubmit)}`,
+            action.visualSettings,
+          );
           inferredSubmit.focus({ preventScroll: true });
           inferredSubmit.click();
           submitted = true;
@@ -634,7 +669,7 @@ export function createPageAutomationActionRuntime() {
       }
     }
 
-    interactions.cleanupOverlay(1000);
+    interactions.cleanupOverlay(action.visualSettings?.animatedBrow === true ? 220 : 1000);
 
     const hadFieldErrors = results.some((result) => !result.ok);
     const outcome: { ok: boolean; warning?: string; error?: string } = hadFieldErrors
@@ -666,5 +701,6 @@ export function createPageAutomationActionRuntime() {
 
   return {
     runPageAutomationAction,
+    dismissPageAutomationOverlay,
   };
 }

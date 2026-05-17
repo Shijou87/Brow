@@ -1,3 +1,8 @@
+// ─── Request Budget Runtime ────────────────────────────────────────────────
+// Assembles the model-facing query context, estimates request size against the
+// configured context window, and compacts older conversation history when the
+// next turn would otherwise exceed Brow's budget.
+
 import {
   buildBrowserContextSnapshotResult,
   buildWorkflowDemonstrationContext,
@@ -90,6 +95,10 @@ function estimateMessageTokens(message: AgentMessage): number {
   return 8 + estimateTextTokens(message.role) + estimateTextTokens(message.content);
 }
 
+/**
+ * Estimates the token cost of the compiled system prompt plus the provided
+ * conversation messages using Brow's lightweight local heuristic.
+ */
 export function estimateConversationTokens(systemPrompt: string, messages: AgentMessage[]): number {
   return 16 + estimateMessageTokens({ role: 'system', content: systemPrompt })
     + messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
@@ -167,6 +176,10 @@ export function buildRequestContextDebugSnapshot(params: {
   };
 }
 
+/**
+ * Creates the request-budget helper used by the Agent to assemble context,
+ * estimate request size, and compact older history when needed.
+ */
 export function createRequestBudgetRuntime(options: CreateRequestBudgetRuntimeOptions) {
   function getEffectiveConversationCompactionState(
     history: RequestBudgetChatTurn[],

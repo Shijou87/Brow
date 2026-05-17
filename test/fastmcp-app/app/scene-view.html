@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>ThreeJS Demo View</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        min-height: 100%;
+        background: #091423;
+        overflow: hidden;
+      }
+
+      .scene-frame {
+        position: relative;
+        width: 100vw;
+        min-height: 420px;
+        overflow: hidden;
+        background: #091423;
+      }
+
+      .scene-surface,
+      .scene-canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="scene-frame" class="scene-frame" aria-label="Three.js viewport"></div>
+
+    <script type="module">
+      import { App } from "http://127.0.0.1:8000/assets/app-with-deps.js";
+      import * as THREE from "http://127.0.0.1:8000/assets/three.module.js";
+      import { OrbitControls } from "http://127.0.0.1:8000/assets/OrbitControls.js";
+
+      const app = new App(
+        { name: "ThreeJS Demo View", version: "1.0.0" },
+        {},
+        { autoResize: false },
+      );
+
+      const elements = {
+        sceneFrame: document.getElementById("scene-frame"),
+      };
+
+      const disallowedPatterns = [
+        {
+          regex: /\bimport\s*(?:["'{*]|[\w])/m,
+          message: "Import statements are not allowed in the scene body.",
+        },
+        {
+          regex: /\bexport\b/m,
+          message: "Export statements are not allowed in the scene body.",
+        },
+        {
+          regex: /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\b/m,
+          message: "Network access is not allowed in the scene body.",
+        },
+        {
+          regex: /\bdocument\s*\.\s*(?:write|open|close|body|documentElement)\b/m,
+          message: "Replacing or controlling the host document is not allowed.",
+        },
+        {
+          regex: /\b(?:innerHTML|outerHTML)\b/m,
+          message: "HTML replacement APIs are not allowed in the scene body.",
+        },
+        {
+          regex: /\b(?:window\s*\.\s*(?:top|parent|location)|parent\s*\.|top\s*\.|history\s*\.)/m,
+          message: "Navigating or escaping the sandbox is not allowed.",
+        },
+      ];
+
+      const state = {
+        toolInput: null,
+        toolResult: null,
+        currentRuntime: null,
+      };
+
+      let stopHostResizeTracking = null;
+
+      function updateMeta(summary, input) {
+        const sceneTitle = input?.title?.trim() || summary?.sceneTitle || "ThreeJS Demo View";
+        document.title = sceneTitle;
+      }
+
+      function parseSummaryFromContent(content) {
+        const textEntry = Array.isArray(content)
+          ? content.find((item) => item && item.type === "text" && typeof item.text === "string")
+          : null;
+
+        if (!textEntry) return null;
+
+        try {
+          return JSON.parse(textEntry.text);
+        } catch {
+          return null;
+        }
+      }
+
+      function getResultSummary(toolResult) {
+        if (!toolResult || typeof toolResult !== "object") return null;
+        if (toolResult.structuredContent && typeof toolResult.structuredContent === "object") {
+          return toolResult.structuredContent;
+        }
+        return parseSummaryFromContent(toolResult.content);
+      }
+
+      function validateScript(script) {
+        if (typeof script !== "string" || script.trim().length === 0) {
+          return "The scene script is missing.";
+        }
+
+        for (const rule of disallowedPatterns) {
+          if (rule.regex.test(script)) return rule.message;
+        }
+
+        return null;
+      }
+
+      function disposeMaterial(material) {
+        if (!material) return;
+
+        for (const value of Object.values(material)) {
+          if (value && typeof value === "object" && typeof value.dispose === "function") {
+            value.dispose();
+          }
+        }
+
+        if (typeof material.dispose === "function") {
+          material.dispose();
+        }
+      }
+
+      function disposeScene(scene) {
+        scene.traverse((node) => {
+          if (node.geometry && typeof node.geometry.dispose === "function") {
+            node.geometry.dispose();
+          }
+
+          if (Array.isArray(node.material)) {
+            node.material.forEach(disposeMaterial);
+          } else if (node.material) {
+            disposeMaterial(node.material);
+          }
+        });
+      }
+
+      function teardownRuntime() {
+        if (!state.currentRuntime) return;
+        state.currentRuntime.destroy();
+        state.currentRuntime = null;
+      }
+
+      function startHostResizeTracking() {
+        stopHostResizeTracking?.();
+
+        let pending = false;
+        let lastWidth = 0;
+        let lastHeight = 0;
+        let rafId = 0;
+
+        function measureDocumentSize() {
+          const rootRect = document.documentElement.getBoundingClientRect();
+          const bodyRect = document.body.getBoundingClientRect();
+
+          return {
+            width: Math.max(
+              Math.ceil(window.innerWidth || 0),
+              Math.ceil(rootRect.width || 0),
+              Math.ceil(bodyRect.width || 0),
+            ),
+            height: Math.max(
+              Math.ceil(document.documentElement.scrollHeight || 0),
+              Math.ceil(document.body.scrollHeight || 0),
+              Math.ceil(rootRect.height || 0),
+              Math.ceil(bodyRect.height || 0),
+            ),
+          };
+        }
+
+        async function flushResize() {
+          pending = false;
+
+          const { width, height } = measureDocumentSize();
+          if (width === lastWidth && height === lastHeight) return;
+
+          lastWidth = width;
+          lastHeight = height;
+
+          try {
+            await app.sendSizeChanged({ width, height });
+          } catch {
+          }
+        }
+
+        function scheduleResizeReport() {
+          if (pending) return;
+          pending = true;
+
+          rafId = window.requestAnimationFrame(() => {
+            rafId = 0;
+            void flushResize();
+          });
+        }
+
+        const observer = new ResizeObserver(() => {
+          scheduleResizeReport();
+        });
+
+        observer.observe(document.documentElement);
+        observer.observe(document.body);
+        window.addEventListener("resize", scheduleResizeReport);
+        scheduleResizeReport();
+
+        stopHostResizeTracking = () => {
+          if (rafId) {
+            window.cancelAnimationFrame(rafId);
+            rafId = 0;
+          }
+
+          observer.disconnect();
+          window.removeEventListener("resize", scheduleResizeReport);
+        };
+      }
+
+      function buildRuntime() {
+        const frame = document.createElement("div");
+        frame.className = "scene-surface";
+
+        const canvas = document.createElement("canvas");
+        canvas.className = "scene-canvas";
+        canvas.setAttribute("aria-label", "Three.js scene");
+        frame.appendChild(canvas);
+
+        elements.sceneFrame.replaceChildren(frame);
+
+        const renderer = new THREE.WebGLRenderer({
+          canvas,
+          antialias: true,
+          alpha: false,
+          powerPreference: "high-performance",
+        });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.shadowMap.enabled = true;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x091423);
+        scene.fog = new THREE.Fog(0x091423, 32, 96);
+
+        const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 300);
+        camera.position.set(18, 12, 18);
+
+        const controls = new OrbitControls(camera, canvas);
+        controls.enableDamping = true;
+        controls.target.set(0, 4, 0);
+        controls.update();
+
+        const ambient = new THREE.HemisphereLight(0xdceeff, 0x1e2534, 1.5);
+        scene.add(ambient);
+
+        const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
+        keyLight.position.set(14, 22, 10);
+        keyLight.castShadow = true;
+        scene.add(keyLight);
+
+        const fillLight = new THREE.DirectionalLight(0x7bb9ff, 0.7);
+        fillLight.position.set(-10, 8, -12);
+        scene.add(fillLight);
+
+        const ground = new THREE.GridHelper(80, 80, 0x31506d, 0x163147);
+        ground.position.y = -0.01;
+        scene.add(ground);
+
+        const clock = new THREE.Clock();
+        const cleanupFns = [];
+        const runtimeState = {
+          animationCallback: null,
+          destroyed: false,
+          rafId: 0,
+        };
+
+        let resizeFrameId = 0;
+
+        function resize() {
+          const width = Math.max(elements.sceneFrame.clientWidth, 320);
+          const height = Math.max(elements.sceneFrame.clientHeight, 280);
+          renderer.setSize(width, height, false);
+          camera.aspect = width / height;
+          camera.updateProjectionMatrix();
+        }
+
+        function scheduleResize() {
+          if (resizeFrameId) return;
+          resizeFrameId = window.requestAnimationFrame(() => {
+            resizeFrameId = 0;
+            if (!runtimeState.destroyed) resize();
+          });
+        }
+
+        const resizeObserver = new ResizeObserver(() => scheduleResize());
+        resizeObserver.observe(elements.sceneFrame);
+        scheduleResize();
+
+        function addCleanup(fn) {
+          if (typeof fn === "function") cleanupFns.push(fn);
+        }
+
+        function setAnimationLoop(fn) {
+          runtimeState.animationCallback = typeof fn === "function" ? fn : null;
+        }
+
+        function reportRuntimeError(error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error("[threejs-demo]", message);
+          runtimeState.animationCallback = null;
+        }
+
+        function tick(time) {
+          if (runtimeState.destroyed) return;
+
+          runtimeState.rafId = window.requestAnimationFrame(tick);
+
+          const delta = clock.getDelta();
+          const elapsed = clock.elapsedTime;
+
+          controls.update();
+
+          if (runtimeState.animationCallback) {
+            try {
+              runtimeState.animationCallback({
+                time,
+                delta,
+                elapsed,
+                THREE,
+                scene,
+                camera,
+                renderer,
+                controls,
+                canvas,
+              });
+            } catch (error) {
+              reportRuntimeError(error);
+            }
+          }
+
+          renderer.render(scene, camera);
+        }
+
+        runtimeState.rafId = window.requestAnimationFrame(tick);
+
+        function runSceneScript(script) {
+          const validationMessage = validateScript(script);
+          if (validationMessage) {
+            throw new Error(validationMessage);
+          }
+
+          const runtimeBridge = {
+            THREE,
+            scene,
+            camera,
+            renderer,
+            controls,
+            canvas,
+            clock,
+            setAnimationLoop,
+            addCleanup,
+            reportError: reportRuntimeError,
+          };
+
+          window.__threeJsDemoRuntime = runtimeBridge;
+
+          const scriptTag = document.createElement("script");
+          scriptTag.type = "module";
+          scriptTag.textContent = `
+            const runtime = window.__threeJsDemoRuntime;
+            const {
+              THREE,
+              scene,
+              camera,
+              renderer,
+              controls,
+              canvas,
+              clock,
+              setAnimationLoop,
+              addCleanup,
+            } = runtime;
+
+            try {
+${script
+  .split("\n")
+  .map((line) => `              ${line}`)
+  .join("\n")}
+            } catch (error) {
+              runtime.reportError(error);
+            }
+          `;
+
+          const onWindowError = (event) => {
+            const message = event.error instanceof Error
+              ? event.error.message
+              : event.message || "Scene script could not be evaluated.";
+            reportRuntimeError(new Error(message));
+          };
+
+          window.addEventListener("error", onWindowError, { once: true });
+          scriptTag.addEventListener("load", () => {
+            window.removeEventListener("error", onWindowError);
+          });
+          scriptTag.addEventListener("error", () => {
+            window.removeEventListener("error", onWindowError);
+            reportRuntimeError(new Error("Scene script could not be loaded."));
+          });
+
+          frame.appendChild(scriptTag);
+        }
+
+        return {
+          destroy() {
+            runtimeState.destroyed = true;
+            window.cancelAnimationFrame(runtimeState.rafId);
+            if (resizeFrameId) window.cancelAnimationFrame(resizeFrameId);
+            resizeObserver.disconnect();
+            controls.dispose();
+
+            for (const cleanup of cleanupFns.reverse()) {
+              try {
+                cleanup();
+              } catch {
+              }
+            }
+
+            disposeScene(scene);
+            renderer.dispose();
+            elements.sceneFrame.replaceChildren();
+            delete window.__threeJsDemoRuntime;
+          },
+          runSceneScript,
+        };
+      }
+
+      function maybeRender() {
+        if (!state.toolInput || !state.toolResult) return;
+
+        const summary = getResultSummary(state.toolResult);
+        const input = state.toolInput.arguments || {};
+        const script = input.script;
+
+        updateMeta(summary, input);
+
+        teardownRuntime();
+        state.currentRuntime = buildRuntime();
+
+        try {
+          state.currentRuntime.runSceneScript(script);
+        } catch (error) {
+          console.error("[threejs-demo]", error instanceof Error ? error.message : String(error));
+        }
+      }
+
+      app.ontoolinput = (params) => {
+        state.toolInput = params;
+        maybeRender();
+      };
+
+      app.ontoolresult = (params) => {
+        state.toolResult = params;
+        maybeRender();
+      };
+
+      try {
+        await app.connect();
+        startHostResizeTracking();
+      } catch (error) {
+        console.error("[threejs-demo]", error instanceof Error ? error.message : String(error));
+      }
+    </script>
+  </body>
+</html>

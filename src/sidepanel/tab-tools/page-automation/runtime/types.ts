@@ -30,6 +30,10 @@ export interface ClickPlan {
 export type ClickDispatchMode = 'programmatic';
 export type CursorFrame = 'hand' | 'push' | 'highlight' | 'pencil';
 
+export interface PageAutomationVisualSettings {
+  animatedBrow: boolean;
+}
+
 export interface StoredSnapshot {
   snapshotId: string;
   entriesByRef: Record<string, BrowserSnapshotElement>;
@@ -50,6 +54,7 @@ export type PageAutomationAction =
     selector: string;
     message?: string;
     durationMs?: number;
+    visualSettings?: PageAutomationVisualSettings;
   }
   | {
     kind: 'hover';
@@ -62,6 +67,7 @@ export type PageAutomationAction =
     selector: string;
     clickPoint?: BrowserClickPoint;
     clickMode?: ClickDispatchMode;
+    visualSettings?: PageAutomationVisualSettings;
   }
   | {
     kind: 'drag';
@@ -108,6 +114,7 @@ export type PageAutomationAction =
     selector: string;
     text: string;
     submit: boolean;
+    visualSettings?: PageAutomationVisualSettings;
   }
   | {
     kind: 'fillForm';
@@ -118,6 +125,7 @@ export type PageAutomationAction =
     }>;
     submit: boolean;
     submitSelector?: string;
+    visualSettings?: PageAutomationVisualSettings;
   };
 
 export interface PageSettlingProbeOptions {
@@ -136,6 +144,7 @@ export interface PageSettlingProbeResult {
 export interface InstalledPageAutomationRuntime {
   runPageAutomationAction(action: PageAutomationAction): Promise<unknown>;
   runPageSettlingProbe(options?: PageSettlingProbeOptions): Promise<PageSettlingProbeResult>;
+  dismissPageAutomationOverlay(delay?: number): void;
 }
 
 export const PAGE_AUTOMATION_RUNTIME_GLOBAL_KEY = '__browPageAutomationRuntime__';

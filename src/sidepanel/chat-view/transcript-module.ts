@@ -4,7 +4,11 @@ import {
   messageCopySvg,
 } from './icons';
 import type { SavedConversationMessage } from './types';
-import type { SkillMentionReference, WorkflowDemonstration } from '../../shared/types';
+import type {
+  HtmlAppArtifactMessageRef,
+  SkillMentionReference,
+  WorkflowDemonstration,
+} from '../../shared/types';
 
 export interface TranscriptModuleDeps {
   escapeHtml: (text: string) => string;
@@ -14,6 +18,7 @@ export interface TranscriptModuleDeps {
     placement: 'composer' | 'message',
   ) => HTMLElement;
   createWorkflowDemonstrationMessageCard: (demonstration: WorkflowDemonstration) => HTMLElement;
+  createHtmlAppArtifactMessageCard: (ref: HtmlAppArtifactMessageRef) => HTMLElement;
   getWorkflowDemonstrationById: (id: string) => WorkflowDemonstration | undefined;
   requestScrollToBottom: () => void;
 }
@@ -38,7 +43,7 @@ export class TranscriptModule {
     this.streamingElement = null;
   }
 
-  public renderConversationMessage(message: SavedConversationMessage): void {
+  public renderConversationMessage(message: SavedConversationMessage): HTMLElement {
     const el = document.createElement('div');
     el.className = `message ${message.role}-message`;
 
@@ -71,6 +76,17 @@ export class TranscriptModule {
       }
     }
 
+    if (message.htmlAppArtifactRefs?.length) {
+      const attachments = document.createElement('div');
+      attachments.className = 'message-html-app-artifacts';
+      for (const ref of message.htmlAppArtifactRefs) {
+        attachments.appendChild(this.deps.createHtmlAppArtifactMessageCard(ref));
+      }
+      if (attachments.childElementCount > 0) {
+        el.appendChild(attachments);
+      }
+    }
+
     if (message.time || (message.content && message.role !== 'system')) {
       el.appendChild(this.createMessageFooter(
         message.time,
@@ -80,6 +96,7 @@ export class TranscriptModule {
 
     this.messagesContainer.appendChild(el);
     this.deps.requestScrollToBottom();
+    return el;
   }
 
   public showTypingIndicator(): void {

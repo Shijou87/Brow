@@ -1,4 +1,4 @@
-import { logError } from '../shared/logger';
+import { isDebugLoggingEnabled, logError } from '../shared/logger';
 
 let rpcCounter = 0;
 const pendingRpcs = new Map<number, {
@@ -24,6 +24,12 @@ export function callPageBridge(
   extra: Record<string, unknown> = {},
 ): Promise<any> {
   return new Promise((resolve) => {
+    window.postMessage({
+      direction: 'webmcp-from-content',
+      action: 'set-debug-logging',
+      debugLogging: isDebugLoggingEnabled(),
+    }, '*');
+
     const id = ++rpcCounter;
     const timer = setTimeout(() => {
       pendingRpcs.delete(id);

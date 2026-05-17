@@ -3,6 +3,8 @@
 // Pages can then call registerTool / unregisterTool and the extension's
 // page-bridge can discover & invoke them via listTools / invokeTool.
 
+import { logInfo } from '../shared/logger';
+
 export {}; // module for TS
 
 (function () {
@@ -13,7 +15,7 @@ export {}; // module for TS
   //   navigator.modelContextTesting → listTools() / executeTool()
   // If either native object exists, the page-bridge handles both directly — skip polyfill.
   if (nav.modelContext || nav.modelContextTesting) {
-    console.log('[WebMCP][polyfill] Native WebMCP detected, skipping polyfill');
+    logInfo('polyfill', 'Native WebMCP detected, skipping polyfill');
     return;
   }
 
@@ -58,5 +60,5 @@ export {}; // module for TS
     configurable: true,
   });
 
-  console.log('[WebMCP][polyfill] navigator.modelContext polyfilled');
+  logInfo('polyfill', 'navigator.modelContext polyfilled');
 })();

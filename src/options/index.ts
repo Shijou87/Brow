@@ -94,7 +94,7 @@ async function loadSettings(): Promise<void> {
   setVal('mcp-auth', settings.mcp?.authToken ?? '');
   setChecked('enable-webmcp', settings.enableWebMCP ?? true);
   setChecked('enable-mcp-apps', settings.enableMCPApps ?? true);
-  setChecked('debug-logging', settings.debugLogging ?? true);
+  setChecked('debug-logging', settings.debugLogging ?? false);
 }
 
 // ─── Save settings ─────────────────────────────────────────────────────────

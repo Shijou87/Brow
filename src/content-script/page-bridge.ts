@@ -4,7 +4,7 @@
 // (which runs in the ISOLATED world) via window.postMessage.
 
 export {}; // make this a module for TS
-import { logInfo } from '../shared/logger';
+import { logInfo, setDebugLoggingEnabled } from '../shared/logger';
 import { discoverPageTools, invokePageTool } from './page-bridge-runtime';
 
 declare global {
@@ -49,6 +49,11 @@ window.addEventListener('message', async (event) => {
   if (!event.data || event.data.direction !== 'webmcp-from-content') return;
 
   const { id, action, toolName, args } = event.data;
+
+  if (action === 'set-debug-logging') {
+    setDebugLoggingEnabled(Boolean(event.data.debugLogging));
+    return;
+  }
 
   if (action === 'discover') {
     const result = await discoverPageTools();

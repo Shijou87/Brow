@@ -7,6 +7,10 @@ const {
   browserDragToolSchema,
   browserFillFormToolSchema,
 } = require('../.tmp-openai-tool-schema-test/browser-tool-schemas.js');
+const {
+  jsonSchemaToZod,
+  normalizeJsonSchemaParsedObject,
+} = require('../.tmp-openai-tool-schema-test/json-schema.js');
 
 function collectInvalidAdditionalProperties(schema, path = '#') {
   if (!schema || typeof schema !== 'object') {
@@ -123,5 +127,54 @@ test('browser_drag schema stays OpenAI function-calling compatible', () => {
     'browser_drag',
     browserDragToolSchema,
     'Drag from one visible target to another using current refs or Workflow Demonstration target evidence.',
+  );
+});
+
+test('jsonSchemaToZod keeps optional MCP fields OpenAI function-calling compatible', () => {
+  assertOpenAiCompatibleTool(
+    'mcp_render_view',
+    jsonSchemaToZod({
+      type: 'object',
+      properties: {
+        requiredImageId: { type: 'string', description: 'Image identifier.' },
+        vlmModel: { type: 'string', description: 'Optional VLM model.' },
+        nested: {
+          type: 'object',
+          properties: {
+            qualityPreset: { type: 'string', description: 'Optional quality preset.' },
+          },
+          required: [],
+        },
+      },
+      required: ['requiredImageId'],
+    }),
+    'Render a view through an MCP tool.',
+  );
+});
+
+test('normalizeJsonSchemaParsedObject strips null placeholders from optional MCP fields', () => {
+  assert.deepEqual(
+    normalizeJsonSchemaParsedObject({
+      requiredImageId: 'img-1',
+      vlmModel: null,
+      nested: {
+        qualityPreset: null,
+        keep: 'lossless',
+      },
+      views: [
+        { preset: null, id: 'axial' },
+        null,
+      ],
+    }),
+    {
+      requiredImageId: 'img-1',
+      nested: {
+        keep: 'lossless',
+      },
+      views: [
+        { id: 'axial' },
+        null,
+      ],
+    },
   );
 });

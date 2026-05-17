@@ -481,6 +481,81 @@
   }
 }
 
+.config-toggle-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 2px solid $outline-variant;
+  background: rgba(168, 85, 247, 0.06);
+  cursor: pointer;
+
+  input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    margin-top: 2px;
+    accent-color: $accent;
+  }
+}
+
+.config-toggle-field--brow {
+  align-items: center;
+}
+
+.config-toggle-preview {
+  flex: 0 0 auto;
+  width: 52px;
+  height: 52px;
+  background-repeat: no-repeat;
+  background-position: 0 0;
+  image-rendering: pixelated;
+}
+
+.config-brow-idle-preview {
+  --config-brow-preview-size: 52px;
+  width: var(--config-brow-preview-size);
+  height: var(--config-brow-preview-size);
+  margin-left: -4px;
+  border-radius: 8px;
+  background-image: var(--brow-spritesheet-url);
+  background-size: calc(var(--config-brow-preview-size) * 12) calc(var(--config-brow-preview-size) * 6);
+  filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.32));
+  animation: config-brow-idle-preview 900ms steps(12) infinite;
+}
+
+@keyframes config-brow-idle-preview {
+  from {
+    background-position: 0 0;
+  }
+
+  to {
+    background-position: calc(var(--config-brow-preview-size) * -12) 0;
+  }
+}
+
+.config-toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.config-toggle-title {
+  color: $accent;
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.config-toggle-description {
+  color: $text-secondary;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .config-field-header {
   display: flex;
   align-items: center;

@@ -31,6 +31,7 @@
     "@langchain/langgraph": "^0.2.0",
     "@langchain/openai": "^0.3.0",
     "@modelcontextprotocol/ext-apps": "^1.6.0",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "marked": "^18.0.3"
   }
 }

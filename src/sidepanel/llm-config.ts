@@ -4,6 +4,7 @@
 import { ChatOpenAI } from '@langchain/openai';
 import type { DirectLLMConfig } from '../shared/types';
 import { DEFAULT_CLAUDE_FIELDS, DEFAULT_OPENAI_FIELDS } from '../shared/config';
+import { logInfo } from '../shared/logger';
 
 export type ChatOpenAIInstance = InstanceType<typeof ChatOpenAI>;
 export type LLMConfigUnion = DirectLLMConfig;
@@ -34,7 +35,7 @@ let runtimeConfig: LLMConfigUnion | null = null;
  */
 export function reconfigureLlm(config: LLMConfigUnion): void {
   runtimeConfig = config;
-  console.log('[LLM] Reconfigured:', config.provider);
+  logInfo('llm', 'Reconfigured:', config.provider);
 }
 
 export function getRuntimeLlmConfig(): LLMConfigUnion | null {
@@ -56,7 +57,7 @@ export async function ensureLlm(): Promise<ChatOpenAIInstance> {
     llmReady = (async () => {
       const config = runtimeConfig ?? DEFAULT_DIRECT_CONFIG;
       baseLlm = await createLlm(config);
-      console.log('[LLM] Initialised:', config.provider);
+      logInfo('llm', 'Initialised:', config.provider);
       return baseLlm;
     })();
   }
@@ -70,7 +71,7 @@ export async function ensureLlm(): Promise<ChatOpenAIInstance> {
 export function resetLlm(): void {
   baseLlm = null;
   llmReady = null;
-  console.log('[LLM] Reset — will re-initialise on next query');
+  logInfo('llm', 'Reset — will re-initialise on next query');
 }
 
 /**
@@ -90,7 +91,7 @@ function shouldOmitTemperature(model: string): boolean {
  * Create a ChatOpenAI instance for the given configuration.
  */
 export async function createLlm(config: LLMConfigUnion): Promise<ChatOpenAIInstance> {
-  console.log(`[LLM] Creating LLM → ${config.baseUrl} (model: ${config.model})`);
+  logInfo('llm', `Creating LLM → ${config.baseUrl} (model: ${config.model})`);
   return new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey || 'not-needed',

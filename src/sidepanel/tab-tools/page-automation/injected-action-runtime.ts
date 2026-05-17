@@ -2,6 +2,7 @@ export type {
   BrowserClickPoint,
   ClickDispatchMode,
   PageAutomationAction,
+  PageAutomationVisualSettings,
   PageSettlingProbeOptions,
   PageSettlingProbeResult,
 } from './runtime/types';

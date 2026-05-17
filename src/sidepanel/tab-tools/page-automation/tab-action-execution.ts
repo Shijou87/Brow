@@ -1,10 +1,12 @@
 import { ensureTabIsActive } from '../tabs';
 import type { BrowAutomationBackend } from '../../../shared/types';
+import { loadSidepanelConfig } from '../../../shared/storage';
 import {
   runPageAutomationAction,
   type BrowserClickPoint,
   type ClickDispatchMode,
   type PageAutomationAction,
+  type PageAutomationVisualSettings,
 } from './injected-action-runtime';
 import {
   ensurePageAutomationRuntimeInjected,
@@ -50,6 +52,14 @@ export interface FormFillFieldResult {
 
 const CLICK_EXECUTION_TIMEOUT_MS = 1200;
 
+async function loadPageAutomationVisualSettings(): Promise<PageAutomationVisualSettings | undefined> {
+  const config = await loadSidepanelConfig().catch(() => null);
+  if (!config || config.runtime.animatedBrow !== true) return undefined;
+  return {
+    animatedBrow: config.runtime.animatedBrow === true,
+  };
+}
+
 async function executePageAutomationAction<Result>(
   tabId: number,
   action: PageAutomationAction,
@@ -75,6 +85,54 @@ async function executePageAutomationAction<Result>(
     func: runPageAutomationAction,
     args: [action],
   }) as Promise<chrome.scripting.InjectionResult<Result>[]>;
+}
+
+export async function dismissBrowAutomationOverlays(
+  delayMs = 0,
+): Promise<{ ok: boolean; dismissedTabIds: number[]; error?: string }> {
+  try {
+    const tabs = await chrome.tabs.query({});
+    const dismissedTabIds: number[] = [];
+    const normalizedDelayMs = Math.max(0, Math.round(delayMs));
+
+    await Promise.all(tabs.map(async (tab) => {
+      const tabId = tab.id;
+      if (typeof tabId !== 'number' || tabId < 0) return;
+
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: (nextDelayMs: number) => {
+            const runtime = (globalThis as Record<string, unknown>).__browPageAutomationRuntime__ as {
+              dismissPageAutomationOverlay?: (delay?: number) => void;
+            } | undefined;
+
+            if (!runtime || typeof runtime.dismissPageAutomationOverlay !== 'function') {
+              return false;
+            }
+
+            runtime.dismissPageAutomationOverlay(nextDelayMs);
+            return true;
+          },
+          args: [normalizedDelayMs],
+        });
+
+        if (results?.[0]?.result === true) {
+          dismissedTabIds.push(tabId);
+        }
+      } catch {
+        // Ignore tabs that cannot be scripted or do not host the automation runtime.
+      }
+    }));
+
+    return { ok: true, dismissedTabIds };
+  } catch (err: any) {
+    return {
+      ok: false,
+      dismissedTabIds: [],
+      error: err?.message ?? 'Failed to dismiss Brow automation overlays',
+    };
+  }
 }
 
 export async function tabsListInteractiveElements(
@@ -197,10 +255,11 @@ export async function tabsClick(
 ): Promise<{ ok: boolean; clicked?: InteractiveElementInfo; error?: string }> {
   try {
     await ensureTabIsActive(tabId);
+    const visualSettings = await loadPageAutomationVisualSettings();
 
     const results = await executePageAutomationAction<{ ok: boolean; clicked?: InteractiveElementInfo; error?: string }>(
       tabId,
-      { kind: 'click', selector, clickPoint, clickMode },
+      { kind: 'click', selector, clickPoint, clickMode, visualSettings },
       CLICK_EXECUTION_TIMEOUT_MS,
       'Click execution',
     );
@@ -226,6 +285,7 @@ export async function tabsHighlight(
 }> {
   try {
     await ensureTabIsActive(tabId);
+    const visualSettings = await loadPageAutomationVisualSettings();
 
     const results = await executePageAutomationAction<{
       ok: boolean;
@@ -233,7 +293,7 @@ export async function tabsHighlight(
       durationMs?: number;
       message?: string;
       error?: string;
-    }>(tabId, { kind: 'highlight', selector, message, durationMs });
+    }>(tabId, { kind: 'highlight', selector, message, durationMs, visualSettings });
 
     return (results?.[0]?.result as {
       ok: boolean;
@@ -292,12 +352,13 @@ export async function tabsType(
 ): Promise<{ ok: boolean; typed?: InteractiveElementInfo & { textLength: number }; error?: string }> {
   try {
     await ensureTabIsActive(tabId);
+    const visualSettings = await loadPageAutomationVisualSettings();
 
     const results = await executePageAutomationAction<{
       ok: boolean;
       typed?: InteractiveElementInfo & { textLength: number };
       error?: string;
-    }>(tabId, { kind: 'type', selector, text, submit });
+    }>(tabId, { kind: 'type', selector, text, submit, visualSettings });
 
     return (results?.[0]?.result as { ok: boolean; typed?: InteractiveElementInfo & { textLength: number }; error?: string } | undefined)
       ?? { ok: false, error: 'No response from tab' };
@@ -320,6 +381,7 @@ export async function tabsFillForm(
 }> {
   try {
     await ensureTabIsActive(tabId);
+    const visualSettings = await loadPageAutomationVisualSettings();
 
     const results = await executePageAutomationAction<{
       ok: boolean;
@@ -327,7 +389,7 @@ export async function tabsFillForm(
       submitted?: boolean;
       warning?: string;
       error?: string;
-    }>(tabId, { kind: 'fillForm', fields, submit, submitSelector });
+    }>(tabId, { kind: 'fillForm', fields, submit, submitSelector, visualSettings });
 
     return (results?.[0]?.result as {
       ok: boolean;

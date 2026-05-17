@@ -1,0 +1,224 @@
+@use './base-layout' as *;
+
+.message-html-app-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.html-app-container {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin: 10px 0;
+  flex-shrink: 0;
+  border: 2px solid $outline-variant;
+  background: $surface-high;
+  box-shadow: $panel-shadow;
+  overflow: hidden;
+
+  &.html-app-error {
+    border-color: rgba(255, 110, 132, 0.7);
+  }
+
+  .html-app-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    min-width: 0;
+  }
+
+  .html-app-header,
+  .html-app-live-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .html-app-header > div,
+  .html-app-live-title {
+    flex: 1 1 220px;
+    min-width: 0;
+  }
+
+  .html-app-header strong,
+  .html-app-live-header strong {
+    display: block;
+    color: $text-primary;
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+
+  .html-app-header p {
+    margin-top: 4px;
+    color: $text-secondary;
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .html-app-header > span {
+    margin-left: auto;
+    flex-shrink: 0;
+    border: 1px solid rgba(168, 85, 247, 0.55);
+    background: rgba(168, 85, 247, 0.12);
+    padding: 3px 6px;
+    color: $accent;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .html-app-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 8px;
+  }
+
+  .html-app-meta-grid div {
+    min-width: 0;
+    border: 1px solid rgba(132, 147, 150, 0.35);
+    background: rgba(0, 0, 0, 0.18);
+    padding: 8px;
+  }
+
+  .html-app-meta-grid span {
+    display: block;
+    margin-bottom: 3px;
+    color: $text-faint;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .html-app-meta-grid strong {
+    display: block;
+    color: $text-primary;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  .html-app-remember-choice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid rgba(168, 85, 247, 0.32);
+    background: rgba(168, 85, 247, 0.08);
+    cursor: pointer;
+
+    input[type="checkbox"] {
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      margin-top: 1px;
+      accent-color: $accent;
+    }
+
+    span {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    strong {
+      color: $accent;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    small {
+      color: $text-secondary;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+  }
+
+  .html-app-actions,
+  .html-app-live-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .html-app-primary-btn,
+  .html-app-secondary-btn,
+  .html-app-skip-btn,
+  .html-app-live-actions button {
+    max-width: 100%;
+    min-height: 34px;
+    border: 2px solid $outline-variant;
+    background: transparent;
+    color: $text-secondary;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .html-app-primary-btn {
+    border-color: $accent;
+    background: $accent;
+    color: #14081f;
+  }
+
+  .html-app-secondary-btn {
+    border-color: rgba(132, 147, 150, 0.35);
+  }
+
+  .html-app-live-header {
+    padding: 8px 10px;
+    border-bottom: 2px solid $outline-variant;
+    background: rgba(168, 85, 247, 0.08);
+  }
+
+  .html-app-live-title span {
+    display: inline-block;
+    margin-top: 4px;
+    color: $text-secondary;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .html-app-error-text {
+    color: #ffb7c4;
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .html-app-frame-shell {
+    width: 100%;
+    max-width: min(100%, 560px);
+    margin: 0 auto;
+    border-top: 2px solid $outline-variant;
+    background: #0d0b15;
+  }
+
+  .html-app-iframe {
+    display: block;
+    width: 100%;
+    min-height: 320px;
+    border: none;
+    background: #fff;
+  }
+}

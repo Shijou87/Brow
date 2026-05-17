@@ -59,7 +59,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["icons/extension-icon.png", "icons/icon.png", "icons/openai.png", "icons/claude.png", "icons/cursors.png"],
+      "resources": ["icons/extension-icon.png", "icons/icon.png", "icons/openai.png", "icons/claude.png", "icons/cursors.png", "icons/brow-spritesheet.png"],
       "matches": ["<all_urls>"]
     }
   ]

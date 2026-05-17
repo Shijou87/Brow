@@ -14,6 +14,8 @@ brow should learn from his experience maintain an internal memory when he make a
 
 # import export profile serialization (chats + configs skills mcp )
 
+bulle n'est pas bien placé , l'ombre doit flip en Y, le saut doit afficher une ombre au sol en gardant y = à la position juste avant le saut (montrant plus que le personnage a sauté)
+
 # ALERT
 alert locks the agent should be able to manage alert as well
 

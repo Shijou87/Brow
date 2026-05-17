@@ -135,6 +135,7 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   tab_screenshot_vlm: 'Capturing & querying VLM',
   webmcp_discover: 'Discovering WebMCP tools',
   webmcp_invoke: 'Invoking WebMCP tool',
+  html_artifact_upsert: 'Saving HTML App Artifact',
   skills_load: 'Loading skill details',
   skills_propose: 'Saving Domain Skill proposal',
   domain_memory_save: 'Saving Domain Memory',
@@ -145,6 +146,7 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
 
 export function getBuiltinToolCategory(toolName: string): string {
   if (toolName.startsWith('skills_') || toolName.startsWith('domain_memory_')) return 'skills';
+  if (toolName.startsWith('html_artifact_')) return 'artifacts';
   if (isAutomationToolName(toolName)) return 'browser_automation';
   return 'browser_read';
 }
@@ -228,6 +230,7 @@ export function getToolCompletionDescription(toolName: string, result?: string):
     tab_screenshot_vlm: 'VLM analysis complete',
     webmcp_discover: 'Discovery complete',
     webmcp_invoke: 'Tool invoked',
+    html_artifact_upsert: 'HTML App Artifact saved',
     domain_memory_save: 'Domain Memory saved',
     domain_memory_load: 'Domain Memory loaded',
     domain_memory_set_enabled: 'Domain Memory updated',
@@ -265,6 +268,7 @@ export function getCategoryLabel(category: string): string {
   if (category === 'browser_read') return 'Read Only';
   if (category === 'browser_automation') return 'Automation';
   if (category === 'skills') return 'Skills';
+  if (category === 'artifacts') return 'Artifacts';
   const webmcpMatch = category.match(/^webmcp_tab_(\d+)$/);
   if (webmcpMatch) return `WebMCP · Tab ${webmcpMatch[1]}`;
   if (category.match(/^mcp_server_(.+)$/)) return 'MCP Server';

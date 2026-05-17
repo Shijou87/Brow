@@ -1,3 +1,5 @@
+import { marked, Renderer, type Tokens } from 'marked';
+
 const HTML_ESCAPE_TABLE: Record<string, string> = {
   '&': '&amp;',
   '<': '&lt;',
@@ -5,12 +7,6 @@ const HTML_ESCAPE_TABLE: Record<string, string> = {
   '"': '&quot;',
   "'": '&#39;',
 };
-
-const PLACEHOLDER_PREFIX = '__BROW_SAFE_MESSAGE_TOKEN_';
-
-function createPlaceholderToken(index: number): string {
-  return `${PLACEHOLDER_PREFIX}${index}__`;
-}
 
 function splitTrailingUrlPunctuation(url: string): { candidate: string; suffix: string } {
   const match = url.match(/[),.!?:;]+$/);
@@ -33,49 +29,46 @@ function toSafeExternalHref(url: string): string | null {
   }
 }
 
-function replaceWithPlaceholder(
-  placeholders: string[],
-  html: string,
-): string {
-  const token = createPlaceholderToken(placeholders.length);
-  placeholders.push(html);
-  return token;
+function renderSafeAnchor(href: string, label: string, title?: string | null): string {
+  const safeHref = toSafeExternalHref(href);
+  const safeLabel = label || escapeHtml(href);
+  if (!safeHref) return safeLabel;
+
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
+  return `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer"${titleAttr}>${safeLabel}</a>`;
 }
 
-function restorePlaceholders(text: string, placeholders: string[]): string {
-  return placeholders.reduce(
-    (current, html, index) => current.split(createPlaceholderToken(index)).join(html),
-    text,
-  );
-}
+const renderer = new Renderer();
+
+renderer.link = function ({ href, title, tokens }: Tokens.Link): string {
+  const label = this.parser.parseInline(tokens);
+  return renderSafeAnchor(href, label, title);
+};
+
+renderer.image = function ({ href, title, text }: Tokens.Image): string {
+  const label = escapeHtml(text ?? '');
+  const prefix = `![${label}](`;
+  const suffix = ')';
+  const safeHref = toSafeExternalHref(href);
+  if (!safeHref) {
+    return `${escapeHtml(prefix)}${escapeHtml(href)}${escapeHtml(suffix)}`;
+  }
+  return `${escapeHtml(prefix)}${renderSafeAnchor(safeHref, escapeHtml(href), title)}${escapeHtml(suffix)}`;
+};
+
+renderer.html = ({ text }: Tokens.HTML | Tokens.Tag): string => escapeHtml(text);
+
+marked.setOptions({
+  async: false,
+  gfm: true,
+  breaks: true,
+  renderer,
+});
 
 export function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (char) => HTML_ESCAPE_TABLE[char] ?? char);
 }
 
 export function formatAssistantMessage(message: string): string {
-  const placeholders: string[] = [];
-
-  const tokenized = message
-    .replace(/`([^`\n]+?)`/g, (_match, code: string) => replaceWithPlaceholder(
-      placeholders,
-      `<code>${escapeHtml(code)}</code>`,
-    ))
-    .replace(/\bhttps?:\/\/[^\s<]+/gi, (rawUrl: string) => {
-      const { candidate, suffix } = splitTrailingUrlPunctuation(rawUrl);
-      const href = toSafeExternalHref(candidate);
-      if (!href) return rawUrl;
-
-      return replaceWithPlaceholder(
-        placeholders,
-        `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(candidate)}</a>${escapeHtml(suffix)}`,
-      );
-    });
-
-  const formatted = escapeHtml(tokenized)
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/\n/g, '<br>');
-
-  return restorePlaceholders(formatted, placeholders);
+  return marked.parse(message) as string;
 }

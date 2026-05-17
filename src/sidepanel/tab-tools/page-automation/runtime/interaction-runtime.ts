@@ -5,6 +5,7 @@ import type {
   ClickPoint,
   ClickDispatchMode,
   CursorFrame,
+  PageAutomationVisualSettings,
   VisibleRect,
 } from './types';
 
@@ -19,21 +20,36 @@ export type FormFillMode =
 type OverlayParts = {
   root: HTMLDivElement;
   highlight: HTMLDivElement;
+  shadow: HTMLDivElement;
   cursor: HTMLDivElement;
   badge: HTMLDivElement;
+};
+
+type BrowCharacterState = {
+  anchor: ClickPoint;
+  mirrored: boolean;
+};
+
+type BrowFrameOptions = {
+  showShadow?: boolean;
+  shadowGroundY?: number;
+  shadowRow?: number;
+  shadowColumn?: number;
+  shadowMirrored?: boolean;
 };
 
 type TypeableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
 
 export interface PageAutomationInteractionRuntime {
   resolveClickPlan(matchedEl: HTMLElement, clickPoint?: BrowserClickPoint): ClickPlan | null;
-  previewClick(matchedEl: HTMLElement, message: string): Promise<void>;
-  previewHighlight(matchedEl: HTMLElement, message: string): Promise<void>;
+  previewClick(matchedEl: HTMLElement, message: string, visualSettings?: PageAutomationVisualSettings): Promise<void>;
+  previewHighlight(matchedEl: HTMLElement, message: string, visualSettings?: PageAutomationVisualSettings): Promise<void>;
   previewHover(matchedEl: HTMLElement, message: string): Promise<ClickPlan | null>;
-  previewFieldEdit(el: HTMLElement, message: string): Promise<void>;
+  previewFieldEdit(el: HTMLElement, message: string, visualSettings?: PageAutomationVisualSettings): Promise<void>;
   dispatchHover(matchedEl: HTMLElement, plan: ClickPlan): void;
   dispatchClick(matchedEl: HTMLElement, plan: ClickPlan): void;
   cleanupOverlay(delay?: number): void;
+  dismissOverlay(delay?: number): void;
   showBadge(message: string, anchorX: number, anchorY: number): void;
   dispatchEnter(target: HTMLElement): void;
   findTypeTarget(matchedEl: HTMLElement): TypeableElement | null;
@@ -55,6 +71,19 @@ export interface PageAutomationInteractionRuntime {
 export function createInteractionRuntime(
   base: PageAutomationBaseRuntime,
 ): PageAutomationInteractionRuntime {
+  const collectOverlayParts = (root: HTMLDivElement): OverlayParts => ({
+    root,
+    highlight: root.querySelector('.brow-automation-highlight') as HTMLDivElement,
+    shadow: root.querySelector('.brow-automation-brow-shadow') as HTMLDivElement,
+    cursor: root.querySelector('.brow-automation-cursor') as HTMLDivElement,
+    badge: root.querySelector('.brow-automation-badge') as HTMLDivElement,
+  });
+
+  const getExistingOverlay = (): OverlayParts | null => {
+    const root = document.getElementById(base.ROOT_ID) as HTMLDivElement | null;
+    return root ? collectOverlayParts(root) : null;
+  };
+
   const ensureOverlay = (): OverlayParts => {
     let style = document.getElementById(base.STYLE_ID) as HTMLStyleElement | null;
     if (!style) {
@@ -71,27 +100,64 @@ export function createInteractionRuntime(
           position: fixed;
           top: 0;
           left: 0;
+          z-index: 2;
+          opacity: 0;
+          background-repeat: no-repeat;
+          will-change: left, top, transform, opacity, background-position;
+          transition: opacity 140ms ease, filter 160ms ease;
+        }
+        #${base.ROOT_ID} .brow-automation-cursor[data-visual="cursor"] {
           width: ${base.CURSOR_SIZE}px;
           height: ${base.CURSOR_SIZE}px;
-          opacity: 0;
           background-image: url("${base.CURSOR_SPRITESHEET_URL}");
-          background-repeat: no-repeat;
           background-position: 0 0;
           background-size: ${base.CURSOR_SIZE * 4}px ${base.CURSOR_SIZE}px;
           filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.5));
           transform-origin: top left;
-          transition: transform 160ms ease, opacity 140ms ease, filter 160ms ease;
+          transition: opacity 140ms ease, filter 160ms ease, transform 160ms ease;
         }
-        #${base.ROOT_ID} .brow-automation-cursor[data-frame="hand"] {
+        #${base.ROOT_ID} .brow-automation-cursor[data-visual="brow"] {
+          width: ${base.BROW_CHARACTER_DISPLAY_WIDTH}px;
+          height: ${base.BROW_CHARACTER_DISPLAY_HEIGHT}px;
+          background-image: url("${base.BROW_CHARACTER_SPRITESHEET_URL}");
+          background-position: 0 0;
+          background-size: ${base.BROW_CHARACTER_DISPLAY_WIDTH * base.BROW_CHARACTER_COLUMNS}px ${base.BROW_CHARACTER_DISPLAY_HEIGHT * base.BROW_CHARACTER_ROWS}px;
+          image-rendering: pixelated;
+          filter: drop-shadow(0 10px 24px rgba(15, 23, 42, 0.28));
+          transform-origin: center center;
+        }
+        #${base.ROOT_ID} .brow-automation-brow-shadow {
+          position: fixed;
+          top: 0;
+          left: 0;
+          z-index: 1;
+          width: ${base.BROW_CHARACTER_DISPLAY_WIDTH}px;
+          height: ${base.BROW_CHARACTER_DISPLAY_HEIGHT}px;
+          opacity: 0;
+          background-image: url("${base.BROW_CHARACTER_SPRITESHEET_URL}");
+          background-repeat: no-repeat;
+          background-position: 0 0;
+          background-size: ${base.BROW_CHARACTER_DISPLAY_WIDTH * base.BROW_CHARACTER_COLUMNS}px ${base.BROW_CHARACTER_DISPLAY_HEIGHT * base.BROW_CHARACTER_ROWS}px;
+          image-rendering: pixelated;
+          mix-blend-mode: multiply;
+          filter: grayscale(1) saturate(0) brightness(0.46) contrast(0.75) opacity(0.42) blur(1px);
+          transform-origin: center top;
+          will-change: left, top, transform, opacity, background-position;
+          transition: opacity 120ms ease, transform 120ms ease;
+        }
+        #${base.ROOT_ID} .brow-automation-brow-shadow.visible {
+          opacity: 1;
+        }
+        #${base.ROOT_ID} .brow-automation-cursor[data-visual="cursor"][data-frame="hand"] {
           background-position: 0 0;
         }
-        #${base.ROOT_ID} .brow-automation-cursor[data-frame="push"] {
+        #${base.ROOT_ID} .brow-automation-cursor[data-visual="cursor"][data-frame="push"] {
           background-position: -${base.CURSOR_SIZE}px 0;
         }
-        #${base.ROOT_ID} .brow-automation-cursor[data-frame="highlight"] {
+        #${base.ROOT_ID} .brow-automation-cursor[data-visual="cursor"][data-frame="highlight"] {
           background-position: -${base.CURSOR_SIZE * 2}px 0;
         }
-        #${base.ROOT_ID} .brow-automation-cursor[data-frame="pencil"] {
+        #${base.ROOT_ID} .brow-automation-cursor[data-visual="cursor"][data-frame="pencil"] {
           background-position: -${base.CURSOR_SIZE * 3}px 0;
         }
         #${base.ROOT_ID} .brow-automation-cursor.visible {
@@ -101,7 +167,9 @@ export function createInteractionRuntime(
           position: fixed;
           top: 0;
           left: 0;
+          z-index: 3;
           max-width: min(300px, calc(100vw - 24px));
+          min-height: 60px;
           padding: 8px 10px;
           border-radius: 10px;
           border: 2px solid rgba(192, 132, 252, 0.92);
@@ -115,6 +183,35 @@ export function createInteractionRuntime(
           transition: opacity 180ms ease, transform 180ms ease;
           backdrop-filter: blur(6px);
         }
+        #${base.ROOT_ID} .brow-automation-badge[data-variant="speech"] {
+          border-radius: 18px;
+          padding: 10px 12px 12px;
+          box-shadow:
+            0 16px 38px rgba(15, 23, 42, 0.34),
+            0 10px 26px rgba(168, 85, 247, 0.24);
+          transform-origin: 20% 100%;
+        }
+        #${base.ROOT_ID} .brow-automation-badge[data-variant="speech"]::after {
+          content: "";
+          position: absolute;
+          left: calc(var(--speech-tail-offset, 36px) - 9px);
+          width: 16px;
+          height: 16px;
+          background: rgba(24, 10, 36, 0.96);
+          pointer-events: none;
+        }
+        #${base.ROOT_ID} .brow-automation-badge[data-variant="speech"][data-tail-edge="bottom"]::after {
+          bottom: -10px;
+          border-right: 2px solid rgba(192, 132, 252, 0.92);
+          border-bottom: 2px solid rgba(192, 132, 252, 0.92);
+          transform: rotate(45deg);
+        }
+        #${base.ROOT_ID} .brow-automation-badge[data-variant="speech"][data-tail-edge="top"]::after {
+          top: -10px;
+          border-left: 2px solid rgba(192, 132, 252, 0.92);
+          border-top: 2px solid rgba(192, 132, 252, 0.92);
+          transform: rotate(45deg);
+        }
         #${base.ROOT_ID} .brow-automation-badge.visible {
           opacity: 1;
           transform: translateY(0);
@@ -123,6 +220,7 @@ export function createInteractionRuntime(
           position: fixed;
           top: 0;
           left: 0;
+          z-index: 0;
           border-radius: 12px;
           border: 2px solid rgba(192, 132, 252, 0.98);
           background: rgba(168, 85, 247, 0.10);
@@ -221,24 +319,24 @@ export function createInteractionRuntime(
       const highlight = document.createElement('div');
       highlight.className = 'brow-automation-highlight';
 
+      const shadow = document.createElement('div');
+      shadow.className = 'brow-automation-brow-shadow';
+
       const cursor = document.createElement('div');
       cursor.className = 'brow-automation-cursor';
+      cursor.dataset.visual = 'cursor';
 
       const badge = document.createElement('div');
       badge.className = 'brow-automation-badge';
 
       root.appendChild(highlight);
+        root.appendChild(shadow);
       root.appendChild(cursor);
       root.appendChild(badge);
       document.documentElement.appendChild(root);
     }
 
-    return {
-      root,
-      highlight: root.querySelector('.brow-automation-highlight') as HTMLDivElement,
-      cursor: root.querySelector('.brow-automation-cursor') as HTMLDivElement,
-      badge: root.querySelector('.brow-automation-badge') as HTMLDivElement,
-    };
+    return collectOverlayParts(root);
   };
 
   const isRelatedElement = (left: Element | null, right: Element | null): boolean => {
@@ -335,8 +433,12 @@ export function createInteractionRuntime(
     badge.style.top = `${top}px`;
   };
 
+  const positionBadgeNearVisual = (left: number, top: number, visualWidth: number) => {
+    positionBadge(left + visualWidth + 10, top - 2);
+  };
+
   const positionBadgeNearCursor = (cursorX: number, cursorY: number) => {
-    positionBadge(cursorX + base.BADGE_CURSOR_OFFSET_X, cursorY + base.BADGE_CURSOR_OFFSET_Y);
+    positionBadgeNearVisual(cursorX, cursorY, base.CURSOR_WIDTH);
   };
 
   const positionBadgeNearRect = (rect: VisibleRect) => {
@@ -345,6 +447,109 @@ export function createInteractionRuntime(
     positionBadge(anchorX, anchorY);
   };
 
+  const resetBadgePresentation = (badge: HTMLDivElement) => {
+    delete badge.dataset.followCursor;
+    delete badge.dataset.speaker;
+    delete badge.dataset.variant;
+    delete badge.dataset.tailEdge;
+    badge.style.removeProperty('--speech-tail-offset');
+  };
+
+  const positionSpeechBubbleForBrow = (state: BrowCharacterState) => {
+    const { badge } = ensureOverlay();
+    const normalizedAnchor = normalizeBrowAnchor(state.anchor);
+    const maxRenderableBadgeWidth = Math.max(Math.min(base.BADGE_WIDTH, window.innerWidth - 24), 60);
+    const badgeWidth = base.clamp(
+      badge.offsetWidth || maxRenderableBadgeWidth,
+      60,
+      maxRenderableBadgeWidth,
+    );
+    const badgeHeight = Math.max(badge.offsetHeight || base.BADGE_HEIGHT, base.BADGE_HEIGHT);
+    const characterLeft = base.clamp(
+      normalizedAnchor.x - base.BROW_CHARACTER_FEET_X,
+      0,
+      Math.max(window.innerWidth - base.BROW_CHARACTER_DISPLAY_WIDTH, 0),
+    );
+    const characterTop = base.clamp(
+      normalizedAnchor.y - base.BROW_CHARACTER_FEET_Y,
+      0,
+      Math.max(window.innerHeight - base.BROW_CHARACTER_DISPLAY_HEIGHT, 0),
+    );
+    const characterCenterX = characterLeft + base.BROW_CHARACTER_DISPLAY_WIDTH / 2;
+    const maxBadgeLeft = Math.max(window.innerWidth - badgeWidth - 12, 12);
+    const maxBadgeTop = Math.max(window.innerHeight - badgeHeight - 12, 12);
+    const preferredLeft = characterCenterX - badgeWidth / 2;
+    const preferredTop = characterTop - badgeHeight - 22;
+    const tailEdge = preferredTop >= 12 ? 'bottom' : 'top';
+    const badgeLeft = base.clamp(preferredLeft, 12, maxBadgeLeft);
+    const badgeTop = tailEdge === 'bottom'
+      ? base.clamp(preferredTop, 12, maxBadgeTop)
+      : base.clamp(characterTop + base.BROW_CHARACTER_DISPLAY_HEIGHT + 12, 12, maxBadgeTop);
+    const bubbleTargetX = base.clamp(
+      characterCenterX - badgeLeft,
+      20,
+      badgeWidth - 20,
+    );
+
+    badge.style.left = `${badgeLeft}px`;
+    badge.style.top = `${badgeTop}px`;
+    badge.dataset.tailEdge = tailEdge;
+    badge.style.setProperty('--speech-tail-offset', `${bubbleTargetX}px`);
+  };
+
+  let browLoopId: number | null = null;
+  let browCurrentState: BrowCharacterState | null = null;
+  let overlayCleanupTimerId: number | null = null;
+
+  const stopBrowLoop = () => {
+    if (browLoopId !== null) {
+      window.clearInterval(browLoopId);
+      browLoopId = null;
+    }
+  };
+
+  const clearOverlayCleanupTimer = () => {
+    if (overlayCleanupTimerId !== null) {
+      window.clearTimeout(overlayCleanupTimerId);
+      overlayCleanupTimerId = null;
+    }
+  };
+
+  const isAnimatedBrowEnabled = (visualSettings?: PageAutomationVisualSettings): boolean => (
+    visualSettings?.animatedBrow === true
+  );
+
+  const distanceBetween = (left: ClickPoint, right: ClickPoint) => (
+    Math.hypot(right.x - left.x, right.y - left.y)
+  );
+
+  const normalizeBrowAnchor = (anchor: ClickPoint): ClickPoint => {
+    const minX = base.BROW_CHARACTER_FEET_X + 4;
+    const maxX = Math.max(
+      window.innerWidth - (base.BROW_CHARACTER_DISPLAY_WIDTH - base.BROW_CHARACTER_FEET_X) - 4,
+      minX,
+    );
+    const minY = base.BROW_CHARACTER_FEET_Y + 4;
+    const maxY = Math.max(
+      window.innerHeight - (base.BROW_CHARACTER_DISPLAY_HEIGHT - base.BROW_CHARACTER_FEET_Y) - 4,
+      minY,
+    );
+    return {
+      x: base.clamp(anchor.x, minX, maxX),
+      y: base.clamp(anchor.y, minY, maxY),
+    };
+  };
+
+  const getDefaultBrowState = (): BrowCharacterState => ({
+    anchor: normalizeBrowAnchor({
+      x: base.BROW_CHARACTER_FEET_X + 18,
+      y: window.innerHeight - 8,
+    }),
+    mirrored: false,
+  });
+
+  const getCurrentBrowState = (): BrowCharacterState => browCurrentState ?? getDefaultBrowState();
+
   const setCursorPosition = (
     x: number,
     y: number,
@@ -352,12 +557,98 @@ export function createInteractionRuntime(
     rotationDeg = -8,
     frame: CursorFrame = 'hand',
   ) => {
-    const { cursor, badge } = ensureOverlay();
+    const { cursor, badge, shadow } = ensureOverlay();
+    const frameOffsets: Record<CursorFrame, number> = {
+      hand: 0,
+      push: base.CURSOR_SIZE,
+      highlight: base.CURSOR_SIZE * 2,
+      pencil: base.CURSOR_SIZE * 3,
+    };
+
+    stopBrowLoop();
+    shadow.classList.remove('visible');
     cursor.classList.add('visible');
+    cursor.dataset.visual = 'cursor';
     cursor.dataset.frame = frame;
-    cursor.style.transform = `translate(${x}px, ${y}px) rotate(${rotationDeg}deg) scale(${scale})`;
-    if (badge.dataset.followCursor === 'true') {
+    cursor.style.width = `${base.CURSOR_WIDTH}px`;
+    cursor.style.height = `${base.CURSOR_HEIGHT}px`;
+    cursor.style.left = `${x}px`;
+    cursor.style.top = `${y}px`;
+    cursor.style.backgroundImage = `url("${base.CURSOR_SPRITESHEET_URL}")`;
+    cursor.style.backgroundSize = `${base.CURSOR_SIZE * 4}px ${base.CURSOR_SIZE}px`;
+    cursor.style.backgroundPosition = `-${frameOffsets[frame]}px 0`;
+    cursor.style.imageRendering = 'auto';
+    cursor.style.filter = 'drop-shadow(0 0 10px rgba(168, 85, 247, 0.5))';
+    cursor.style.transformOrigin = 'top left';
+    cursor.style.transform = `rotate(${rotationDeg}deg) scale(${scale})`;
+    if (badge.dataset.followCursor === 'true' && badge.dataset.speaker !== 'brow') {
       positionBadgeNearCursor(x, y);
+    }
+  };
+
+  const setBrowFrame = (
+    row: number,
+    column: number,
+    anchor: ClickPoint,
+    mirrored = false,
+    options: BrowFrameOptions = {},
+  ) => {
+    const { cursor, badge, shadow } = ensureOverlay();
+    const normalizedAnchor = normalizeBrowAnchor(anchor);
+    const maxLeft = Math.max(window.innerWidth - base.BROW_CHARACTER_DISPLAY_WIDTH, 0);
+    const maxTop = Math.max(window.innerHeight - base.BROW_CHARACTER_DISPLAY_HEIGHT, 0);
+    const left = base.clamp(normalizedAnchor.x - base.BROW_CHARACTER_FEET_X, 0, maxLeft);
+    const top = base.clamp(normalizedAnchor.y - base.BROW_CHARACTER_FEET_Y, 0, maxTop);
+    const actualAnchor = {
+      x: left + base.BROW_CHARACTER_FEET_X,
+      y: top + base.BROW_CHARACTER_FEET_Y,
+    };
+
+    cursor.classList.add('visible');
+    cursor.dataset.visual = 'brow';
+    delete cursor.dataset.frame;
+    cursor.style.width = `${base.BROW_CHARACTER_DISPLAY_WIDTH}px`;
+    cursor.style.height = `${base.BROW_CHARACTER_DISPLAY_HEIGHT}px`;
+    cursor.style.left = `${left}px`;
+    cursor.style.top = `${top}px`;
+    cursor.style.backgroundImage = `url("${base.BROW_CHARACTER_SPRITESHEET_URL}")`;
+    cursor.style.backgroundSize = `${base.BROW_CHARACTER_DISPLAY_WIDTH * base.BROW_CHARACTER_COLUMNS}px ${base.BROW_CHARACTER_DISPLAY_HEIGHT * base.BROW_CHARACTER_ROWS}px`;
+    cursor.style.backgroundPosition = `-${column * base.BROW_CHARACTER_DISPLAY_WIDTH}px -${row * base.BROW_CHARACTER_DISPLAY_HEIGHT}px`;
+    cursor.style.imageRendering = 'pixelated';
+    cursor.style.filter = 'drop-shadow(0 10px 24px rgba(15, 23, 42, 0.28))';
+    cursor.style.transformOrigin = 'center center';
+    cursor.style.transform = mirrored ? 'scaleX(-1)' : 'scaleX(1)';
+
+    if (options.showShadow !== false) {
+      const shadowScaleY = 0.42;
+      const shadowDisplayHeight = Math.round(base.BROW_CHARACTER_DISPLAY_HEIGHT * shadowScaleY);
+      const shadowYOffset = Math.round(base.BROW_CHARACTER_DISPLAY_HEIGHT / 3);
+      const shadowGroundLine = base.clamp(
+        (options.shadowGroundY ?? actualAnchor.y) + shadowYOffset,
+        shadowDisplayHeight,
+        window.innerHeight,
+      );
+      const shadowSkew = (options.shadowMirrored ?? mirrored) ? 12 : -12;
+      const shadowRow = options.shadowRow ?? row;
+      const shadowColumn = options.shadowColumn ?? column;
+      shadow.classList.add('visible');
+      shadow.style.left = `${left}px`;
+      shadow.style.top = `${shadowGroundLine}px`;
+      shadow.style.backgroundPosition = `-${shadowColumn * base.BROW_CHARACTER_DISPLAY_WIDTH}px -${shadowRow * base.BROW_CHARACTER_DISPLAY_HEIGHT}px`;
+      shadow.style.transform = `${options.shadowMirrored ?? mirrored ? 'scaleX(-1) ' : ''}scaleY(-${shadowScaleY}) skewX(${shadowSkew}deg)`;
+    } else {
+      shadow.classList.remove('visible');
+      shadow.style.transform = 'none';
+    }
+
+    browCurrentState = { anchor: actualAnchor, mirrored };
+
+    if (badge.dataset.followCursor === 'true') {
+      if (badge.dataset.speaker === 'brow') {
+        positionSpeechBubbleForBrow({ anchor: actualAnchor, mirrored });
+      } else {
+        positionBadgeNearVisual(left, top, base.BROW_CHARACTER_DISPLAY_WIDTH);
+      }
     }
   };
 
@@ -365,7 +656,7 @@ export function createInteractionRuntime(
     const { badge } = ensureOverlay();
     badge.textContent = message;
     badge.classList.add('visible');
-    delete badge.dataset.followCursor;
+    resetBadgePresentation(badge);
     positionBadge(anchorX, anchorY);
   };
 
@@ -373,8 +664,22 @@ export function createInteractionRuntime(
     const { badge } = ensureOverlay();
     badge.textContent = message;
     badge.classList.add('visible');
+    delete badge.dataset.speaker;
+    delete badge.dataset.variant;
+    delete badge.dataset.tailEdge;
     badge.dataset.followCursor = 'true';
+    badge.style.removeProperty('--speech-tail-offset');
     positionBadgeNearCursor(cursorX, cursorY);
+  };
+
+  const showBadgeFollowingBrow = (message: string, state: BrowCharacterState) => {
+    const { badge } = ensureOverlay();
+    badge.textContent = message;
+    badge.classList.add('visible');
+    badge.dataset.speaker = 'brow';
+    badge.dataset.variant = 'speech';
+    badge.dataset.followCursor = 'true';
+    positionSpeechBubbleForBrow(state);
   };
 
   const showHighlight = (el: HTMLElement, emphasized = false) => {
@@ -429,17 +734,261 @@ export function createInteractionRuntime(
     }
   };
 
+  const startBrowLoop = (row: number, state: BrowCharacterState, cadenceMs: number) => {
+    stopBrowLoop();
+    const nextState = {
+      anchor: normalizeBrowAnchor(state.anchor),
+      mirrored: state.mirrored,
+    };
+    let frame = 0;
+    const tick = () => {
+      setBrowFrame(row, frame % base.BROW_CHARACTER_COLUMNS, nextState.anchor, nextState.mirrored);
+      frame += 1;
+    };
+    tick();
+    browLoopId = window.setInterval(tick, cadenceMs);
+  };
+
+  const startBrowIdle = (state = getCurrentBrowState()) => {
+    startBrowLoop(base.BROW_CHARACTER_IDLE_ROW, state, 128);
+  };
+
+  const startBrowPointing = (state: BrowCharacterState) => {
+    startBrowLoop(
+      base.BROW_CHARACTER_POINT_ROW,
+      { ...state, mirrored: !state.mirrored },
+      112,
+    );
+  };
+
+  const computeTravelDuration = (from: ClickPoint, to: ClickPoint, minMs = 180, maxMs = 520) => (
+    base.clamp(Math.round(distanceBetween(from, to) * 2.1), minMs, maxMs)
+  );
+
+  const animateBrowTravel = async (
+    from: ClickPoint,
+    to: ClickPoint,
+    durationMs: number,
+  ) => {
+    const start = normalizeBrowAnchor(from);
+    const end = normalizeBrowAnchor(to);
+    const distance = distanceBetween(start, end);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const horizontal = Math.abs(dx) >= Math.abs(dy);
+    const row = horizontal
+      ? base.BROW_CHARACTER_RUN_ROW
+      : dy >= 0
+        ? base.BROW_CHARACTER_WALK_DOWN_ROW
+        : base.BROW_CHARACTER_WALK_UP_ROW;
+    const mirrored = horizontal ? dx < 0 : false;
+
+    stopBrowLoop();
+    if (distance < 6) {
+      setBrowFrame(row, 0, end, mirrored);
+      browCurrentState = { anchor: end, mirrored };
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      const startTs = performance.now();
+
+      const step = (now: number) => {
+        const progress = Math.min((now - startTs) / durationMs, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const anchor = {
+          x: start.x + dx * eased,
+          y: start.y + dy * eased,
+        };
+        const frame = Math.floor((now - startTs) / 92) % base.BROW_CHARACTER_COLUMNS;
+        setBrowFrame(row, frame, anchor, mirrored);
+
+        if (progress < 1) {
+          window.requestAnimationFrame(step);
+          return;
+        }
+
+        resolve();
+      };
+
+      window.requestAnimationFrame(step);
+    });
+
+    browCurrentState = { anchor: end, mirrored };
+  };
+
+  const buildClickApproachWaypoints = (from: ClickPoint, to: ClickPoint): ClickPoint[] => {
+    const start = normalizeBrowAnchor(from);
+    const end = normalizeBrowAnchor(to);
+    const totalDistance = distanceBetween(start, end);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const leadDistance = totalDistance >= 140
+      ? base.clamp(totalDistance * 0.32, 52, 138)
+      : base.clamp(totalDistance * 0.2, 22, 38);
+    const unitX = totalDistance > 0 ? dx / totalDistance : 0;
+    const unitY = totalDistance > 0 ? dy / totalDistance : 0;
+    const preJump = normalizeBrowAnchor({
+      x: end.x - unitX * leadDistance,
+      y: end.y - unitY * leadDistance,
+    });
+    const pivot = Math.abs(dx) >= Math.abs(dy)
+      ? { x: preJump.x, y: start.y }
+      : { x: start.x, y: preJump.y };
+    const waypoints: ClickPoint[] = [];
+
+    for (const candidate of [pivot, preJump]) {
+      const normalized = normalizeBrowAnchor(candidate);
+      const previous = waypoints[waypoints.length - 1] ?? start;
+      if (distanceBetween(previous, normalized) >= 8) {
+        waypoints.push(normalized);
+      }
+    }
+
+    return waypoints;
+  };
+
+  const animateBrowJump = async (from: ClickPoint, to: ClickPoint) => {
+    const start = normalizeBrowAnchor(from);
+    const end = normalizeBrowAnchor(to);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const mirrored = dx < 0;
+    const distance = distanceBetween(start, end);
+    const pronouncedArc = distance >= 72;
+    const frames = Array.from(
+      { length: base.BROW_CHARACTER_COLUMNS },
+      (_, index) => base.BROW_CHARACTER_COLUMNS - 1 - index,
+    ).concat(Array.from({ length: base.BROW_CHARACTER_COLUMNS - 1 }, (_, index) => index + 1));
+    const durationMs = pronouncedArc
+      ? base.clamp(Math.round(distance * 3.1), 440, 860)
+      : base.clamp(Math.round(distance * 2.25), 320, 540);
+    const arcHeight = pronouncedArc
+      ? base.clamp(34 + distance * 0.48, 44, 124)
+      : base.clamp(20 + distance * 0.22, 24, 64);
+
+    stopBrowLoop();
+    await new Promise<void>((resolve) => {
+      const startTs = performance.now();
+
+      const step = (now: number) => {
+        const progress = Math.min((now - startTs) / durationMs, 1);
+        const eased = progress < 0.5
+          ? 2 * progress * progress
+          : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+        const arcProgress = 4 * progress * (1 - progress);
+        const frameIndex = frames[Math.min(frames.length - 1, Math.floor(progress * frames.length))] ?? 0;
+        const anchor = {
+          x: start.x + dx * eased,
+          y: start.y + dy * eased - arcHeight * arcProgress,
+        };
+        setBrowFrame(base.BROW_CHARACTER_JUMP_ROW, frameIndex, anchor, mirrored, {
+          shadowGroundY: start.y,
+        });
+
+        if (progress < 1) {
+          window.requestAnimationFrame(step);
+          return;
+        }
+
+        resolve();
+      };
+
+      window.requestAnimationFrame(step);
+    });
+
+    browCurrentState = { anchor: end, mirrored };
+  };
+
+  const resolveBrowSideAnchor = (el: HTMLElement): BrowCharacterState & { rect: VisibleRect | null } => {
+    const rect = base.getVisibleRect(el);
+    if (!rect) {
+      const current = getCurrentBrowState();
+      return { ...current, rect: null };
+    }
+
+    const gap = 18;
+    const maxLeft = Math.max(window.innerWidth - base.BROW_CHARACTER_DISPLAY_WIDTH - 8, 8);
+    const maxTop = Math.max(window.innerHeight - base.BROW_CHARACTER_DISPLAY_HEIGHT - 8, 8);
+    const top = base.clamp(rect.bottom - base.BROW_CHARACTER_DISPLAY_HEIGHT + 10, 8, maxTop);
+    const leftCandidate = rect.left - gap - base.BROW_CHARACTER_DISPLAY_WIDTH;
+    const rightCandidate = rect.right + gap;
+    const leftFits = leftCandidate >= 8;
+    const rightFits = rightCandidate + base.BROW_CHARACTER_DISPLAY_WIDTH <= window.innerWidth - 8;
+
+    let mirrored = false;
+    let left = leftCandidate;
+
+    if (!leftFits && rightFits) {
+      mirrored = true;
+      left = rightCandidate;
+    } else if (!leftFits && !rightFits) {
+      mirrored = window.innerWidth - rect.right > rect.left;
+      left = base.clamp(mirrored ? rightCandidate : leftCandidate, 8, maxLeft);
+    }
+
+    return {
+      anchor: normalizeBrowAnchor({
+        x: left + base.BROW_CHARACTER_FEET_X,
+        y: top + base.BROW_CHARACTER_FEET_Y,
+      }),
+      mirrored,
+      rect,
+    };
+  };
+
   const cleanupOverlay = (delay = 900) => {
-    const { cursor, highlight, badge, root } = ensureOverlay();
-    window.setTimeout(() => {
-      cursor.classList.remove('visible');
+    const { cursor, highlight, badge, root, shadow } = ensureOverlay();
+    clearOverlayCleanupTimer();
+    overlayCleanupTimerId = window.setTimeout(() => {
+      overlayCleanupTimerId = null;
       highlight.classList.remove('visible');
       highlight.classList.remove('emphasized');
       badge.classList.remove('visible');
-      delete badge.dataset.followCursor;
+      resetBadgePresentation(badge);
       root.querySelectorAll('.brow-automation-ripple').forEach((node) => node.remove());
       root.querySelectorAll('.brow-automation-particle').forEach((node) => node.remove());
+
+      if (cursor.dataset.visual === 'brow' && browCurrentState) {
+        startBrowIdle(browCurrentState);
+        return;
+      }
+
+      shadow.classList.remove('visible');
+      shadow.style.transform = 'none';
+      stopBrowLoop();
+      cursor.classList.remove('visible');
     }, delay);
+  };
+
+  const dismissOverlay = (delay = 0) => {
+    clearOverlayCleanupTimer();
+    const overlay = getExistingOverlay();
+    if (!overlay) {
+      stopBrowLoop();
+      return;
+    }
+
+    overlayCleanupTimerId = window.setTimeout(() => {
+      overlayCleanupTimerId = null;
+      const { cursor, highlight, badge, root, shadow } = overlay;
+
+      stopBrowLoop();
+      highlight.classList.remove('visible');
+      highlight.classList.remove('emphasized');
+      badge.classList.remove('visible');
+      resetBadgePresentation(badge);
+      shadow.classList.remove('visible');
+      cursor.classList.remove('visible');
+      root.querySelectorAll('.brow-automation-ripple').forEach((node) => node.remove());
+      root.querySelectorAll('.brow-automation-particle').forEach((node) => node.remove());
+
+      window.setTimeout(() => {
+        if (!cursor.classList.contains('visible')) {
+          shadow.style.transform = 'none';
+        }
+      }, 220);
+    }, Math.max(0, delay));
   };
 
   const animateCursorTo = async (
@@ -685,11 +1234,41 @@ export function createInteractionRuntime(
     }));
   };
 
-  const previewClick = async (matchedEl: HTMLElement, message: string) => {
+  const previewClick = async (
+    matchedEl: HTMLElement,
+    message: string,
+    visualSettings?: PageAutomationVisualSettings,
+  ) => {
     matchedEl.scrollIntoView({ block: 'center', inline: 'center' });
     await base.sleep(90);
     const plan = resolveClickPlan(matchedEl);
     if (!plan) return;
+
+    if (isAnimatedBrowEnabled(visualSettings)) {
+      const startState = getCurrentBrowState();
+      const targetAnchor = normalizeBrowAnchor({ x: plan.point.x, y: plan.point.y });
+      const waypoints = buildClickApproachWaypoints(startState.anchor, targetAnchor);
+      let currentAnchor = startState.anchor;
+
+      showHighlight(plan.target);
+      showBadgeFollowingBrow(message, startState);
+      startBrowIdle(startState);
+      await base.sleep(40);
+
+      for (const waypoint of waypoints) {
+        await animateBrowTravel(currentAnchor, waypoint, computeTravelDuration(currentAnchor, waypoint));
+        currentAnchor = waypoint;
+      }
+
+      await animateBrowJump(currentAnchor, targetAnchor);
+      await base.sleep(70);
+      startBrowIdle({
+        anchor: targetAnchor,
+        mirrored: browCurrentState?.mirrored ?? startState.mirrored,
+      });
+      return;
+    }
+
     const startX = base.clamp(
       window.innerWidth / 2 - base.CURSOR_HOTSPOT_X,
       0,
@@ -731,11 +1310,39 @@ export function createInteractionRuntime(
     setCursorPosition(cursorX, cursorY, 1, -8, 'hand');
   };
 
-  const previewHighlight = async (matchedEl: HTMLElement, message: string) => {
+  const previewHighlight = async (
+    matchedEl: HTMLElement,
+    message: string,
+    visualSettings?: PageAutomationVisualSettings,
+  ) => {
     matchedEl.scrollIntoView({ block: 'center', inline: 'center' });
     await base.sleep(90);
     const plan = resolveClickPlan(matchedEl);
     if (!plan) return;
+
+    if (isAnimatedBrowEnabled(visualSettings)) {
+      const currentState = getCurrentBrowState();
+      const placement = resolveBrowSideAnchor(plan.target);
+
+      showHighlight(plan.target, true);
+      showBadgeFollowingBrow(message, currentState);
+      startBrowIdle(currentState);
+      await base.sleep(40);
+
+      if (distanceBetween(currentState.anchor, placement.anchor) >= 6) {
+        await animateBrowTravel(
+          currentState.anchor,
+          placement.anchor,
+          computeTravelDuration(currentState.anchor, placement.anchor),
+        );
+      }
+
+      startBrowPointing({ anchor: placement.anchor, mirrored: placement.mirrored });
+      await base.sleep(340);
+      startBrowIdle({ anchor: placement.anchor, mirrored: placement.mirrored });
+      return;
+    }
+
     const cursorX = base.clamp(
       plan.point.x - base.HIGHLIGHT_CURSOR_HOTSPOT_X,
       0,
@@ -796,11 +1403,36 @@ export function createInteractionRuntime(
     return plan;
   };
 
-  const previewFieldEdit = async (el: HTMLElement, message: string) => {
+  const previewFieldEdit = async (
+    el: HTMLElement,
+    message: string,
+    visualSettings?: PageAutomationVisualSettings,
+  ) => {
     el.scrollIntoView({ block: 'center', inline: 'center' });
     await base.sleep(90);
     const rect = base.getVisibleRect(el);
     if (!rect) return;
+
+    if (isAnimatedBrowEnabled(visualSettings)) {
+      const currentState = getCurrentBrowState();
+      const placement = resolveBrowSideAnchor(el);
+
+      showHighlight(el);
+      showBadge(message, rect.right + 14, rect.top - 2);
+      positionBadgeNearRect(rect);
+
+      if (distanceBetween(currentState.anchor, placement.anchor) >= 6) {
+        await animateBrowTravel(
+          currentState.anchor,
+          placement.anchor,
+          computeTravelDuration(currentState.anchor, placement.anchor),
+        );
+      }
+
+      startBrowPointing({ anchor: placement.anchor, mirrored: placement.mirrored });
+      return;
+    }
+
     const cursorX = base.clamp(
       rect.left + 8 - base.PENCIL_CURSOR_HOTSPOT_X,
       0,
@@ -1193,6 +1825,7 @@ export function createInteractionRuntime(
     dispatchHover,
     dispatchClick,
     cleanupOverlay,
+    dismissOverlay,
     showBadge,
     dispatchEnter,
     findTypeTarget,

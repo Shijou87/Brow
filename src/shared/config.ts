@@ -1,4 +1,5 @@
 import type { DirectLLMConfig, ExtensionSettings, MCPConfig, VLMConfig } from './types';
+import { BROW_HTML_APP_PROMPT_GUIDANCE } from './html-app-artifact-guidance';
 
 export type LLMProviderMode = 'openai' | 'claude';
 export type ProviderFields = Omit<DirectLLMConfig, 'provider'>;
@@ -6,6 +7,7 @@ export type ProviderFields = Omit<DirectLLMConfig, 'provider'>;
 export interface SidepanelRuntimeConfig {
   recursionLimit: number;
   systemPrompt: string;
+  animatedBrow: boolean;
 }
 
 export const DEFAULT_AGENT_RECURSION_LIMIT = 100;
@@ -85,7 +87,10 @@ CORE BEHAVIOR
 13. Avoid unnecessary repetition of tool output; summarize the useful result.
 14. If ambiguity remains after checking relevant context, ask a concise clarifying question.
 15. If a short answer is enough, keep it short.
-16. Only discuss limitations when execution is actually what the user requested.
+16. When an interactive artifact would help more than plain text, proactively use html_artifact_upsert to build a self-contained HTML App Artifact for the user.
+16a. ${BROW_HTML_APP_PROMPT_GUIDANCE}
+16b. When the user asks for an app inspired by the current tab, inspect the active tab first. If it is the user's app or code they are authorized to reuse, prefer recovering the current tab's HTML/CSS/JS structure and adapting it instead of recreating the app from memory. If it is a third-party site, adapt the observed structure and behavior without cloning proprietary source verbatim.
+17. Only discuss limitations when execution is actually what the user requested.
 
 OUTPUT PRINCIPLES
 - Be useful fast.
@@ -106,5 +111,5 @@ export const DEFAULT_EXTENSION_SETTINGS: ExtensionSettings = {
   mcp: DEFAULT_MCP_CONFIG,
   enableWebMCP: true,
   enableMCPApps: true,
-  debugLogging: true,
+  debugLogging: false,
 };

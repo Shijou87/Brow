@@ -1,11 +1,8 @@
 // ─── LangGraph Agent ────────────────────────────────────────────────────────
-// Replicates the proven architecture from agent-singleton.ts:
-//  • Singleton Agent class with lazy LLM init
-//  • Streaming via agent.stream() with updates mode
-//  • AbortController + abortable stream generator
-//  • Pause/resume support
-//  • ToolStepEvent tracking with callId mapping
-//  • Dynamic rebuildAgent()
+// Builds and owns the model-facing runtime for the side panel. This module
+// assembles Brow's built-in tools, WebMCP page tools, and remote MCP server
+// tools; delegates request sizing/compaction to request-budget helpers; and
+// streams assistant/tool events back to the controller.
 
 import { tool, type StructuredToolInterface } from '@langchain/core/tools';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
@@ -96,6 +93,7 @@ import {
 import { logInfo } from '../shared/logger';
 import type {
   ConversationCompactionState,
+  HtmlAppRenderRequest,
   InteractionSkillEntry,
   SkillMention,
   VLMConfig,
@@ -135,6 +133,7 @@ export interface ToolStepEvent {
 export type ToolStepCallback = (steps: ToolStepEvent[]) => void;
 export type StreamTextCallback = (text: string) => void;
 export type MCPAppRenderCallback = (request: MCPAppRenderRequest) => void;
+export type HtmlAppRenderCallback = (request: HtmlAppRenderRequest) => void;
 export type AutomationApprovalDecision = 'allow' | 'allow_all' | 'skip';
 
 type AgentMessage = {
@@ -173,6 +172,8 @@ export interface AgentAPI {
   offStreamText: (callback: StreamTextCallback) => void;
   onMCPAppRender: (callback: MCPAppRenderCallback) => void;
   offMCPAppRender: (callback: MCPAppRenderCallback) => void;
+  onHtmlAppRender: (callback: HtmlAppRenderCallback) => void;
+  offHtmlAppRender: (callback: HtmlAppRenderCallback) => void;
   resolveAutomationApproval: (requestId: string, decision: AutomationApprovalDecision) => void;
   abort: () => void;
   isBusy: () => boolean;
@@ -339,6 +340,14 @@ function analyzeToolOutcome(
 
 // ─── Agent Class (mirrors Agent from agent-singleton.ts) ───────────────────
 
+/**
+ * Singleton-backed LangGraph runtime used by the side panel.
+ *
+ * The Agent owns tool assembly, LLM lifecycle, streaming, approval-gated tool
+ * execution, and app-render side channels. Prompt assembly and request-budget
+ * policy intentionally live in smaller helper modules rather than inside this
+ * class.
+ */
 export class Agent implements AgentAPI {
   private currentAgent: ReactAgent | null = null;
   private readonly builtinTools: StructuredToolInterface[];
@@ -349,6 +358,7 @@ export class Agent implements AgentAPI {
   private toolStepCallbacks: ToolStepCallback[] = [];
   private streamTextCallbacks: StreamTextCallback[] = [];
   private mcpAppRenderCallbacks: MCPAppRenderCallback[] = [];
+  private htmlAppRenderCallbacks: HtmlAppRenderCallback[] = [];
   private requestBudgetCompactionCallbacks: RequestBudgetCompactionCallback[] = [];
   private queryAbortController: AbortController | null = null;
   private paused = false;
@@ -428,6 +438,7 @@ export class Agent implements AgentAPI {
       getVLMConfig: () => this.vlmConfig,
       findSkill: (identifier) => this.findSkill(identifier),
       submitDomainSkillProposal: (draft) => this.submitDomainSkillProposal(draft),
+      onHtmlAppUpsert: (request) => this.emitHtmlAppRender(request),
     }).map((builtinTool) => this.wrapAutomationToolWithApproval(builtinTool));
     this.requestBudgetRuntime = createRequestBudgetRuntime({
       getConfiguredContextWindow: () => this.getConfiguredContextWindow(),
@@ -492,7 +503,7 @@ export class Agent implements AgentAPI {
       .map((webmcpTool) => this.wrapAutomationToolWithApproval(webmcpTool));
     this.webmcpByTab.set(tabId, { descriptors, tools, url, title });
     registerWebMCPToolDisplayLabels(tabId, descriptors);
-    console.log('[agent] WebMCP tools updated for tab', tabId, ':', descriptors.map((tool) => tool.name));
+    logInfo('agent', `WebMCP tools updated for tab ${tabId}`, descriptors.map((tool) => tool.name));
     this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
@@ -500,7 +511,7 @@ export class Agent implements AgentAPI {
   removeWebMCPToolsForTab(tabId: number): void {
     if (!this.webmcpByTab.has(tabId)) return;
     this.webmcpByTab.delete(tabId);
-    console.log('[agent] Removed WebMCP tools for tab', tabId);
+    logInfo('agent', `Removed WebMCP tools for tab ${tabId}`);
     this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
   }
@@ -572,7 +583,7 @@ export class Agent implements AgentAPI {
       this.invalidateCompiledSystemPrompt();
       this.rebuildAgent();
       this.persistMCPServers();
-      console.log(`[agent] MCP server "${name}" connected with ${tools.length} tools`);
+      logInfo('agent', `MCP server "${name}" connected with ${tools.length} tools`);
     } catch (err: any) {
       entry.status = 'error';
       entry.error = err.message ?? String(err);
@@ -591,7 +602,7 @@ export class Agent implements AgentAPI {
     this.invalidateCompiledSystemPrompt();
     this.rebuildAgent();
     this.persistMCPServers();
-    console.log(`[agent] MCP server "${entry.name}" removed`);
+    logInfo('agent', `MCP server "${entry.name}" removed`);
   }
 
   async reconnectMCPServer(id: string): Promise<MCPServerEntry> {
@@ -615,7 +626,7 @@ export class Agent implements AgentAPI {
       registerMCPToolDisplayLabels(id, entry.name, tools);
       this.invalidateCompiledSystemPrompt();
       this.rebuildAgent();
-      console.log(`[agent] MCP server "${entry.name}" reconnected with ${tools.length} tools`);
+      logInfo('agent', `MCP server "${entry.name}" reconnected with ${tools.length} tools`);
     } catch (err: any) {
       entry.status = 'error';
       entry.error = err.message ?? String(err);
@@ -647,7 +658,7 @@ export class Agent implements AgentAPI {
 
   setVLMConfig(config: VLMConfig): void {
     this.vlmConfig = config;
-    console.log('[agent] VLM config set:', config.model, '@', config.baseUrl);
+    logInfo('agent', 'VLM config set:', config.model, '@', config.baseUrl);
   }
 
   getVLMConfig(): VLMConfig | null {
@@ -656,7 +667,7 @@ export class Agent implements AgentAPI {
 
   setRecursionLimit(limit: number): void {
     this.recursionLimit = normalizeRecursionLimit(limit);
-    console.log('[agent] Recursion limit set to', this.recursionLimit);
+    logInfo('agent', 'Recursion limit set to', this.recursionLimit);
   }
 
   getRecursionLimit(): number {
@@ -670,7 +681,7 @@ export class Agent implements AgentAPI {
     if (this.currentAgent) {
       this.rebuildAgent();
     }
-    console.log('[agent] System prompt updated');
+    logInfo('agent', 'System prompt updated');
   }
 
   getSystemPrompt(): string {
@@ -683,7 +694,7 @@ export class Agent implements AgentAPI {
     if (this.currentAgent) {
       this.rebuildAgent();
     }
-    console.log('[agent] Domain skill registry updated:', this.domainSkillRegistry.length, 'skills');
+    logInfo('agent', 'Domain skill registry updated:', this.domainSkillRegistry.length, 'skills');
   }
 
   getSkillRegistry(): SkillRegistryEntry[] {
@@ -769,6 +780,14 @@ export class Agent implements AgentAPI {
     this.mcpAppRenderCallbacks = this.mcpAppRenderCallbacks.filter((cb) => cb !== callback);
   }
 
+  onHtmlAppRender(callback: HtmlAppRenderCallback): void {
+    this.htmlAppRenderCallbacks.push(callback);
+  }
+
+  offHtmlAppRender(callback: HtmlAppRenderCallback): void {
+    this.htmlAppRenderCallbacks = this.htmlAppRenderCallbacks.filter((cb) => cb !== callback);
+  }
+
   onRequestBudgetCompaction(callback: RequestBudgetCompactionCallback): void {
     this.requestBudgetCompactionCallbacks.push(callback);
   }
@@ -847,6 +866,16 @@ export class Agent implements AgentAPI {
     }
   }
 
+  private emitHtmlAppRender(request: HtmlAppRenderRequest): void {
+    for (const callback of this.htmlAppRenderCallbacks) {
+      try {
+        callback(request);
+      } catch (err) {
+        console.warn('[agent] HTML App render callback error', err);
+      }
+    }
+  }
+
   private isAutomationTool(tool: StructuredToolInterface): boolean {
     const name = (tool as any).name as string;
     const aliasOf = (tool as any).__aliasOf as string | undefined;
@@ -916,7 +945,7 @@ export class Agent implements AgentAPI {
   }
 
   abort(): void {
-    console.log('[agent] Abort requested');
+    logInfo('agent', 'Abort requested');
     this.clearPendingAutomationApprovals('skip');
     if (this.queryAbortController) {
       this.queryAbortController.abort();
@@ -931,13 +960,13 @@ export class Agent implements AgentAPI {
   pause(): void {
     if (this.paused) return;
     this.paused = true;
-    console.log('[agent] Paused');
+    logInfo('agent', 'Paused');
   }
 
   resume(): void {
     if (!this.paused) return;
     this.paused = false;
-    console.log('[agent] Resumed');
+    logInfo('agent', 'Resumed');
     if (this.pauseResolve) {
       this.pauseResolve();
       this.pauseResolve = null;
@@ -1196,7 +1225,7 @@ export class Agent implements AgentAPI {
         }
       } catch (err: any) {
         if (err?.name === 'AbortError') {
-          console.log('[agent] Stream aborted');
+          logInfo('agent', 'Stream aborted');
           return;
         }
         throw err;
@@ -1220,7 +1249,7 @@ export class Agent implements AgentAPI {
         }
 
         if (abortSignal.aborted) {
-          console.log('[agent] Query aborted, breaking stream');
+          logInfo('agent', 'Query aborted, breaking stream');
           break;
         }
 
@@ -1251,7 +1280,7 @@ export class Agent implements AgentAPI {
             }
 
             if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-              console.log('[agent] tool calls', message.tool_calls);
+              logInfo('agent', 'tool calls', message.tool_calls);
               for (const call of message.tool_calls) {
                 const toolName =
                   (call as any)?.name ??
@@ -1458,7 +1487,7 @@ export class Agent implements AgentAPI {
 
     const tools = [...this.builtinTools, ...allWebmcpTools, ...allMcpTools]
       .filter((tool) => this.isToolEnabled(tool));
-    console.log('[agent] Rebuilding agent graph with tools:', tools.map((tool: any) => tool.name));
+    logInfo('agent', 'Rebuilding agent graph with tools:', tools.map((tool: any) => tool.name));
 
     const prompt = this.buildCompiledSystemPrompt();
 
@@ -1474,6 +1503,9 @@ export class Agent implements AgentAPI {
 
 let singletonAgent: Agent | null = null;
 
+/**
+ * Returns the shared Agent instance used by the side panel runtime.
+ */
 export function getOrCreateAgent(): Agent {
   if (singletonAgent == null) {
     singletonAgent = new Agent();
@@ -1481,18 +1513,29 @@ export function getOrCreateAgent(): Agent {
   return singletonAgent;
 }
 
+/**
+ * Exposes the singleton Agent through the narrower AgentAPI surface.
+ */
 export function getAgentApi(): AgentAPI {
   return getOrCreateAgent();
 }
 
+/**
+ * Clears the cached LLM and current agent instance so the next request
+ * reinitializes the runtime from current configuration.
+ */
 export function resetAgent(): void {
   resetLlm();
   if (singletonAgent) {
     (singletonAgent as any).currentAgent = null;
   }
-  console.log('[agent] Agent reset — will re-initialise on next query');
+  logInfo('agent', 'Agent reset — will re-initialise on next query');
 }
 
+/**
+ * Applies new provider configuration and eagerly warms the singleton agent so
+ * later UI actions observe the updated runtime.
+ */
 export function configureAndRebuild(config: LLMConfigUnion): void {
   reconfigureLlm(config);
   resetAgent();

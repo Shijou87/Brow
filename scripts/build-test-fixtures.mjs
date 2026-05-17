@@ -58,10 +58,14 @@ const fixtureBuilds = [
   },
   {
     outDir: '.tmp-openai-tool-schema-test',
-    entries: ['src/sidepanel/agent-tools/browser-tool-schemas.ts'],
+    entries: [
+      'src/sidepanel/agent-tools/browser-tool-schemas.ts',
+      'src/shared/json-schema.ts',
+    ],
     aliases: [
       ['sidepanel/agent-tools/browser-tool-schemas.js', 'browser-tool-schemas.js'],
       ['sidepanel/agent-tools/input-schemas.js', 'input-schemas.js'],
+      ['shared/json-schema.js', 'json-schema.js'],
     ],
   },
   { outDir: '.tmp-page-automation-click-test', entries: ['src/sidepanel/tab-tools/page-automation.ts'] },
@@ -85,7 +89,10 @@ const fixtureBuilds = [
   {
     outDir: '.tmp-system-prompt-guidance-test',
     entries: ['src/shared/config.ts'],
-    aliases: [['shared/config.js', 'config.js']],
+    aliases: [
+      ['shared/config.js', 'config.js'],
+      ['shared/html-app-artifact-guidance.js', 'html-app-artifact-guidance.js'],
+    ],
   },
   { outDir: '.tmp-tool-classification-test', entries: ['src/sidepanel/agent-runtime/tool-classification.ts'] },
   { outDir: '.tmp-tool-context-carry-forward-test', entries: ['src/sidepanel/agent-runtime/tool-context-carry-forward.ts'] },

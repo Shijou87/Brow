@@ -71,6 +71,7 @@ export function buildChatViewShell(container: HTMLElement): ChatViewShell {
   const configPanel = cloneHtmlTemplate<HTMLElement>(configPanelTemplate);
   getRequiredSlot<HTMLImageElement>(configPanel, 'openai-provider-icon').src = chrome.runtime.getURL('icons/openai.png');
   getRequiredSlot<HTMLImageElement>(configPanel, 'claude-provider-icon').src = chrome.runtime.getURL('icons/claude.png');
+  configPanel.style.setProperty('--brow-spritesheet-url', `url("${chrome.runtime.getURL('icons/brow-spritesheet.png')}")`);
   container.appendChild(configPanel);
 
   const promptPanel = cloneHtmlTemplate<HTMLElement>(promptPanelTemplate);

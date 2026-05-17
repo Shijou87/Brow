@@ -1,7 +1,13 @@
 // ─── Side Panel Chat View ───────────────────────────────────────────────────
 // Gemini-like sidebar chat UI. Modeled after radiology-copilot-view.ts.
 
-import type { ConversationCompactionState, WebMCPRegistryEntry } from '../shared/types';
+import type {
+  ConversationCompactionState,
+  HtmlAppArtifact,
+  HtmlAppArtifactMessageRef,
+  HtmlAppRenderRequest,
+  WebMCPRegistryEntry,
+} from '../shared/types';
 import {
   type RequestBudgetEstimate,
   type AutomationApprovalDecision,
@@ -24,14 +30,18 @@ import {
 import {
   loadSavedConversations,
   removeSavedConversation,
+  setSavedConversationFavorite,
+  sortSavedConversationsForDisplay,
   upsertSavedConversation,
 } from './chat-view/conversation-store';
 import type { ContextTabOption, SavedConversation, SavedConversationMessage } from './chat-view/types';
 import { escapeHtml as escapeMessageHtml, formatAssistantMessage } from './message-format';
+import { loadHtmlAppExecutionPreferences } from '../shared/storage';
 import {
   spinnerSvg,
 } from './chat-view/icons';
 import { ComposerModule } from './chat-view/composer-module';
+import { HtmlAppViewModule } from './chat-view/html-app-view-module';
 import { MCPAppViewModule } from './chat-view/mcp-app-view-module';
 import { PromptPanelModule } from './chat-view/prompt-panel-module';
 import { buildChatViewShell } from './chat-view/shell';
@@ -45,6 +55,11 @@ import {
   type MCPToolDescriptor,
 } from './mcp-client';
 import type { MCPAppLoadedResource } from './mcp-app-host';
+import {
+  cloneHtmlAppArtifacts,
+  resolveHtmlAppArtifactRef,
+  upsertHtmlAppArtifact,
+} from './html-app-artifact-utils';
 import {
   toSkillMentionReference,
   type SkillRegistryEntry,
@@ -83,6 +98,13 @@ export interface ChatViewCallbacks {
   onConversationDelete: (id: string) => void;
   onConversationDraftChange: () => void;
   onCopyContextDebug: () => Promise<string>;
+  onHtmlAppExecutionPreferenceChange: (enabled: boolean) => void;
+  onHtmlAppArtifactOpen: (
+    ref: HtmlAppArtifactMessageRef,
+    mode: 'inline' | 'tab',
+    container?: HTMLElement,
+  ) => void;
+  onHtmlAppArtifactDownload: (ref: HtmlAppArtifactMessageRef) => void;
   onMCPServerAdd: (name: string, url: string, authToken?: string) => Promise<MCPServerEntry>;
   onMCPServerRemove: (id: string) => void;
   onMCPServerReconnect: (id: string) => Promise<MCPServerEntry>;
@@ -134,16 +156,19 @@ export class ChatView {
 
   // Current conversation
   private currentConversationId: string | null = null;
+  private currentConversationFavorite = false;
 
   // Transcript + tool steps
   private transcriptModule!: TranscriptModule;
   private toolStepsModule!: ToolStepsModule;
   private composerModule!: ComposerModule;
+  private htmlAppViewModule!: HtmlAppViewModule;
   private mcpAppViewModule!: MCPAppViewModule;
   private expandedToolCards = new Set<string>();
   private pendingToolCardFocusKey: string | null = null;
 
   private conversationMessages: SavedConversationMessage[] = [];
+  private conversationHtmlAppArtifacts: HtmlAppArtifact[] = [];
   private streamingConversationMessageIndex: number | null = null;
   private draftChangeNotificationsEnabled = false;
 
@@ -306,6 +331,28 @@ export class ChatView {
     this.transcriptModule.renderConversationMessage(entry);
   }
 
+  public addHtmlAppArtifactMessage(request: HtmlAppRenderRequest): HTMLElement | null {
+    this.registerHtmlAppArtifact(request);
+
+    const entry: SavedConversationMessage = {
+      role: 'system',
+      content: `HTML App Artifact ready: ${request.title}`,
+      time: '',
+      htmlAppArtifactRefs: [{
+        artifactId: request.artifactId,
+        revisionId: request.revisionId,
+      }],
+    };
+    this.conversationMessages.push(entry);
+
+    const messageEl = this.transcriptModule.renderConversationMessage(entry);
+    const cards = messageEl.querySelectorAll<HTMLElement>('[data-html-app-artifact-id][data-html-app-revision-id]');
+    return [...cards].find((card) =>
+      card.dataset.htmlAppArtifactId === request.artifactId
+      && card.dataset.htmlAppRevisionId === request.revisionId,
+    ) ?? null;
+  }
+
   public showTypingIndicator(): void {
     this.transcriptModule.showTypingIndicator();
   }
@@ -417,6 +464,64 @@ export class ChatView {
     this.mcpAppViewModule.renderSkipped(container, request);
   }
 
+  public renderHtmlAppArtifactApproval(
+    container: HTMLElement,
+    request: HtmlAppRenderRequest,
+    callbacks: {
+      onRenderInline: (options: { alwaysAllow: boolean }) => void;
+      onOpenTab: (options: { alwaysAllow: boolean }) => void;
+      onRenderBoth: (options: { alwaysAllow: boolean }) => void;
+      onSkip: () => void;
+    },
+    options: { showAlwaysAllowToggle?: boolean } = {},
+  ): void {
+    this.htmlAppViewModule.renderApproval(container, request, callbacks, options);
+  }
+
+  public renderHtmlAppArtifactFrame(
+    container: HTMLElement,
+    request: HtmlAppRenderRequest,
+  ): HTMLIFrameElement {
+    return this.htmlAppViewModule.renderFrame(container, request);
+  }
+
+  public resizeHtmlAppArtifactFrame(iframe: HTMLIFrameElement, height: number): void {
+    this.htmlAppViewModule.resizeFrame(iframe, height);
+  }
+
+  public renderHtmlAppArtifactOpened(container: HTMLElement, request: HtmlAppRenderRequest): void {
+    this.htmlAppViewModule.renderOpened(container, request);
+  }
+
+  public renderHtmlAppArtifactSkipped(container: HTMLElement, request: HtmlAppRenderRequest): void {
+    this.htmlAppViewModule.renderSkipped(container, request);
+  }
+
+  public renderHtmlAppArtifactError(
+    container: HTMLElement,
+    request: HtmlAppRenderRequest,
+    message: string,
+  ): void {
+    this.htmlAppViewModule.renderError(container, request.title, message);
+  }
+
+  public getCurrentConversationId(): string | null {
+    return this.currentConversationId;
+  }
+
+  public resolveHtmlAppArtifact(
+    ref: HtmlAppArtifactMessageRef,
+    options: { preferLatest?: boolean } = {},
+  ): { artifact: HtmlAppArtifact; revision: HtmlAppArtifact['revisions'][number]; conversationId: string | null } | null {
+    const resolved = resolveHtmlAppArtifactRef(this.conversationHtmlAppArtifacts, ref, options);
+    if (!resolved) return null;
+
+    return {
+      ...resolved,
+      conversationId: this.currentConversationId,
+    };
+  }
+
   // ─── Build ──────────────────────────────────────────────────────────────
 
   private build(): void {
@@ -487,6 +592,7 @@ export class ChatView {
       createWorkflowDemonstrationMessageCard: (demonstration) => (
         this.composerModule.createWorkflowDemonstrationMessageCard(demonstration)
       ),
+      createHtmlAppArtifactMessageCard: (ref) => this.htmlAppViewModule.createArtifactMessageCard(ref),
       getWorkflowDemonstrationById: (id) => this.composerModule.getWorkflowDemonstrationById(id),
       requestScrollToBottom: () => this.scrollToBottom(),
     });
@@ -495,6 +601,14 @@ export class ChatView {
       getStreamingElement: () => this.transcriptModule.getStreamingElement(),
       onAutomationApprovalDecision: (requestId, decision) => this.callbacks.onAutomationApprovalDecision(requestId, decision),
       requestScrollToBottom: () => this.scrollToBottom(),
+    });
+    this.htmlAppViewModule = new HtmlAppViewModule({
+      escapeHtml: (text) => this.escapeHtml(text),
+      requestScrollToBottom: () => this.scrollToBottom(),
+      resolveArtifactRef: (ref, options) => this.resolveHtmlAppArtifact(ref, options),
+      onOpenInline: (ref, container) => this.callbacks.onHtmlAppArtifactOpen(ref, 'inline', container),
+      onOpenTab: (ref) => this.callbacks.onHtmlAppArtifactOpen(ref, 'tab'),
+      onDownload: (ref) => this.callbacks.onHtmlAppArtifactDownload(ref),
     });
     this.mcpAppViewModule = new MCPAppViewModule(this.messagesContainer, {
       addSystemMessage: (text) => this.addSystemMessage(text),
@@ -561,6 +675,7 @@ export class ChatView {
   private startNewConversation(): void {
     this.callbacks.onConversationNew();
     this.currentConversationId = null;
+    this.currentConversationFavorite = false;
     this.setActiveSurface('chat');
   }
 
@@ -1064,8 +1179,7 @@ export class ChatView {
         return;
       }
 
-      // Sort by most recent first
-      const sorted = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+      const sorted = sortSavedConversationsForDisplay(conversations);
 
       for (const convo of sorted) {
         const el = document.createElement('div');
@@ -1078,23 +1192,65 @@ export class ChatView {
           <div class="conversation-item-content">
             <div class="conversation-item-title">${this.escapeHtml(convo.title)}</div>
             <div class="conversation-item-meta">
+              ${convo.favorite ? '<span class="conversation-item-favorite-label">Favorite</span><span>·</span>' : ''}
               <span>${msgCount} message${msgCount !== 1 ? 's' : ''}</span>
               <span>·</span>
               <span>${timeStr}</span>
             </div>
           </div>
-          <button class="conversation-delete-btn" title="Delete conversation" data-id="${convo.id}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
-              <polyline points="3 6 5 6 21 6"></polyline>
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-            </svg>
-          </button>`;
+          <div class="conversation-item-actions">
+            <button
+              class="conversation-favorite-btn${convo.favorite ? ' is-favorite' : ''}"
+              type="button"
+              title="${convo.favorite ? 'Remove favorite' : 'Mark as favorite'}"
+              aria-label="${convo.favorite ? 'Remove favorite' : 'Mark as favorite'}"
+              aria-pressed="${convo.favorite ? 'true' : 'false'}"
+              data-id="${convo.id}"
+            >
+              <svg viewBox="0 0 24 24" fill="${convo.favorite ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" width="14" height="14" aria-hidden="true">
+                <path d="M12 3.5l2.9 5.88 6.49.94-4.7 4.58 1.11 6.46L12 18.27l-5.8 3.05 1.11-6.46-4.7-4.58 6.49-.94z"></path>
+              </svg>
+            </button>
+            <button class="conversation-delete-btn" type="button" title="Delete conversation" data-id="${convo.id}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+            </button>
+          </div>`;
 
         // Click to load conversation
         el.querySelector('.conversation-item-content')?.addEventListener('click', () => {
           this.currentConversationId = convo.id;
+          this.currentConversationFavorite = convo.favorite === true;
           this.callbacks.onConversationLoad(convo);
           this.setActiveSurface('chat');
+        });
+
+        el.querySelector('.conversation-favorite-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const nextFavorite = !(convo.favorite === true);
+          const shouldTrackCurrentConversation = this.currentConversationId === convo.id;
+          const previousFavorite = this.currentConversationFavorite;
+
+          if (shouldTrackCurrentConversation) {
+            this.currentConversationFavorite = nextFavorite;
+          }
+
+          void setSavedConversationFavorite(convo.id, nextFavorite)
+            .then((updated) => {
+              if (!updated && shouldTrackCurrentConversation) {
+                this.currentConversationFavorite = previousFavorite;
+              }
+              this.refreshConversationsPanel();
+            })
+            .catch((error) => {
+              console.warn('[chat-view] Failed to update conversation favorite:', error);
+              if (shouldTrackCurrentConversation) {
+                this.currentConversationFavorite = previousFavorite;
+              }
+              this.refreshConversationsPanel();
+            });
         });
 
         // Delete button
@@ -1114,11 +1270,15 @@ export class ChatView {
     chatHistory: Array<{ role: string; content: string }>,
     compactionState: ConversationCompactionState | null = null,
   ): void {
-    const messages: SavedConversation['messages'] = this.conversationMessages.map((message) => (
-      message.workflowDemonstrationIds?.length
-        ? { ...message, workflowDemonstrationIds: [...message.workflowDemonstrationIds] }
-        : { ...message }
-    ));
+    const messages: SavedConversation['messages'] = this.conversationMessages.map((message) => ({
+      ...message,
+      ...(message.workflowDemonstrationIds?.length
+        ? { workflowDemonstrationIds: [...message.workflowDemonstrationIds] }
+        : {}),
+      ...(message.htmlAppArtifactRefs?.length
+        ? { htmlAppArtifactRefs: message.htmlAppArtifactRefs.map((ref) => ({ ...ref })) }
+        : {}),
+    }));
 
     if (messages.length === 0) return;
 
@@ -1131,11 +1291,13 @@ export class ChatView {
     const convo: SavedConversation = {
       id: this.currentConversationId ?? this.generateId(),
       title,
+      favorite: this.currentConversationFavorite,
       createdAt: now,
       updatedAt: now,
       messages,
       chatHistory: [...chatHistory],
       workflowDemonstrations: this.composerModule.getConversationWorkflowDemonstrations(),
+      htmlAppArtifacts: cloneHtmlAppArtifacts(this.conversationHtmlAppArtifacts),
       stagedWorkflowDemonstrationIds: this.composerModule.getStagedWorkflowDemonstrationIds(),
       compactionState,
     };
@@ -1148,11 +1310,17 @@ export class ChatView {
   public loadConversation(convo: SavedConversation): void {
     this.clearMessages();
     this.currentConversationId = convo.id;
-    this.conversationMessages = convo.messages.map((message) => (
-      message.workflowDemonstrationIds?.length
-        ? { ...message, workflowDemonstrationIds: [...message.workflowDemonstrationIds] }
-        : { ...message }
-    ));
+    this.currentConversationFavorite = convo.favorite === true;
+    this.conversationHtmlAppArtifacts = cloneHtmlAppArtifacts(convo.htmlAppArtifacts);
+    this.conversationMessages = convo.messages.map((message) => ({
+      ...message,
+      ...(message.workflowDemonstrationIds?.length
+        ? { workflowDemonstrationIds: [...message.workflowDemonstrationIds] }
+        : {}),
+      ...(message.htmlAppArtifactRefs?.length
+        ? { htmlAppArtifactRefs: message.htmlAppArtifactRefs.map((ref) => ({ ...ref })) }
+        : {}),
+    }));
     this.composerModule.replaceConversationWorkflowState(
       convo.workflowDemonstrations,
       convo.stagedWorkflowDemonstrationIds,
@@ -1167,7 +1335,9 @@ export class ChatView {
   public clearMessages(): void {
     this.transcriptModule.clear();
     this.toolStepsModule.clear();
+    this.currentConversationFavorite = false;
     this.conversationMessages = [];
+    this.conversationHtmlAppArtifacts = [];
     this.streamingConversationMessageIndex = null;
     this.composerModule.clearConversationWorkflowState();
   }
@@ -1177,16 +1347,24 @@ export class ChatView {
     void removeSavedConversation(id);
     if (this.currentConversationId === id) {
       this.currentConversationId = null;
+      this.currentConversationFavorite = false;
     }
   }
 
   /** Set current conversation id */
   public setCurrentConversationId(id: string | null): void {
     this.currentConversationId = id;
+    if (id === null) {
+      this.currentConversationFavorite = false;
+    }
   }
 
   private generateId(): string {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  private registerHtmlAppArtifact(request: HtmlAppRenderRequest): void {
+    upsertHtmlAppArtifact(this.conversationHtmlAppArtifacts, request);
   }
 
   // ─── Config Panel ───────────────────────────────────────────────────────
@@ -1231,7 +1409,10 @@ export class ChatView {
   }
 
   private populateConfigFields(): void {
-    void loadConfigEditorState().then((saved) => {
+    void Promise.all([
+      loadConfigEditorState(),
+      loadHtmlAppExecutionPreferences(),
+    ]).then(([saved, htmlAppPreferences]) => {
       const openai = { ...DEFAULT_OPENAI_FIELDS, ...saved.openai };
       const claude = { ...DEFAULT_CLAUDE_FIELDS, ...saved.claude };
       const vlm = { ...DEFAULT_VLM_CONFIG, ...saved.vlm };
@@ -1261,6 +1442,16 @@ export class ChatView {
       const cf = this.configPanel.querySelector('.config-claude-fields') as HTMLElement;
       if (of) of.style.display = this.configMode === 'openai' ? '' : 'none';
       if (cf) cf.style.display = this.configMode === 'claude' ? '' : 'none';
+
+      const htmlAppAutoApprove = this.configPanel.querySelector('#html-app-auto-approve') as HTMLInputElement | null;
+      if (htmlAppAutoApprove) {
+        htmlAppAutoApprove.checked = htmlAppPreferences.alwaysAllowExecution;
+      }
+
+      const animatedBrow = this.configPanel.querySelector('#animated-brow') as HTMLInputElement | null;
+      if (animatedBrow) {
+        animatedBrow.checked = saved.runtime.animatedBrow === true;
+      }
     });
   }
 
@@ -1343,12 +1534,15 @@ export class ChatView {
       mode: this.configMode,
       fields,
       recursionLimit: Math.floor(recursionLimit),
+      animatedBrow: (this.configPanel.querySelector('#animated-brow') as HTMLInputElement | null)?.checked === true,
       vlm: {
         baseUrl: this.getInput('vlm-config-endpoint'),
         apiKey: this.getInput('vlm-config-api-key'),
         model: this.getInput('vlm-config-model'),
       },
     });
+    const htmlAppAutoApprove = this.configPanel.querySelector('#html-app-auto-approve') as HTMLInputElement | null;
+    this.callbacks.onHtmlAppExecutionPreferenceChange(htmlAppAutoApprove?.checked === true);
 
     this.callbacks.onConfigApply({
       mode: this.configMode,

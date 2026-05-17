@@ -1,3 +1,9 @@
+// ─── Built-In Tool Factory ─────────────────────────────────────────────────
+// Defines Brow's stable built-in tool surface, including tab tools, Browser
+// Snapshot automation, WebMCP helpers, skill helpers, Domain Memory tools, and
+// HTML artifact entry points. This file is the main place to inspect the exact
+// schemas and descriptions exposed to the model.
+
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
@@ -80,21 +86,39 @@ import {
 import type {
   BrowBackendPreference,
   BrowActionPostcondition,
+  HtmlAppRenderRequest,
   BrowReplayTargetEvidence,
   DomainMemoryDraft,
   DomainSkillProposal,
   DomainSkillProposalDraft,
+  HtmlAppRenderTarget,
   InteractionSkillEntry,
   VLMConfig,
 } from '../../shared/types';
+import { BROW_HTML_APP_THEME_SHORT_GUIDANCE } from '../../shared/html-app-artifact-guidance';
 import type { SkillRegistryEntry } from '../skills-registry';
 
 interface BuiltinToolDependencies {
   getVLMConfig: () => VLMConfig | null;
   findSkill: (identifier: string) => SkillRegistryEntry | InteractionSkillEntry | null;
   submitDomainSkillProposal: (draft: DomainSkillProposalDraft) => Promise<DomainSkillProposal>;
+  onHtmlAppUpsert: (request: HtmlAppRenderRequest) => void;
 }
 
+function generateRuntimeId(prefix: string): string {
+  const suffix =
+    globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${prefix}-${suffix}`;
+}
+
+/**
+ * Builds the built-in tool inventory exposed to the agent.
+ *
+ * Keep stable tool names, argument schemas, and high-level model-facing
+ * descriptions here. Tool execution details should remain delegated to the
+ * smaller helper modules imported by this factory.
+ */
 export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToolInterface[] {
   const tabsListTool = tool(
     async () => JSON.stringify(await tabsList(), null, 2),
@@ -1148,6 +1172,58 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     },
   );
 
+  const htmlArtifactUpsertTool = tool(
+    async ({
+      artifactId,
+      title,
+      html,
+      renderTargetHint,
+      summary,
+    }: {
+      artifactId?: string | null;
+      title: string;
+      html: string;
+      renderTargetHint?: HtmlAppRenderTarget | null;
+      summary?: string | null;
+    }) => {
+      const normalizedTitle = title.trim() || 'Untitled HTML App Artifact';
+      const normalizedHtml = html.trim();
+      const nextArtifactId = artifactId?.trim() || generateRuntimeId('html-app-artifact');
+      const request: HtmlAppRenderRequest = {
+        id: generateRuntimeId('html-app-render'),
+        artifactId: nextArtifactId,
+        revisionId: generateRuntimeId('html-app-revision'),
+        title: normalizedTitle,
+        html: normalizedHtml,
+        renderTargetHint: renderTargetHint ?? 'inline',
+        summary: summary?.trim() || undefined,
+        createdAt: Date.now(),
+      };
+
+      deps.onHtmlAppUpsert(request);
+
+      return JSON.stringify({
+        ok: true,
+        artifactId: request.artifactId,
+        revisionId: request.revisionId,
+        title: request.title,
+        availableRenderActions: ['render_inline', 'open_tab', 'render_both', 'download_html'],
+        message: 'HTML App Artifact saved. Brow will wait for user approval before executing the generated HTML.',
+      }, null, 2);
+    },
+    {
+      name: 'html_artifact_upsert',
+      description: `Create or update a conversation-scoped HTML App Artifact. Use this when an interactive HTML view, game, demo, or mini app would help the user more than plain text. Provide one complete self-contained HTML document with inline CSS and inline JavaScript. ${BROW_HTML_APP_THEME_SHORT_GUIDANCE}`,
+      schema: z.object({
+        artifactId: nullableOptionalString('Existing HTML App Artifact id to update. Omit to create a new artifact.'),
+        title: z.string().describe('Short display title for the HTML App Artifact. Keep it concise; the HTML itself should not repeat this as a decorative heading unless the user asked for one.'),
+        html: z.string().describe(`Complete self-contained HTML document with inline CSS/JS. Brow will execute it in a locked-down sandbox with no external network access. ${BROW_HTML_APP_THEME_SHORT_GUIDANCE}`),
+        renderTargetHint: z.enum(['inline', 'tab', 'both']).nullable().optional().describe('Suggested default render target for the approval card.'),
+        summary: nullableOptionalString('Optional short summary or caption shown in the chat artifact card'),
+      }),
+    },
+  );
+
   const skillsProposeTool = tool(
     async ({
       name,
@@ -1388,6 +1464,7 @@ export function createBuiltinTools(deps: BuiltinToolDependencies): StructuredToo
     tabScreenshotVlmTool as unknown as StructuredToolInterface,
     webmcpDiscoverTool as unknown as StructuredToolInterface,
     webmcpInvokeTool as unknown as StructuredToolInterface,
+    htmlArtifactUpsertTool as unknown as StructuredToolInterface,
     skillsProposeTool as unknown as StructuredToolInterface,
     domainMemorySaveTool as unknown as StructuredToolInterface,
     domainMemoryLoadTool as unknown as StructuredToolInterface,

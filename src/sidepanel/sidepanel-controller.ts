@@ -1,6 +1,14 @@
+// ─── Side Panel Runtime Coordinator ────────────────────────────────────────
+// Owns the visible side-panel lifecycle: binds ChatView callbacks, restores
+// persisted state, keeps request-budget/debug state current, and bridges UI
+// actions into the agent, browser tabs, and app-render hosts.
+
 import { ChatView, type ChatViewCallbacks, type ContextTabOption, type SavedConversation } from './chat-view';
 import { loadDomainSkillRegistryEntries } from './chat-view/config-store';
+import { downloadHtmlAppArtifact } from './html-app-artifact-utils';
 import { MCPAppHost } from './mcp-app-host';
+import { createLockedDownHtmlResource } from './sandboxed-html';
+import { SandboxedHtmlHost } from './sandboxed-html-host';
 import {
   buildToolContextCarryForwardMessage,
   type AutomationApprovalDecision,
@@ -23,17 +31,23 @@ import {
 } from '../shared/config';
 import {
   loadDisabledTools,
+  loadHtmlAppExecutionPreferences,
   loadSidepanelConfig,
   saveDisabledTools,
+  saveHtmlAppExecutionPreferences,
 } from '../shared/storage';
 import type {
   DirectLLMConfig,
+  HtmlAppArtifactMessageRef,
+  HtmlAppExecutionPreferences,
+  HtmlAppRenderRequest,
   SkillMention,
   WebMCPRegistryEntry,
   WorkflowDemonstration,
 } from '../shared/types';
 import { logInfo } from '../shared/logger';
 import { invalidateBrowserContextSnapshotCache } from './agent-runtime/browser-context';
+import { dismissBrowAutomationOverlays } from './tab-tools/page-automation/tab-action-execution';
 import { workflowRecordingStart, workflowRecordingStop } from './tab-tools/workflow-demonstrations';
 import type { MCPAppRenderRequest, MCPServerEntry } from './mcp-client';
 
@@ -55,10 +69,20 @@ const DEFAULT_CONFIG = {
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
 };
 
+/**
+ * Coordinates the side-panel UI with the agent runtime and browser-facing
+ * extension services.
+ *
+ * This class is the main owner of visible chat state, request-budget refresh,
+ * approval flow, workflow recording initiation, and MCP/HTML app rendering
+ * lifecycles. Keep reusable policy in dedicated helpers and keep the
+ * controller focused on orchestration.
+ */
 export class SidepanelController {
   private view: ChatView | null = null;
   private readonly agent: AgentAPI;
   private readonly mcpAppHost = new MCPAppHost();
+  private readonly htmlAppHost = new SandboxedHtmlHost();
   private readonly registry = new Map<number, WebMCPRegistryEntry>();
   private readonly chatHistory: ChatTurn[] = [];
 
@@ -72,6 +96,9 @@ export class SidepanelController {
   private activeRunToolContextTokenEstimate = 0;
   private activeRunHasVisibleAssistantStream = false;
   private activeRunLastAssistantStreamText = '';
+  private htmlAppExecutionPreferences: HtmlAppExecutionPreferences = {
+    alwaysAllowExecution: false,
+  };
   private agentCallbacksBound = false;
   private chromeListenersBound = false;
 
@@ -99,6 +126,15 @@ export class SidepanelController {
       onConversationDelete: (id) => this.handleConversationDelete(id),
       onConversationDraftChange: () => this.handleConversationDraftChange(),
       onCopyContextDebug: () => this.handleCopyContextDebug(),
+      onHtmlAppExecutionPreferenceChange: (enabled) => {
+        this.handleHtmlAppExecutionPreferenceChange(enabled);
+      },
+      onHtmlAppArtifactOpen: (ref, mode, container) => {
+        void this.handleHtmlAppArtifactOpen(ref, mode, container);
+      },
+      onHtmlAppArtifactDownload: (ref) => {
+        void this.handleHtmlAppArtifactDownload(ref);
+      },
       onMCPServerAdd: (name, url, authToken) => this.handleMCPServerAdd(name, url, authToken),
       onMCPServerRemove: (id) => this.handleMCPServerRemove(id),
       onMCPServerReconnect: (id) => this.handleMCPServerReconnect(id),
@@ -123,6 +159,7 @@ export class SidepanelController {
     this.restoreSavedSkills();
     void this.restoreMCPServers();
     void this.restoreDisabledTools();
+    await this.restoreHtmlAppExecutionPreferences();
     await this.restoreInitialTabAndRegistry();
     this.scheduleRequestBudgetRefresh();
   }
@@ -146,6 +183,10 @@ export class SidepanelController {
 
     this.agent.onMCPAppRender((request) => {
       void this.handleMCPAppRender(request);
+    });
+
+    this.agent.onHtmlAppRender((request) => {
+      void this.handleHtmlAppRender(request);
     });
 
     this.agent.onRequestBudgetCompaction((event) => {
@@ -333,6 +374,9 @@ export class SidepanelController {
       view.setAgentBusy(false);
       this.clearActiveRunBudgetTracking();
       this.scheduleRequestBudgetRefresh();
+      await dismissBrowAutomationOverlays().catch((err: any) => {
+        console.warn('[sidepanel] Failed to dismiss Brow automation overlays:', err?.message ?? err);
+      });
     }
   }
 
@@ -466,10 +510,25 @@ export class SidepanelController {
     this.agent.resolveAutomationApproval(requestId, decision);
   }
 
-  private getMCPAppSandboxUrl(sessionId: string): string {
+  private getSandboxUrl(sessionId: string): string {
     const url = new URL(chrome.runtime.getURL('mcp-app-sandbox.html'));
     url.searchParams.set('session', sessionId);
     return url.toString();
+  }
+
+  private getHtmlAppViewUrl(conversationId: string, artifactId: string, revisionId: string): string {
+    const url = new URL(chrome.runtime.getURL('html-app-view.html'));
+    url.searchParams.set('conversation', conversationId);
+    url.searchParams.set('artifact', artifactId);
+    url.searchParams.set('revision', revisionId);
+    return url.toString();
+  }
+
+  private generateRuntimeId(prefix: string): string {
+    const suffix =
+      globalThis.crypto?.randomUUID?.()
+      ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    return `${prefix}-${suffix}`;
   }
 
   private async handleMCPAppRender(request: MCPAppRenderRequest): Promise<void> {
@@ -484,7 +543,7 @@ export class SidepanelController {
           void this.mcpAppHost.mount(
             request,
             iframe,
-            this.getMCPAppSandboxUrl(request.id),
+            this.getSandboxUrl(request.id),
             resource,
             {
               onSizeChange: (height) => view.resizeMCPAppFrame(iframe, height),
@@ -503,6 +562,164 @@ export class SidepanelController {
     } catch (err: any) {
       view.renderMCPAppError(container, request, err?.message ?? String(err));
     }
+  }
+
+  private async openHtmlAppArtifactTab(
+    conversationId: string,
+    artifactId: string,
+    revisionId: string,
+  ): Promise<void> {
+    await chrome.tabs.create({
+      url: this.getHtmlAppViewUrl(conversationId, artifactId, revisionId),
+      active: true,
+    });
+  }
+
+  private async mountHtmlAppArtifactInline(
+    container: HTMLElement,
+    request: HtmlAppRenderRequest,
+    sessionId = request.id,
+  ): Promise<void> {
+    const view = this.requireView();
+    const iframe = view.renderHtmlAppArtifactFrame(container, request);
+    await this.htmlAppHost.mount(
+      sessionId,
+      iframe,
+      this.getSandboxUrl(sessionId),
+      createLockedDownHtmlResource(request.html),
+      {
+        onSizeChange: (height) => view.resizeHtmlAppArtifactFrame(iframe, height),
+        onError: (message) => view.renderHtmlAppArtifactError(container, request, message),
+      },
+    );
+  }
+
+  private async maybePersistAlwaysAllowHtmlApps(rememberChoice: boolean): Promise<void> {
+    if (!rememberChoice || this.htmlAppExecutionPreferences.alwaysAllowExecution) return;
+
+    const accepted = window.confirm(
+      'Always allow future HTML App Artifacts on this device?\n\n'
+      + 'Generated HTML apps can run JavaScript inside Brow\'s sandbox and may capture keyboard input while focused. '
+      + 'Only enable this if you trust the HTML apps you ask Brow to generate.',
+    );
+    if (!accepted) return;
+
+    this.htmlAppExecutionPreferences = await saveHtmlAppExecutionPreferences({
+      alwaysAllowExecution: true,
+    });
+    this.requireView().addSystemMessage(
+      'Future HTML App Artifacts will render inline automatically until you turn off "Always Allow HTML Apps" in Config.',
+    );
+  }
+
+  private async executeHtmlAppApprovalAction(
+    container: HTMLElement,
+    request: HtmlAppRenderRequest,
+    mode: 'inline' | 'tab' | 'both',
+    options: { alwaysAllow: boolean },
+  ): Promise<void> {
+    const view = this.requireView();
+    await this.maybePersistAlwaysAllowHtmlApps(options.alwaysAllow);
+
+    if (mode === 'inline') {
+      await this.mountHtmlAppArtifactInline(container, request);
+      return;
+    }
+
+    const conversationId = view.getCurrentConversationId();
+    if (!conversationId) {
+      view.renderHtmlAppArtifactError(container, request, 'The current conversation is not available for tab rendering.');
+      return;
+    }
+
+    if (mode === 'tab') {
+      await this.openHtmlAppArtifactTab(conversationId, request.artifactId, request.revisionId);
+      view.renderHtmlAppArtifactOpened(container, request);
+      return;
+    }
+
+    await this.mountHtmlAppArtifactInline(container, request);
+    await this.openHtmlAppArtifactTab(conversationId, request.artifactId, request.revisionId);
+  }
+
+  private async handleHtmlAppRender(request: HtmlAppRenderRequest): Promise<void> {
+    const view = this.requireView();
+    const container = view.addHtmlAppArtifactMessage(request);
+    view.saveCurrentConversation(this.chatHistory, this.agent.getConversationCompactionState());
+
+    if (!container) return;
+
+    if (this.htmlAppExecutionPreferences.alwaysAllowExecution) {
+      void this.mountHtmlAppArtifactInline(container, request).catch((err: any) => {
+        view.renderHtmlAppArtifactError(container, request, err?.message ?? String(err));
+      });
+      return;
+    }
+
+    view.renderHtmlAppArtifactApproval(container, request, {
+      onRenderInline: (options) => {
+        void this.executeHtmlAppApprovalAction(container, request, 'inline', options).catch((err: any) => {
+          view.renderHtmlAppArtifactError(container, request, err?.message ?? String(err));
+        });
+      },
+      onOpenTab: (options) => {
+        void this.executeHtmlAppApprovalAction(container, request, 'tab', options).catch((err: any) => {
+          view.renderHtmlAppArtifactError(container, request, err?.message ?? String(err));
+        });
+      },
+      onRenderBoth: (options) => {
+        void this.executeHtmlAppApprovalAction(container, request, 'both', options).catch((err: any) => {
+          view.renderHtmlAppArtifactError(container, request, err?.message ?? String(err));
+        });
+      },
+      onSkip: () => {
+        this.htmlAppHost.teardown(request.id);
+        view.renderHtmlAppArtifactSkipped(container, request);
+      },
+    }, {
+      showAlwaysAllowToggle: !this.htmlAppExecutionPreferences.alwaysAllowExecution,
+    });
+  }
+
+  private async handleHtmlAppArtifactOpen(
+    ref: HtmlAppArtifactMessageRef,
+    mode: 'inline' | 'tab',
+    container?: HTMLElement,
+  ): Promise<void> {
+    const view = this.requireView();
+    const resolved = view.resolveHtmlAppArtifact(ref, { preferLatest: true });
+    if (!resolved) return;
+
+    const request: HtmlAppRenderRequest = {
+      id: this.generateRuntimeId('html-app-inline'),
+      artifactId: resolved.artifact.id,
+      revisionId: resolved.revision.id,
+      title: resolved.revision.title,
+      html: resolved.revision.html,
+      renderTargetHint: resolved.revision.renderTargetHint,
+      summary: resolved.revision.summary,
+      createdAt: Date.now(),
+    };
+
+    if (mode === 'tab') {
+      if (!resolved.conversationId) return;
+      await this.openHtmlAppArtifactTab(resolved.conversationId, resolved.artifact.id, resolved.revision.id);
+      return;
+    }
+
+    if (!container) return;
+    await this.mountHtmlAppArtifactInline(container, request, request.id);
+  }
+
+  private async handleHtmlAppArtifactDownload(ref: HtmlAppArtifactMessageRef): Promise<void> {
+    const view = this.requireView();
+    const resolved = view.resolveHtmlAppArtifact(ref, { preferLatest: true });
+    if (!resolved) return;
+    await downloadHtmlAppArtifact(
+      resolved.revision.title,
+      resolved.revision.html,
+      resolved.revision.id,
+    );
   }
 
   private toContextTabOption(tab: chrome.tabs.Tab | undefined): ContextTabOption | null {
@@ -558,7 +775,7 @@ export class SidepanelController {
 
   private handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: string }): void {
     this.agent.setVLMConfig(config);
-    console.log('[sidepanel] VLM config applied:', config.model, '@', config.baseUrl);
+    logInfo('sidepanel', 'VLM config applied:', config.model, '@', config.baseUrl);
   }
 
   private handleSystemPromptApply(prompt: string): void {
@@ -609,6 +826,22 @@ export class SidepanelController {
     if (saved == null) return;
     this.agent.setDisabledTools(saved);
     logInfo('sidepanel', `Restored ${saved.length} disabled tools from storage`);
+  }
+
+  private async restoreHtmlAppExecutionPreferences(): Promise<void> {
+    this.htmlAppExecutionPreferences = await loadHtmlAppExecutionPreferences().catch(() => ({
+      alwaysAllowExecution: false,
+    }));
+  }
+
+  private handleHtmlAppExecutionPreferenceChange(enabled: boolean): void {
+    if (enabled === this.htmlAppExecutionPreferences.alwaysAllowExecution) return;
+    this.htmlAppExecutionPreferences = {
+      alwaysAllowExecution: enabled,
+    };
+    void saveHtmlAppExecutionPreferences(this.htmlAppExecutionPreferences).catch((err: any) => {
+      console.warn('[sidepanel] Failed to save HTML App execution preferences:', err?.message ?? err);
+    });
   }
 
   private async handleMCPServerAdd(name: string, url: string, authToken?: string): Promise<MCPServerEntry> {
@@ -670,6 +903,7 @@ export class SidepanelController {
   private handleConversationLoad(conversation: SavedConversation): void {
     const view = this.requireView();
     this.mcpAppHost.teardownAll();
+    this.htmlAppHost.teardownAll();
     this.chatHistory.length = 0;
     this.chatHistory.push(...conversation.chatHistory as ChatTurn[]);
     this.latestRequestContextDebugInput = null;
@@ -683,6 +917,7 @@ export class SidepanelController {
   private handleConversationNew(): void {
     const view = this.requireView();
     this.mcpAppHost.teardownAll();
+    this.htmlAppHost.teardownAll();
     this.chatHistory.length = 0;
     this.latestRequestContextDebugInput = null;
     this.agent.setConversationCompactionState(null);

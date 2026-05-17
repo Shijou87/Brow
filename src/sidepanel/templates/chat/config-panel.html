@@ -64,6 +64,21 @@
         <label for="llm-config-recursion-limit">Recursion Limit</label>
         <input type="number" id="llm-config-recursion-limit" min="1" step="1" placeholder="100" autocomplete="off" />
       </div>
+      <label class="config-toggle-field config-toggle-field--brow" for="animated-brow">
+        <input type="checkbox" id="animated-brow" />
+        <span class="config-toggle-preview config-brow-idle-preview" aria-hidden="true"></span>
+        <div class="config-toggle-copy">
+          <span class="config-toggle-title">Animated Brow</span>
+          <span class="config-toggle-description">Replace click, typing, and highlight cursor cues with the Brow character animation and keep Brow idling at the last action position.</span>
+        </div>
+      </label>
+      <label class="config-toggle-field" for="html-app-auto-approve">
+        <input type="checkbox" id="html-app-auto-approve" />
+        <div class="config-toggle-copy">
+          <span class="config-toggle-title">Always Allow HTML Apps</span>
+          <span class="config-toggle-description">Skip HTML app approval cards and render generated HTML apps inline automatically. Only enable this if you accept the risk of running generated JavaScript.</span>
+        </div>
+      </label>
     </div>
 
     <hr class="config-divider" />

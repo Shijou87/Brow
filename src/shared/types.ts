@@ -75,6 +75,10 @@ export interface BrowserComboboxState {
   controlledPopup?: BrowserComboboxControlledPopup;
 }
 
+/**
+ * One visible page object captured in a Browser Snapshot and addressable by a
+ * short-lived Brow ref.
+ */
 export interface BrowserSnapshotElement {
   ref: string;
   parentRef?: string;
@@ -93,6 +97,10 @@ export interface BrowserSnapshotElement {
   combobox?: BrowserComboboxState;
 }
 
+/**
+ * A ref-oriented view of the current page used for planning and ref-based
+ * browser execution.
+ */
 export interface BrowserSnapshot {
   ok: boolean;
   snapshotId: string;
@@ -232,6 +240,10 @@ export interface BrowserFormSnapshotForm {
   submitRefs: string[];
 }
 
+/**
+ * Form-oriented semantic snapshot that groups fields, purposes, safe current
+ * values, and submit structure for higher-confidence form automation.
+ */
 export interface BrowserFormSnapshot {
   ok: boolean;
   snapshotId: string;
@@ -248,6 +260,10 @@ export interface BrowserFormSnapshot {
   error?: string;
 }
 
+/**
+ * Cross-context request sent from the side panel into the Browser Snapshot
+ * engine for capture, resolution, or ref-based execution.
+ */
 export type BrowserSnapshotOperation =
   | {
     kind: 'snapshot';
@@ -554,6 +570,10 @@ export interface WorkflowDemonstrationStep {
   completedAt?: number;
 }
 
+/**
+ * Conversation-scoped replay artifact built from recorded user interactions
+ * and stored as structured Brow evidence rather than as a raw macro.
+ */
 export interface WorkflowDemonstration {
   id: string;
   title: string;
@@ -626,6 +646,9 @@ export interface DomainSkillProposalDraft {
 
 export type DomainMemoryOutcome = 'neutral' | 'success' | 'failure';
 
+/**
+ * Agent-managed durable lesson about how a domain or page pattern behaves.
+ */
 export interface DomainMemoryEntry {
   id: string;
   version: 1;
@@ -670,6 +693,9 @@ export interface DomainTrustSetting {
 
 // ─── Brow Interaction Skills ───────────────────────────────────────────────
 
+/**
+ * Built-in, read-only Brow skill content for reusable cross-site mechanics.
+ */
 export interface InteractionSkillEntry {
   id: string;
   name: string;
@@ -694,6 +720,48 @@ export interface SkillMention extends SkillMentionReference {
   description: string;
   tags: string[];
   content: string;
+}
+
+// ─── HTML App Artifacts ────────────────────────────────────────────────────
+
+export type HtmlAppRenderTarget = 'inline' | 'tab' | 'both';
+
+export interface HtmlAppArtifactMessageRef {
+  artifactId: string;
+  revisionId: string;
+}
+
+export interface HtmlAppArtifactRevision {
+  id: string;
+  title: string;
+  html: string;
+  summary?: string;
+  renderTargetHint: HtmlAppRenderTarget;
+  createdAt: number;
+}
+
+export interface HtmlAppArtifact {
+  id: string;
+  title: string;
+  latestRevisionId: string;
+  createdAt: number;
+  updatedAt: number;
+  revisions: HtmlAppArtifactRevision[];
+}
+
+export interface HtmlAppRenderRequest {
+  id: string;
+  artifactId: string;
+  revisionId: string;
+  title: string;
+  html: string;
+  renderTargetHint: HtmlAppRenderTarget;
+  summary?: string;
+  createdAt: number;
+}
+
+export interface HtmlAppExecutionPreferences {
+  alwaysAllowExecution: boolean;
 }
 
 // ─── MCP Config ─────────────────────────────────────────────────────────────

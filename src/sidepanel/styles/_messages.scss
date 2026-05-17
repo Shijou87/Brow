@@ -16,13 +16,72 @@
     line-height: 1.65;
     color: $text-primary;
 
+    > :first-child {
+      margin-top: 0;
+    }
+
+    > :last-child {
+      margin-bottom: 0;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4,
+    h5,
+    h6 {
+      margin: 0 0 10px;
+      color: $text-primary;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+
+    h1 {
+      font-size: 22px;
+    }
+
+    h2 {
+      font-size: 19px;
+    }
+
+    h3 {
+      font-size: 17px;
+    }
+
+    h4,
+    h5,
+    h6 {
+      font-size: 15px;
+    }
+
+    p {
+      margin: 0 0 10px;
+    }
+
+    ul,
+    ol {
+      margin: 0 0 10px 18px;
+      padding: 0;
+    }
+
+    li + li {
+      margin-top: 4px;
+    }
+
+    hr {
+      margin: 12px 0;
+      border: 0;
+      border-top: 1px solid rgba(186, 201, 204, 0.24);
+    }
+
     a {
       color: $accent;
       text-decoration: underline;
       text-underline-offset: 3px;
     }
 
-    code {
+    :not(pre) > code,
+    code:not(pre code) {
       display: inline-block;
       margin: 0 2px;
       padding: 1px 6px;
@@ -32,6 +91,27 @@
       color: $secondary;
       font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
       font-size: 12px;
+    }
+
+    pre {
+      margin: 0 0 12px;
+      padding: 12px 14px;
+      border: 1px solid rgba(186, 201, 204, 0.18);
+      background: rgba(8, 8, 12, 0.65);
+      overflow-x: auto;
+    }
+
+    pre code {
+      display: block;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: $text-primary;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre;
     }
   }
 

@@ -1,100 +1,142 @@
-# Agent WebMCP
+<p align="center">
+  <img src="docs/assets/brow-headline.png" alt="Brow" width="820" />
+</p>
 
-Chrome extension (Manifest V3) that runs a **LangGraph.js React agent** in the browser side-panel with support for:
+<p align="center">
+  <strong>Brow</strong> is an experimental Chrome side-panel AI browser agent for builders who want <strong>LangGraph.js</strong>, <strong>MCP</strong>, <strong>WebMCP</strong>, and semantic browser automation inside a real Chrome session.
+</p>
 
-- **MCP Servers** – connect to remote MCP (Model Context Protocol) HTTP servers, discover their tools, and invoke them from the agent
-- **MCP Apps** – render approved app-backed MCP tool results inline in chat through a sandboxed iframe host
-- **WebMCP** – dynamically discover tools exposed by the active tab via the WebMCP page-level protocol
-- **Tab Tools** – built-in browser tools for listing tabs, reading content, inspecting interactive elements, clicking, typing, filling forms, navigating, and screenshot analysis
-- **Configurable LLM** – switch between OpenAI-compatible endpoints from the options page
+<p align="center">
+  <img alt="Status: Experimental" src="https://img.shields.io/badge/Status-Experimental-A855F7?style=for-the-badge" />
+  <img alt="Manifest V3" src="https://img.shields.io/badge/Chrome-Manifest%20V3-2F2F2F?style=for-the-badge&logo=googlechrome&logoColor=white" />
+  <img alt="LangGraph.js" src="https://img.shields.io/badge/Agent-LangGraph.js-1B1B1B?style=for-the-badge" />
+  <img alt="MCP and WebMCP" src="https://img.shields.io/badge/Tools-MCP%20%2F%20WebMCP-7C3AED?style=for-the-badge" />
+  <img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-2FF801?style=for-the-badge&logo=apache&logoColor=111111" />
+</p>
 
-## Architecture
+<p align="center">
+  <sub>Public product name: <strong>Brow</strong>. Current repository/package identifier: <code>agent-webmcp</code>.</sub>
+</p>
 
-```
-┌──────────────┐     ┌───────────────┐     ┌────────────────┐
-│  Side Panel  │◄───►│  Background   │◄───►│ Content Script │
-│  (agent UI)  │     │  (service wkr)│     │  (page bridge) │
-└──────────────┘     └───────────────┘     └────────────────┘
-       │                                          │
-       ▼                                          ▼
-  LangGraph.js                              WebMCP discovery
-  React Agent                               on active tab
-       │
-       ├─► Built-in tab tools
-       ├─► WebMCP page tools
-       └─► MCP server tools (HTTP / SSE)
-```
+## Why Brow
 
-| Directory | Purpose |
+Brow is built for people experimenting with serious browser agents, not toy demos.
+
+- It runs inside the user's live Chrome session instead of spinning up a detached automation browser.
+- It gives the agent semantic browser context through **Browser Snapshots**, form semantics, and structured refs instead of raw DOM dumping.
+- It combines three tool worlds in one side panel: built-in browser tools, page-local **WebMCP** tools, and remote **MCP** server tools.
+- It keeps browser-native workflows close to the model with workflow demonstrations, reusable skills, and local domain memory.
+
+## Core Capabilities
+
+| Capability | What Brow provides |
 |---|---|
-| `src/sidepanel/` | Agent, chat UI, MCP client, tool factories |
-| `src/background/` | Service worker – side-panel lifecycle, tab messaging |
-| `src/content-script/` | Content script + page bridge for WebMCP discovery |
-| `src/options/` | Options page for LLM configuration |
-| `src/shared/` | Shared types and logger |
-| `test-page/` | Local HTML page that exposes sample WebMCP tools |
-| `test/fastmcp-app/` | Manual FastMCP MCP Apps harness for inline app rendering |
+| Browser Snapshots | Compact, ref-based snapshots of the live DOM so the agent can reason over visible structure and act on fresh targets. |
+| Whole-form semantics | Form snapshots with field purposes, safe current values, validation cues, and submit semantics for batch form work. |
+| WebMCP page tools | Dynamic discovery of page-local tools exposed through `navigator.modelContext` on the active tab. |
+| Remote MCP servers and MCP Apps | HTTP/SSE MCP connectivity, tool discovery, and inline rendering for approved app-backed tool results. |
+| Real side-panel workflow | A Manifest V3 Chrome extension with chat, tool timeline, approvals, configuration, and tab-aware execution in the side panel. |
+| Workflow demonstrations, skills, and memory | Recorded workflows, skill mentions, domain memory, and reusable operational knowledge that help Brow improve over time. |
 
-## Prerequisites
+## Architecture At A Glance
 
-- **Node.js** ≥ 20
-- **npm** ≥ 9
+```text
+┌────────────────────────── Chrome Session ──────────────────────────┐
+│                                                                    │
+│  Side Panel UI + Agent Runtime                                     │
+│  - chat, transcript, config, approvals, tool timeline              │
+│  - LangGraph.js agent assembly and streaming                       │
+│            │                                                       │
+│            ├── Built-in browser tools                              │
+│            ├── Remote MCP server tools and MCP Apps                │
+│            └── WebMCP tool wrappers                                │
+│                         │                                          │
+│                 Background service worker                          │
+│                         │                                          │
+│              Content scripts + page bridge runtime                 │
+│                         │                                          │
+│           Live tab DOM, browser state, navigator.modelContext      │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
 
-## Getting Started
+For the maintainer-oriented runtime map, see [docs/maintainer-architecture.md](docs/maintainer-architecture.md).
+
+## Quick Start
+
+### Prerequisites
+
+- Node.js `>= 20`
+- npm `>= 9`
+- Chrome or another Chromium browser with extension developer mode
+
+### 1. Install dependencies
 
 ```bash
-# Install dependencies
 npm install
-
-# Development build (watch mode)
-npm run dev
-
-# Production build
-npm run build
-
-# Clean build output
-npm run clean
 ```
 
-## Loading the Extension
+### 2. Build Brow
 
-1. Run `npm run build` (or `npm run dev` for watch mode).
-2. Open **chrome://extensions** in Chrome.
-3. Enable **Developer mode**.
-4. Click **Load unpacked** and select the `dist/` folder.
-5. Click the extension icon to open the side panel.
+```bash
+# production build
+npm run build
 
-## Configuration
+# or keep a watch build running during development
+npm run dev
+```
 
-Open the extension **Options** page (right-click extension icon → *Options*) to configure:
+### 3. Load the extension
 
-- **LLM endpoint** – base URL, API key, model name
-- **Tool toggles** – enable / disable individual tools
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select the local `dist/` folder generated by the build.
+5. Open Brow from the extension icon or Chrome side panel.
 
-MCP servers can be added directly from the side panel via the server management button (stack icon next to the tools wrench).
+### 4. Configure the model and tools
 
-## MCP Server Support
+1. Open Brow's **Options** page or the in-sidepanel config surface.
+2. Set your OpenAI-compatible base URL, API key, model, and context window.
+3. Optionally configure a VLM endpoint, MCP servers, and feature toggles such as WebMCP or MCP Apps.
 
-The extension supports connecting to remote [MCP](https://modelcontextprotocol.io) servers over HTTP (Streamable HTTP / SSE transport).
+## Useful Scripts
 
-1. Click the **server stack icon** in the side-panel header.
-2. Enter a name, URL and optional auth token.
-3. Click **Connect** – the server's tools are discovered and added to the agent automatically.
-4. Connected servers and their tools persist across sessions via `chrome.storage.local`.
-
-## Scripts
-
-| Command | Description |
+| Command | Purpose |
 |---|---|
-| `npm run dev` | Webpack watch build (development) |
-| `npm run build` | Webpack production build → `dist/` |
-| `npm run clean` | Remove `dist/` |
+| `npm run dev` | Webpack watch build for extension development |
+| `npm run build` | Production build to `dist/` |
+| `npm run clean` | Remove build output |
+| `npm run typecheck` | TypeScript validation without emitting files |
+| `npm test` | Prepare fixtures and run the Node test suite |
+| `npm run verify` | Run typecheck, tests, and production build |
 
-## Tech Stack
+## Project Map
 
-- TypeScript 5
-- Webpack 5
-- LangGraph.js / LangChain
-- MCP SDK (`@modelcontextprotocol/sdk`)
-- SCSS
-- Chrome Extensions Manifest V3
+| Path | Purpose |
+|---|---|
+| `src/sidepanel/` | Side-panel UI, LangGraph agent runtime, tool assembly, MCP client, skills, and chat flow |
+| `src/content-script/` | Browser Snapshot engine, WebMCP bridge, DOM inspection, and workflow recording |
+| `src/background/` | Tab lifecycle observation, message routing, and WebMCP discovery coordination |
+| `src/options/` | Extension options page for endpoint, transport, and feature-level configuration |
+| `src/shared/` | Shared contracts, storage helpers, config normalization, and reusable types |
+| `src/html-app-view/` | Brow-hosted HTML app rendering surface |
+| `docs/` | Feature guide, maintainer architecture, ADRs, and visual assets |
+| `tests/` | Node-based test suite for architecture, tool shape, browser semantics, and UI formatting |
+| `test-page/` | Local fixture pages for WebMCP and browser automation development |
+
+## Documentation
+
+- [docs/extension-features.md](docs/extension-features.md) for the implementation-backed feature inventory
+- [docs/maintainer-architecture.md](docs/maintainer-architecture.md) for runtime flow and code ownership
+- [CONTEXT.md](CONTEXT.md) for Brow's canonical product vocabulary
+- [docs/adr/](docs/adr/) for architectural decisions and design history
+- [docs/full-spectrum-automation-plan.md](docs/full-spectrum-automation-plan.md) for deeper planning context around Brow's automation direction
+
+## Status
+
+Brow is currently **experimental** and optimized for builders, contributors, and early adopters who are comfortable loading an unpacked extension and iterating locally. The README intentionally describes a self-hosted workflow; it does not assume Chrome Web Store distribution or a fully stabilized public API surface yet.
+
+## License
+
+Brow is licensed under the [Apache License 2.0](LICENSE).

@@ -1,3 +1,9 @@
+// ─── Workflow Demonstration Recorder ───────────────────────────────────────
+// Captures live DOM interactions and turns them into replay-oriented Brow
+// evidence through the shared workflow step-builder pipeline. This module owns
+// the translation from page events into targets, pointer traces, keyboard
+// evidence, and safe captured values.
+
 import type {
   WorkflowDemonstration,
   WorkflowDemonstrationKeyboardEvidence,
@@ -17,7 +23,7 @@ import type {
   WorkflowRecordingStatusResult,
   WorkflowRecordingStopResult,
 } from '../shared/messages';
-import { StepBuilder, type WorkflowRawValueInput } from '../shared/workflow-demonstration';
+  import { StepBuilder, type WorkflowRawValueInput } from '../shared/workflow-demonstration';
 import {
   buildWorkflowTargetSelector as buildSelector,
   cleanOptionalDomText as cleanInlineText,
@@ -339,6 +345,10 @@ function defaultTitleForSession(): string {
   return `Workflow demonstration on ${hostname}`;
 }
 
+/**
+ * Creates the page-local recorder used by workflow recording bridge messages
+ * to start, stop, and inspect a live capture session.
+ */
 export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationRecorder {
   let session: RecorderSession | null = null;
 

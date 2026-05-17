@@ -17,8 +17,12 @@ import {
   type MCPAppRenderRequest,
   type MCPToolDescriptor,
 } from './mcp-client';
+import {
+  DEFAULT_SANDBOXED_HTML_IFRAME_SANDBOX,
+  createSandboxedHtmlReadyMessage,
+  type SandboxedHtmlResource,
+} from './sandboxed-html';
 
-const INNER_IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms';
 const MIN_APP_HEIGHT = 240;
 const MAX_APP_HEIGHT = 720;
 
@@ -30,13 +34,9 @@ type ResourceContent = {
   _meta?: Record<string, unknown>;
 };
 
-export interface MCPAppLoadedResource {
+export interface MCPAppLoadedResource extends SandboxedHtmlResource {
   uri: string;
   mimeType: string;
-  html: string;
-  csp?: McpUiResourceCsp;
-  permissions?: McpUiResourcePermissions;
-  prefersBorder?: boolean;
 }
 
 export interface MCPAppMountOptions {
@@ -276,12 +276,10 @@ export class MCPAppHost {
 
     bridge.onsandboxready = () => {
       sandboxReady = true;
-      void bridge.sendSandboxResourceReady({
-        html: resource.html,
-        sandbox: INNER_IFRAME_SANDBOX,
-        csp: resource.csp,
-        permissions: resource.permissions,
-      });
+      void bridge.sendSandboxResourceReady(createSandboxedHtmlReadyMessage({
+        ...resource,
+        sandbox: resource.sandbox ?? DEFAULT_SANDBOXED_HTML_IFRAME_SANDBOX,
+      }).params);
     };
 
     bridge.oninitialized = () => {

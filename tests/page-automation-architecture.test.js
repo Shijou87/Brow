@@ -114,6 +114,18 @@ test('page-automation delegates the settling probe to the injected browser runti
   assert.match(runtimeEntrySource, /installPageAutomationRuntime\(globalThis\);/);
 });
 
+test('page-automation runtime exposes a final Brow overlay dismiss hook', () => {
+  const actionRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/action-runtime.ts');
+  const interactionRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/interaction-runtime.ts');
+  const runtimeInstallSource = read('src/sidepanel/tab-tools/page-automation/runtime/runtime-install.ts');
+  const tabExecutionSource = read('src/sidepanel/tab-tools/page-automation/tab-action-execution.ts');
+
+  assert.match(actionRuntimeSource, /const dismissPageAutomationOverlay = \(delay\?: number\) =>/);
+  assert.match(interactionRuntimeSource, /const dismissOverlay = \(delay = 0\) =>/);
+  assert.match(runtimeInstallSource, /dismissPageAutomationOverlay/);
+  assert.match(tabExecutionSource, /export async function dismissBrowAutomationOverlays/);
+});
+
 test('tab-action-execution delegates injected browser actions to the injected runtime module', () => {
   const tabExecutionSource = read('src/sidepanel/tab-tools/page-automation/tab-action-execution.ts');
 
@@ -123,6 +135,87 @@ test('tab-action-execution delegates injected browser actions to the injected ru
     tabExecutionSource.includes('function runPageAutomationAction('),
     false,
     'tab-action-execution.ts should delegate runPageAutomationAction instead of re-defining it inline',
+  );
+});
+
+test('tab-action-execution hydrates Animated Brow visual settings from sidepanel runtime config before dispatch', () => {
+  const tabExecutionSource = read('src/sidepanel/tab-tools/page-automation/tab-action-execution.ts');
+  const runtimeTypesSource = read('src/sidepanel/tab-tools/page-automation/runtime/types.ts');
+  const injectedRuntimeSource = read('src/sidepanel/tab-tools/page-automation/injected-action-runtime.ts');
+
+  assert.match(runtimeTypesSource, /export interface PageAutomationVisualSettings/);
+  assert.match(runtimeTypesSource, /animatedBrow: boolean/);
+  assert.match(injectedRuntimeSource, /PageAutomationVisualSettings/);
+
+  assert.match(tabExecutionSource, /loadSidepanelConfig/);
+  assert.match(tabExecutionSource, /async function loadPageAutomationVisualSettings\(\)/);
+  assert.match(tabExecutionSource, /animatedBrow: config\.runtime\.animatedBrow === true/);
+
+  for (const actionKind of ['click', 'highlight', 'type', 'fillForm']) {
+    assert.match(
+      tabExecutionSource,
+      new RegExp(`kind: '${actionKind}'[\\s\\S]*visualSettings`),
+      `tab-action-execution.ts should pass visualSettings for ${actionKind} actions`,
+    );
+  }
+});
+
+test('page-automation runtime exposes Brow spritesheet assets and shared character constants', () => {
+  const baseRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/base-runtime.ts');
+  const interactionRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/interaction-runtime.ts');
+  const manifestSource = read('manifest.json');
+
+  assert.match(baseRuntimeSource, /chrome\.runtime\.getURL\('icons\/brow-spritesheet\.png'\)/);
+  assert.match(baseRuntimeSource, /BROW_CHARACTER_COLUMNS = 12/);
+  assert.match(baseRuntimeSource, /BROW_CHARACTER_ROWS = 6/);
+  assert.match(baseRuntimeSource, /BROW_CHARACTER_POINT_ROW = 3/);
+  assert.match(baseRuntimeSource, /BROW_CHARACTER_WALK_DOWN_ROW = 4/);
+  assert.match(baseRuntimeSource, /BROW_CHARACTER_WALK_UP_ROW = 5/);
+  assert.match(interactionRuntimeSource, /cursor\.style\.backgroundImage = `url\("\$\{base\.BROW_CHARACTER_SPRITESHEET_URL\}"\)`/);
+  assert.match(interactionRuntimeSource, /cursor\.style\.backgroundImage = `url\("\$\{base\.CURSOR_SPRITESHEET_URL\}"\)`/);
+  assert.match(manifestSource, /icons\/brow-spritesheet\.png/);
+});
+
+test('action-runtime forwards visual settings into animated preview helpers while hover stays on the legacy path', () => {
+  const actionRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/action-runtime.ts');
+  const interactionRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/interaction-runtime.ts');
+
+  assert.match(actionRuntimeSource, /previewHighlight\([\s\S]*action\.visualSettings/);
+  assert.match(actionRuntimeSource, /previewClick\([\s\S]*action\.visualSettings/);
+  assert.match(actionRuntimeSource, /previewFieldEdit\([\s\S]*action\.visualSettings/);
+  assert.match(interactionRuntimeSource, /isAnimatedBrowEnabled/);
+  assert.match(interactionRuntimeSource, /startBrowIdle/);
+  assert.match(interactionRuntimeSource, /startBrowPointing/);
+  assert.match(interactionRuntimeSource, /animateBrowJump/);
+  assert.match(actionRuntimeSource, /previewHover\(el, message\)/);
+});
+
+test('animated highlight renders the overlay label as a Brow speech bubble that follows the sprite', () => {
+  const interactionRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/interaction-runtime.ts');
+
+  assert.match(interactionRuntimeSource, /brow-automation-badge\[data-variant="speech"\]/);
+  assert.match(interactionRuntimeSource, /badge\.dataset\.speaker = 'brow'/);
+  assert.match(interactionRuntimeSource, /function|const\s+positionSpeechBubbleForBrow/);
+  assert.match(interactionRuntimeSource, /const characterCenterX = characterLeft \+ base\.BROW_CHARACTER_DISPLAY_WIDTH \/ 2/);
+  assert.match(interactionRuntimeSource, /const preferredLeft = characterCenterX - badgeWidth \/ 2/);
+  assert.match(interactionRuntimeSource, /characterTop \+ base\.BROW_CHARACTER_DISPLAY_HEIGHT \+ 12/);
+  assert.match(interactionRuntimeSource, /showBadgeFollowingBrow\(message, currentState\)/);
+  assert.match(interactionRuntimeSource, /startBrowIdle\(currentState\)/);
+});
+
+test('animated Brow keeps a vertically flipped ground shadow, including during jumps', () => {
+  const interactionRuntimeSource = read('src/sidepanel/tab-tools/page-automation/runtime/interaction-runtime.ts');
+
+  assert.match(interactionRuntimeSource, /brow-automation-brow-shadow/);
+  assert.match(interactionRuntimeSource, /root\.appendChild\(shadow\)/);
+  assert.match(interactionRuntimeSource, /shadow\.classList\.add\('visible'\)/);
+  assert.match(interactionRuntimeSource, /const shadowYOffset = Math\.round\(base\.BROW_CHARACTER_DISPLAY_HEIGHT \/ 3\)/);
+  assert.match(interactionRuntimeSource, /shadowGroundY:\s*start\.y/);
+  assert.match(interactionRuntimeSource, /scaleY\(-\$\{shadowScaleY\}\) skewX\(/);
+  assert.equal(
+    /if \(row !== base\.BROW_CHARACTER_JUMP_ROW\)/.test(interactionRuntimeSource),
+    false,
+    'jump shadow rendering should no longer be gated by row !== jump row',
   );
 });
 

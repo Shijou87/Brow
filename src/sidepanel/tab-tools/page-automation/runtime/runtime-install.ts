@@ -24,10 +24,11 @@ export function installPageAutomationRuntime(
   const existing = getInstalledPageAutomationRuntime(targetGlobal);
   if (existing) return existing;
 
-  const { runPageAutomationAction } = createPageAutomationActionRuntime();
+  const { runPageAutomationAction, dismissPageAutomationOverlay } = createPageAutomationActionRuntime();
   const runtime: InstalledPageAutomationRuntime = {
     runPageAutomationAction,
     runPageSettlingProbe,
+    dismissPageAutomationOverlay,
   };
   (targetGlobal as typeof globalThis & Record<string, unknown>)[PAGE_AUTOMATION_RUNTIME_GLOBAL_KEY] = runtime;
   return runtime;

@@ -4,6 +4,8 @@ This document describes the currently available features in the Brow Chrome exte
 
 It focuses on features that are present in the codebase now, not on ADR ideas that are not yet exposed as top-level user features or callable tools.
 
+For contributor-oriented runtime flow and code ownership, see the [Maintainer Architecture Guide](./maintainer-architecture.md).
+
 ## 1. What Brow Is
 
 Brow is a Manifest V3 Chrome extension that places an AI browser agent inside the Chrome side panel.
@@ -296,7 +298,9 @@ The generated names are tab-scoped so that:
 
 ### 5.3 Aftermath Capture For Mutating Page Tools
 
-When a WebMCP tool appears to mutate page state, Brow can capture a post-invocation aftermath snapshot so the agent sees the resulting page state rather than treating the tool call as an opaque black box.
+When a WebMCP tool appears likely to mutate page state, Brow can append a fresh browser snapshot after a short wait so the agent sees likely aftermath state rather than treating the tool call as an opaque black box.
+
+This behavior is heuristic-driven rather than a blanket guarantee for every page tool invocation.
 
 ## 6. Remote MCP Server Features
 
@@ -464,13 +468,15 @@ Users can:
 
 Interaction Skills are built-in, read-only Brow mechanics for cross-site behavior.
 
-The shipped built-in Interaction Skills include:
+The shipped built-in Interaction Skills currently include:
 
+- Brow HTML App Theme,
 - Iframe Navigation,
 - Shadow DOM Controls,
 - Dialogs And Overlays,
 - Uploads And Pickers,
-- Tabs And Windows.
+- Current Tab App Adaptation,
+- and Tabs And Windows.
 
 These are always available as packaged capabilities rather than user-authored skills.
 
@@ -642,6 +648,7 @@ Those ideas are useful design context, but they are not listed here as shipped t
 ## 15. Related Repository Documents
 
 - [README](../README.md)
+- [Maintainer Architecture Guide](./maintainer-architecture.md)
 - [CONTEXT](../CONTEXT.md)
 - [ADR 0001: DOM-Derived Browser Snapshots](./adr/0001-dom-derived-browser-snapshots.md)
 - [ADR 0002: MV3 Sandboxed MCP App Host](./adr/0002-mv3-sandboxed-mcp-app-host.md)

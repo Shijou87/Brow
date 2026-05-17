@@ -522,6 +522,13 @@
   flex: 1;
 }
 
+.conversation-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .conversation-item-title {
   color: $text-primary;
   font-size: 13px;
@@ -534,12 +541,18 @@
 .conversation-item-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 5px;
   margin-top: 4px;
   color: $text-secondary;
   font-size: 11px;
 }
 
+.conversation-item-favorite-label {
+  color: $accent;
+}
+
+.conversation-favorite-btn,
 .conversation-delete-btn,
 .mcp-reconnect-btn,
 .mcp-remove-btn {
@@ -558,6 +571,23 @@
     color 0.12s ease,
     border-color 0.12s ease,
     opacity 0.12s ease;
+}
+
+.conversation-favorite-btn {
+  opacity: 0.42;
+
+  .conversation-item:hover &,
+  .conversation-item.active &,
+  &.is-favorite {
+    opacity: 1;
+  }
+
+  &:hover,
+  &.is-favorite {
+    border-color: rgba(168, 85, 247, 0.52);
+    background: rgba(168, 85, 247, 0.12);
+    color: $accent;
+  }
 }
 
 .conversation-delete-btn {

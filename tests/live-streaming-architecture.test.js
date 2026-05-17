@@ -23,11 +23,13 @@ test('agent queries mixed LangGraph stream modes and delegates live assistant te
 test('sidepanel controller renders live text immediately and keeps partial text on stop', () => {
   const controllerSource = read('src/sidepanel/sidepanel-controller.ts');
 
+  assert.match(controllerSource, /import\s+\{\s*dismissBrowAutomationOverlays\s*\}\s+from\s+'\.\/tab-tools\/page-automation\/tab-action-execution';/);
   assert.match(controllerSource, /this\.agent\.onStreamText\(\(text: string\) => \{/);
   assert.match(controllerSource, /view\.hideTypingIndicator\(\);/);
   assert.match(controllerSource, /view\.streamAssistantMessage\(text\);/);
   assert.match(controllerSource, /if \(response === 'Agent turn was interrupted\.'\) \{/);
   assert.match(controllerSource, /view\.finalizeStreaming\(\);/);
+  assert.match(controllerSource, /await dismissBrowAutomationOverlays\(\)\.catch\(/);
   assert.match(controllerSource, /view\.addSystemMessage\('Generation stopped\.'\);/);
   assert.doesNotMatch(controllerSource, /setTimeout\(\(\) => \{\s*view\.finalizeStreaming\(\);/);
 });

@@ -1,6 +1,7 @@
 import type { SkillRegistryEntry } from '../skills-registry';
 import type { InteractionSkillEntry, SkillMention, WebMCPToolDescriptor } from '../../shared/types';
 import { formatDomainSkillMatcherSummary } from '../skills-registry';
+import { BROW_HTML_APP_PROMPT_GUIDANCE } from '../../shared/html-app-artifact-guidance';
 
 interface PromptMCPToolDescriptor {
   name: string;
@@ -95,6 +96,8 @@ export function buildSystemPrompt(params: {
   prompt += '\n- If you discover durable site knowledge that should be reusable later, call skills_propose to save a pending Domain Skill proposal. When a Workflow Demonstration is relevant, synthesize site knowledge from it instead of copying raw steps verbatim.';
   prompt += '\n- Use http_fetch or other non-DOM shortcuts only when a Domain Skill or explicit product rule makes the shortcut safe and equivalent for the task.';
   prompt += '\n- browser_visual_query is perception-only. Use it selectively for ambiguous or high-risk outcomes, then verify actions against browser_snapshot refs.';
+  prompt += '\n- When the user would benefit from an interactive artifact such as a game, demo, preview, calculator, or mini UI, proactively call html_artifact_upsert with one self-contained HTML document instead of only describing the result in prose.';
+  prompt += `\n- ${BROW_HTML_APP_PROMPT_GUIDANCE}`;
   prompt += '\n- Selector-based tabs_* tools remain fallback compatibility tools. Do not hand-author tag-specific CSS guesses like `button[aria-label="Search"]`; use browser_snapshot/browser_click first, or use simple locators like `heading="Daily Summary"`, `text="Security"`, `title="Settings"`, or `placeholder="Search"` when a fallback is necessary.';
 
   const activeDomainSkills = domainSkillRegistry.filter((skill) => skill.enabled);

@@ -1,5 +1,30 @@
 import { z, type ZodTypeAny } from 'zod';
 
+function normalizeJsonSchemaValue(value: unknown, stripNull: boolean): unknown {
+  if (value === null) {
+    return stripNull ? undefined : null;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeJsonSchemaValue(entry, false));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const normalizedEntries = Object.entries(value).flatMap(([key, entryValue]) => {
+    const normalizedValue = normalizeJsonSchemaValue(entryValue, true);
+    return normalizedValue === undefined ? [] : [[key, normalizedValue] as const];
+  });
+
+  return Object.fromEntries(normalizedEntries);
+}
+
+export function normalizeJsonSchemaParsedObject<T extends Record<string, unknown>>(value: T): T {
+  return normalizeJsonSchemaValue(value, false) as T;
+}
+
 export function jsonSchemaPropertyToZod(prop: Record<string, unknown>): ZodTypeAny {
   const type = prop.type as string | undefined;
 
@@ -39,9 +64,9 @@ export function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodObject<an
   const shape: Record<string, ZodTypeAny> = {};
   for (const [key, propSchema] of Object.entries(properties)) {
     let zodType = jsonSchemaPropertyToZod(propSchema);
+    if (!requiredFields.has(key)) zodType = zodType.nullable().optional();
     const description = propSchema.description as string | undefined;
     if (description) zodType = zodType.describe(description);
-    if (!requiredFields.has(key)) zodType = zodType.optional();
     shape[key] = zodType;
   }
 

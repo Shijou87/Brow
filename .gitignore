@@ -7,6 +7,10 @@ dist/
 .perf/
 NUL
 
+# Python artifacts
+__pycache__/
+*.py[cod]
+
 # OS files
 .DS_Store
 Thumbs.db

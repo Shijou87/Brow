@@ -1,3 +1,8 @@
+// ─── Browser Snapshot Engine ───────────────────────────────────────────────
+// Converts the live DOM into Brow's ref-based Browser Snapshot and Form
+// Snapshot contracts, keeps the short-lived ref registry needed for execution,
+// and resolves/executes snapshot operations requested from the extension.
+
 import { buildComboboxState } from '../shared/combobox-state';
 import {
   isGenericSnapshotLabel,
@@ -1173,6 +1178,13 @@ const {
   resolveStoredElement,
 });
 
+/**
+ * Executes one Browser Snapshot operation against the current page runtime.
+ *
+ * This is the content-script entry point used by the background worker and
+ * side-panel tools to capture snapshots, resolve stored refs or memory, and
+ * perform ref-based execution without exposing DOM internals to higher layers.
+ */
 export function runBrowserSnapshotOperation(operation: BrowserSnapshotOperation): BrowserSnapshotOperationResult {
   if (operation.kind === 'snapshot') {
     return captureSnapshot(operation.tabId, operation.options).snapshot;

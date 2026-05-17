@@ -15,7 +15,7 @@ import {
   invalidateBrowserContextSnapshotCache,
   primeBrowserContextSnapshotCache,
 } from './agent-runtime/browser-context';
-import { jsonSchemaToZod } from '../shared/json-schema';
+import { jsonSchemaToZod, normalizeJsonSchemaParsedObject } from '../shared/json-schema';
 import { buildToolSnapshotFields } from './agent-runtime/tool-result-snapshot';
 import { browserSnapshot, webmcpInvoke } from './tab-tools';
 
@@ -28,6 +28,10 @@ const MUTATING_NAME_RE = /^(set|update|create|delete|remove|insert|submit|click|
 const READ_ONLY_DESCRIPTION_RE = /\b(read|fetch|list|search|query|inspect|status|preview|describe)\b/i;
 const MUTATING_DESCRIPTION_RE = /\b(create|update|delete|remove|submit|click|type|fill|open|close|toggle|select|activate|navigate|scroll|drag|upload|download|login|logout|send|save)\b/i;
 
+/**
+ * Heuristically classifies a discovered WebMCP tool as page-mutating or
+ * read-oriented so Brow can decide whether aftermath context is useful.
+ */
 export function isLikelyMutatingWebMCPTool(descriptor: WebMCPToolDescriptor): boolean {
   if (MUTATING_NAME_RE.test(descriptor.name)) return true;
   if (READ_ONLY_NAME_RE.test(descriptor.name)) return false;
@@ -36,6 +40,10 @@ export function isLikelyMutatingWebMCPTool(descriptor: WebMCPToolDescriptor): bo
   return Boolean(descriptor.inputSchema && Object.keys(descriptor.inputSchema).length > 0);
 }
 
+/**
+ * Decides whether Brow should append a fresh Browser Snapshot after a WebMCP
+ * tool call completes.
+ */
 export function shouldCaptureWebMCPAftermath(
   descriptor: WebMCPToolDescriptor,
   result: { ok?: boolean } | undefined,
@@ -44,6 +52,10 @@ export function shouldCaptureWebMCPAftermath(
   return isLikelyMutatingWebMCPTool(descriptor);
 }
 
+/**
+ * Returns the small post-tool delay Brow uses before taking an aftermath
+ * snapshot for a likely mutating WebMCP tool.
+ */
 export function getWebMCPAftermathWaitMs(
   descriptor: WebMCPToolDescriptor,
   result: { ok?: boolean } | undefined,
@@ -81,7 +93,8 @@ export function createWebMCPTools(
     // Include tabId in tool name so tools from different tabs don't collide
     const langchainName = `webmcp_t${tabId}_${descriptor.name}`;
     const invokeTool = async (args: Record<string, unknown>): Promise<string> => {
-      const result = await webmcpInvoke(tabId, descriptor.name, args);
+      const normalizedArgs = normalizeJsonSchemaParsedObject(args);
+      const result = await webmcpInvoke(tabId, descriptor.name, normalizedArgs);
       const waitMs = getWebMCPAftermathWaitMs(descriptor, result);
       if (waitMs > 0) {
         await sleep(waitMs);

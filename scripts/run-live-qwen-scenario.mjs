@@ -302,10 +302,14 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
 
   const navigationScenarios = await loadTsModule(path.join(repoRoot, 'src/shared/navigation-test-scenarios.ts'));
-  const config = await loadTsModule(path.join(repoRoot, 'src/shared/config.ts'));
+  const htmlAppGuidance = await loadTsModule(path.join(repoRoot, 'src/shared/html-app-artifact-guidance.ts'));
+  const config = await loadTsModule(path.join(repoRoot, 'src/shared/config.ts'), {
+    './html-app-artifact-guidance': htmlAppGuidance,
+  });
   const promptModule = await loadTsModule(
     path.join(repoRoot, 'src/sidepanel/agent-runtime/prompt.ts'),
     {
+      '../../shared/html-app-artifact-guidance': htmlAppGuidance,
       '../skills-registry': {
         formatDomainSkillMatcherSummary: () => '',
       },

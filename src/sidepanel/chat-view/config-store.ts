@@ -75,6 +75,7 @@ export async function saveConfigEditorState(params: {
   mode: 'openai' | 'claude';
   fields: ProviderFields;
   recursionLimit: number;
+  animatedBrow: boolean;
   vlm: {
     baseUrl: string;
     apiKey: string;
@@ -97,6 +98,7 @@ export async function saveConfigEditorState(params: {
   config.runtime = {
     ...config.runtime,
     recursionLimit: params.recursionLimit,
+    animatedBrow: params.animatedBrow,
   };
   config.vlm = {
     ...config.vlm,
