@@ -12,7 +12,7 @@ Brow works inside the user's live Chrome session. Depending on how you configure
 
 ## 2. Scope Of This Policy
 
-This policy applies to the Brow Chrome extension as published by `[INSERT PUBLISHER NAME]`.
+This policy applies to the Brow Chrome extension as published by `Brow`.
 
 It covers:
 
@@ -162,7 +162,7 @@ Brow is not directed to children and is not intended for use by children.
 
 This Privacy Policy may be updated from time to time. The latest version should be made available at:
 
-`[INSERT PRIVACY POLICY URL OR REPOSITORY URL]`
+`https://github.com/Shijou87/Brow`
 
 The "Last updated" date at the top of this page will reflect the latest revision.
 
