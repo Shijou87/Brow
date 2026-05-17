@@ -19,9 +19,7 @@
 
 
 <p align="center">
-<video width="600" controls>
-  <source src="demo.mp4" type="video/mp4">
-</video>
+  <img src="docs/assets/Brow-intro.webp" width="760" alt="Brow Demo"/>
 </p>
 
 ## Why Brow
