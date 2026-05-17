@@ -2,6 +2,8 @@
   <img src="docs/assets/brow-headline.png" alt="Brow" width="820" />
 </p>
 
+
+
 <p align="center">
   <strong>Brow</strong> is an experimental Chrome side-panel AI browser agent for builders who want <strong>LangGraph.js</strong>, <strong>MCP</strong>, <strong>WebMCP</strong>, and semantic browser automation inside a real Chrome session.
 </p>
@@ -12,6 +14,14 @@
   <img alt="LangGraph.js" src="https://img.shields.io/badge/Agent-LangGraph.js-1B1B1B?style=for-the-badge" />
   <img alt="MCP and WebMCP" src="https://img.shields.io/badge/Tools-MCP%20%2F%20WebMCP-7C3AED?style=for-the-badge" />
   <img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-2FF801?style=for-the-badge&logo=apache&logoColor=111111" />
+</p>
+
+
+
+<p align="center">
+<video width="600" controls>
+  <source src="demo.mp4" type="video/mp4">
+</video>
 </p>
 
 ## Why Brow
