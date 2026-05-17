@@ -41,7 +41,7 @@ test('live navigation scenarios match the phased first slice', () => {
   assert.equal(getLiveNavigationScenario('live-google-flights-round-trip')?.runMode, 'manual');
   assert.equal(getLiveNavigationScenario('live-google-flights-round-trip')?.defaultPrompt, 'search a flight from paris to rabat for 12/05/2026 to 19/05/2026 using google flight');
   assert.equal(getLiveNavigationScenario('live-youtube-watch-playback')?.usesProductionPromptAssembly, true);
-  assert.equal(getLiveNavigationScenario('live-general-search-docs-result')?.modelStrategy, 'qwen-first-model-swappable');
+  assert.equal(getLiveNavigationScenario('live-general-search-docs-result')?.modelStrategy, 'primary-model-swappable');
   assert.equal(getLiveNavigationScenario('live-saucedemo-login')?.runMode, 'manual');
   assert.deepEqual(LIVE_FAILURE_BUCKETS, [
     'planner',

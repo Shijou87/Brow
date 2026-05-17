@@ -84,6 +84,13 @@
     <hr class="config-divider" />
     <h3 class="config-section-title">Vision LM (VLM)</h3>
     <div class="config-fields config-vlm-fields">
+      <label class="config-toggle-field" for="vlm-config-use-text-model">
+        <input type="checkbox" id="vlm-config-use-text-model" />
+        <div class="config-toggle-copy">
+          <span class="config-toggle-title">Use active text model for vision</span>
+          <span class="config-toggle-description">Reuse the active text endpoint, credentials, and model for screenshot analysis. Turn this off if vision needs its own endpoint or model.</span>
+        </div>
+      </label>
       <div class="config-field">
         <label for="vlm-config-endpoint">VLM Endpoint</label>
         <input type="text" id="vlm-config-endpoint" placeholder="http://host:port/v1" autocomplete="off" />
@@ -94,7 +101,7 @@
       </div>
       <div class="config-field">
         <label for="vlm-config-model">VLM Model</label>
-        <input type="text" id="vlm-config-model" placeholder="Qwen3-VL-30B-A3B-Thinking" autocomplete="off" />
+        <input type="text" id="vlm-config-model" placeholder="gpt-4.1-mini, gemini-2.5-flash, etc." autocomplete="off" />
       </div>
     </div>
 

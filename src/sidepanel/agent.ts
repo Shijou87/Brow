@@ -194,7 +194,7 @@ export interface AgentAPI {
   reconnectMCPServer: (id: string) => Promise<MCPServerEntry>;
   getMCPServers: () => MCPServerEntry[];
   restoreMCPServers: () => Promise<void>;
-  setVLMConfig: (config: VLMConfig) => void;
+  setVLMConfig: (config: VLMConfig | null) => void;
   getVLMConfig: () => VLMConfig | null;
   setRecursionLimit: (limit: number) => void;
   getRecursionLimit: () => number;
@@ -656,8 +656,12 @@ export class Agent implements AgentAPI {
     saveServers(configs);
   }
 
-  setVLMConfig(config: VLMConfig): void {
+  setVLMConfig(config: VLMConfig | null): void {
     this.vlmConfig = config;
+    if (!config) {
+      logInfo('agent', 'VLM config cleared');
+      return;
+    }
     logInfo('agent', 'VLM config set:', config.model, '@', config.baseUrl);
   }
 

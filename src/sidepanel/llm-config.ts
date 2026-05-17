@@ -1,5 +1,5 @@
 // ─── LLM Configuration ──────────────────────────────────────────────────────
-// Mirrors the proven pattern from agent-singleton / llmaas-config.
+// Mirrors Brow's direct-provider configuration flow.
 
 import { ChatOpenAI } from '@langchain/openai';
 import type { DirectLLMConfig } from '../shared/types';

@@ -21,6 +21,7 @@ import {
   DEFAULT_OPENAI_FIELDS,
   DEFAULT_VLM_CONFIG,
   normalizeContextWindow,
+  resolveVLMConfig,
   type ProviderFields,
 } from '../shared/config';
 import {
@@ -88,7 +89,7 @@ export interface ChatViewCallbacks {
   }) => void;
   onSystemPromptApply: (prompt: string) => void;
   onSkillRegistryApply: (skills: SkillRegistryEntry[]) => void;
-  onVLMConfigApply: (config: { baseUrl: string; apiKey: string; model: string }) => void;
+  onVLMConfigApply: (config: { baseUrl: string; apiKey: string; model: string; useTextModel: boolean } | null) => void;
   onRefreshWebMCP: () => void;
   onToolToggle: (toolName: string, enabled: boolean) => void;
   onToolGroupToggle: (toolNames: string[], enabled: boolean) => void;
@@ -1399,6 +1400,10 @@ export class ChatView {
       this.fetchModels();
     });
 
+    this.configPanel.querySelector('#vlm-config-use-text-model')?.addEventListener('change', () => {
+      this.updateVLMConfigModeUI();
+    });
+
     this.configPanel.addEventListener('keydown', (e) => e.stopPropagation());
     this.configPanel.addEventListener('keyup', (e) => e.stopPropagation());
     this.configPanel.addEventListener('keypress', (e) => e.stopPropagation());
@@ -1406,6 +1411,14 @@ export class ChatView {
 
   private togglePromptPanel(): void {
     this.setActiveSurface(this.activeSurface === 'prompt' ? 'chat' : 'prompt');
+  }
+
+  private updateVLMConfigModeUI(): void {
+    const useTextModel = (this.configPanel.querySelector('#vlm-config-use-text-model') as HTMLInputElement | null)?.checked === true;
+    ['vlm-config-endpoint', 'vlm-config-api-key', 'vlm-config-model'].forEach((id) => {
+      const input = this.configPanel.querySelector(`#${id}`) as HTMLInputElement | null;
+      if (input) input.disabled = useTextModel;
+    });
   }
 
   private populateConfigFields(): void {
@@ -1432,6 +1445,11 @@ export class ChatView {
       this.setInput('vlm-config-endpoint', vlm.baseUrl);
       this.setInput('vlm-config-api-key', vlm.apiKey);
       this.setInput('vlm-config-model', vlm.model);
+      const useTextModel = this.configPanel.querySelector('#vlm-config-use-text-model') as HTMLInputElement | null;
+      if (useTextModel) {
+        useTextModel.checked = vlm.useTextModel;
+      }
+      this.updateVLMConfigModeUI();
 
       this.configMode = saved.activeMode;
       const btns = this.configPanel.querySelectorAll('.config-mode-btn');
@@ -1530,16 +1548,19 @@ export class ChatView {
       };
     }
 
+    const rawVlmConfig = {
+      baseUrl: this.getInput('vlm-config-endpoint'),
+      apiKey: this.getInput('vlm-config-api-key'),
+      model: this.getInput('vlm-config-model'),
+      useTextModel: (this.configPanel.querySelector('#vlm-config-use-text-model') as HTMLInputElement | null)?.checked === true,
+    };
+
     void saveConfigEditorState({
       mode: this.configMode,
       fields,
       recursionLimit: Math.floor(recursionLimit),
       animatedBrow: (this.configPanel.querySelector('#animated-brow') as HTMLInputElement | null)?.checked === true,
-      vlm: {
-        baseUrl: this.getInput('vlm-config-endpoint'),
-        apiKey: this.getInput('vlm-config-api-key'),
-        model: this.getInput('vlm-config-model'),
-      },
+      vlm: rawVlmConfig,
     });
     const htmlAppAutoApprove = this.configPanel.querySelector('#html-app-auto-approve') as HTMLInputElement | null;
     this.callbacks.onHtmlAppExecutionPreferenceChange(htmlAppAutoApprove?.checked === true);
@@ -1550,16 +1571,7 @@ export class ChatView {
       recursionLimit: Math.floor(recursionLimit),
     });
 
-    // Apply VLM config
-    const vlmBaseUrl = this.getInput('vlm-config-endpoint');
-    const vlmModel = this.getInput('vlm-config-model');
-    if (vlmBaseUrl && vlmModel) {
-      this.callbacks.onVLMConfigApply({
-        baseUrl: vlmBaseUrl,
-        apiKey: this.getInput('vlm-config-api-key'),
-        model: vlmModel,
-      });
-    }
+    this.callbacks.onVLMConfigApply(resolveVLMConfig(rawVlmConfig, fields));
 
     if (statusEl) {
       statusEl.textContent = `Applied! Using ${this.configMode === 'openai' ? 'OpenAI Compatible' : 'Claude'} mode.`;

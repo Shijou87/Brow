@@ -48,10 +48,36 @@ export const DEFAULT_CLAUDE_FIELDS: ProviderFields = {
 };
 
 export const DEFAULT_VLM_CONFIG: VLMConfig = {
-  baseUrl: 'http://frbucawdl08.av.lab.ge-healthcare.net:4010/v1',
+  baseUrl: '',
   apiKey: '',
-  model: 'Qwen3-VL-30B-A3B-Thinking',
+  model: '',
+  useTextModel: true,
 };
+
+export function resolveVLMConfig(
+  config: VLMConfig,
+  llmFields: ProviderFields,
+): VLMConfig | null {
+  if (config.useTextModel) {
+    return {
+      baseUrl: llmFields.baseUrl,
+      apiKey: llmFields.apiKey,
+      model: llmFields.model,
+      useTextModel: true,
+    };
+  }
+
+  const baseUrl = config.baseUrl.trim();
+  const model = config.model.trim();
+  if (!baseUrl || !model) return null;
+
+  return {
+    baseUrl,
+    apiKey: config.apiKey,
+    model,
+    useTextModel: false,
+  };
+}
 
 export const DEFAULT_MCP_CONFIG: MCPConfig = {
   endpoint: '',

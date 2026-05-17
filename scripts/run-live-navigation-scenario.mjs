@@ -294,8 +294,8 @@ function printList(scenarios) {
 }
 
 function printUsage() {
-  console.log('Usage: node scripts/run-live-qwen-scenario.mjs --list');
-  console.log('   or: node scripts/run-live-qwen-scenario.mjs <scenario-slug> [--complex] [--replay-file path] [--browser-context-file path] [--dry-run] [--base-url url] [--api-key key] [--model model]');
+  console.log('Usage: node scripts/run-live-navigation-scenario.mjs --list');
+  console.log('   or: node scripts/run-live-navigation-scenario.mjs <scenario-slug> [--complex] [--replay-file path] [--browser-context-file path] [--dry-run] [--base-url url] [--api-key key] [--model model]');
 }
 
 async function main() {

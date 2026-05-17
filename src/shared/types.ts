@@ -790,6 +790,7 @@ export interface VLMConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  useTextModel: boolean;
 }
 
 // ─── Extension settings (stored via chrome.storage) ─────────────────────────

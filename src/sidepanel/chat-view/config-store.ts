@@ -80,6 +80,7 @@ export async function saveConfigEditorState(params: {
     baseUrl: string;
     apiKey: string;
     model: string;
+    useTextModel: boolean;
   };
 }): Promise<void> {
   const config = await loadSidepanelConfig();

@@ -10,7 +10,7 @@ function shellEscape(value) {
 }
 
 function runScenarioScript(args) {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-qwen-test-'));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-navigation-test-'));
   const stdoutPath = path.join(tempDir, 'stdout.txt');
   const stderrPath = path.join(tempDir, 'stderr.txt');
   const result = spawnSync(
@@ -32,8 +32,8 @@ function runScenarioScript(args) {
   };
 }
 
-test('live Qwen scenario runner lists the phased first-slice scenarios', () => {
-  const result = runScenarioScript(['scripts/run-live-qwen-scenario.mjs', '--list']);
+test('live navigation scenario runner lists the phased first-slice scenarios', () => {
+  const result = runScenarioScript(['scripts/run-live-navigation-scenario.mjs', '--list']);
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /live-google-flights-round-trip/);
@@ -44,9 +44,9 @@ test('live Qwen scenario runner lists the phased first-slice scenarios', () => {
   assert.match(result.stdout, /complexReplay: sample\/live-scenarios\/google-flights-history-replay\.json/);
 });
 
-test('live Qwen scenario runner can assemble a complex replay bundle without hitting the network', () => {
+test('live navigation scenario runner can assemble a complex replay bundle without hitting the network', () => {
   const result = runScenarioScript([
-    'scripts/run-live-qwen-scenario.mjs',
+    'scripts/run-live-navigation-scenario.mjs',
     'live-google-flights-round-trip',
     '--complex',
     '--dry-run',
@@ -77,9 +77,9 @@ test('live Qwen scenario runner can assemble a complex replay bundle without hit
   );
 });
 
-test('live Qwen scenario runner can assemble the SauceDemo login benchmark without a replay bundle', () => {
+test('live navigation scenario runner can assemble the SauceDemo login benchmark without a replay bundle', () => {
   const result = runScenarioScript([
-    'scripts/run-live-qwen-scenario.mjs',
+    'scripts/run-live-navigation-scenario.mjs',
     'live-saucedemo-login',
     '--dry-run',
   ]);

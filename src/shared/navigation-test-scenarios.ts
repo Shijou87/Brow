@@ -40,7 +40,7 @@ export interface LiveScenario {
   website: string;
   runMode: 'manual';
   usesProductionPromptAssembly: true;
-  modelStrategy: 'qwen-first-model-swappable';
+  modelStrategy: 'primary-model-swappable';
   defaultPrompt: string;
   successCriteria: string[];
   budget: LiveScenarioBudget;
@@ -110,7 +110,7 @@ export const LIVE_NAVIGATION_SCENARIOS: LiveScenario[] = [
     website: 'Google Flights',
     runMode: 'manual',
     usesProductionPromptAssembly: true,
-    modelStrategy: 'qwen-first-model-swappable',
+    modelStrategy: 'primary-model-swappable',
     defaultPrompt: 'search a flight from paris to rabat for 12/05/2026 to 19/05/2026 using google flight',
     successCriteria: [
       'The route remains Paris to Rabat.',
@@ -131,7 +131,7 @@ export const LIVE_NAVIGATION_SCENARIOS: LiveScenario[] = [
     website: 'YouTube',
     runMode: 'manual',
     usesProductionPromptAssembly: true,
-    modelStrategy: 'qwen-first-model-swappable',
+    modelStrategy: 'primary-model-swappable',
     defaultPrompt: 'search youtube for a video, open the watch page result instead of a channel page, and play it',
     successCriteria: [
       'The selected destination is a watch page rather than a channel page.',
@@ -151,7 +151,7 @@ export const LIVE_NAVIGATION_SCENARIOS: LiveScenario[] = [
     website: 'DuckDuckGo-like public search',
     runMode: 'manual',
     usesProductionPromptAssembly: true,
-    modelStrategy: 'qwen-first-model-swappable',
+    modelStrategy: 'primary-model-swappable',
     defaultPrompt: 'use a public search engine to search for browser snapshot docs, open the intended documentation or reference result, and stop on the target page',
     successCriteria: [
       'The query reaches a public search results page.',
@@ -171,7 +171,7 @@ export const LIVE_NAVIGATION_SCENARIOS: LiveScenario[] = [
     website: 'SauceDemo',
     runMode: 'manual',
     usesProductionPromptAssembly: true,
-    modelStrategy: 'qwen-first-model-swappable',
+    modelStrategy: 'primary-model-swappable',
     defaultPrompt: 'go to saucedemo.com, log in with username standard_user and password secret_sauce, and stop once the inventory page is clearly verified',
     successCriteria: [
       'The run reaches the SauceDemo inventory page after logging in.',

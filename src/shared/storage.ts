@@ -69,6 +69,9 @@ function toVLMConfig(value: unknown): VLMConfig {
     baseUrl: typeof record.baseUrl === 'string' ? record.baseUrl : DEFAULT_VLM_CONFIG.baseUrl,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : DEFAULT_VLM_CONFIG.apiKey,
     model: typeof record.model === 'string' ? record.model : DEFAULT_VLM_CONFIG.model,
+    useTextModel: typeof record.useTextModel === 'boolean'
+      ? record.useTextModel
+      : DEFAULT_VLM_CONFIG.useTextModel,
   };
 }
 

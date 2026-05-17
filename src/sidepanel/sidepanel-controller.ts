@@ -27,6 +27,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_VLM_CONFIG,
   normalizePreferredOpenAiModel,
+  resolveVLMConfig,
   type ProviderFields,
 } from '../shared/config';
 import {
@@ -773,8 +774,12 @@ export class SidepanelController {
     this.scheduleRequestBudgetRefresh();
   }
 
-  private handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: string }): void {
+  private handleVLMConfigApply(config: { baseUrl: string; apiKey: string; model: string; useTextModel: boolean } | null): void {
     this.agent.setVLMConfig(config);
+    if (!config) {
+      logInfo('sidepanel', 'VLM config cleared');
+      return;
+    }
     logInfo('sidepanel', 'VLM config applied:', config.model, '@', config.baseUrl);
   }
 
@@ -792,7 +797,7 @@ export class SidepanelController {
     const saved = await loadSidepanelConfig().catch(() => null);
     if (!saved) {
       this.handleConfigApply(DEFAULT_CONFIG);
-      this.handleVLMConfigApply(DEFAULT_VLM_CONFIG);
+      this.handleVLMConfigApply(resolveVLMConfig(DEFAULT_VLM_CONFIG, DEFAULT_CONFIG.fields));
       return;
     }
 
@@ -803,7 +808,7 @@ export class SidepanelController {
       recursionLimit: saved.runtime.recursionLimit,
       systemPrompt: saved.runtime.systemPrompt,
     });
-    this.handleVLMConfigApply(saved.vlm ?? DEFAULT_VLM_CONFIG);
+    this.handleVLMConfigApply(resolveVLMConfig(saved.vlm ?? DEFAULT_VLM_CONFIG, fields));
   }
 
   private restoreSavedSkills(): void {
