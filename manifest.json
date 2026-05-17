@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Brow",
   "version": "1.0.0",
-  "description": "LangGraph.js agent with MCP, MCP Apps, WebMCP tab tools, and dynamic WebMCP discovery",
+  "description": "AI browser assistant for browsing the web, completing tasks, and using tools directly in Chrome.",
   "permissions": [
     "sidePanel",
     "storage",

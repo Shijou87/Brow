@@ -128,3 +128,10 @@ Brow is currently **experimental** and optimized for builders, contributors, and
 ## License
 
 Brow is licensed under the [Apache License 2.0](LICENSE).
+
+
+## Support
+
+If this project saves you time, consider supporting development ❤️
+
+https://github.com/sponsors/shijou87
