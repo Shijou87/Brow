@@ -49,10 +49,10 @@ module.exports = {
     new CopyPlugin({
       patterns: [
         { from: 'manifest.json', to: '.' },
-        { from: 'sidepanel.html', to: '.' },
-        { from: 'options.html', to: '.' },
-        { from: 'mcp-app-sandbox.html', to: '.' },
-        { from: 'html-app-view.html', to: '.' },
+        { from: 'src/extension-pages/sidepanel.html', to: '.' },
+        { from: 'src/extension-pages/options.html', to: '.' },
+        { from: 'src/extension-pages/mcp-app-sandbox.html', to: '.' },
+        { from: 'src/extension-pages/html-app-view.html', to: '.' },
         { from: 'icons', to: 'icons', noErrorOnMissing: true },
       ],
     }),

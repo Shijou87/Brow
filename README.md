@@ -14,13 +14,9 @@
   <img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-2FF801?style=for-the-badge&logo=apache&logoColor=111111" />
 </p>
 
-<p align="center">
-  <sub>Public product name: <strong>Brow</strong>. Current repository/package identifier: <code>agent-webmcp</code>.</sub>
-</p>
-
 ## Why Brow
 
-Brow is built for people experimenting with serious browser agents, not toy demos.
+Brow is an open-source AI agent that operates directly in the browser.
 
 - It runs inside the user's live Chrome session instead of spinning up a detached automation browser.
 - It gives the agent semantic browser context through **Browser Snapshots**, form semantics, and structured refs instead of raw DOM dumping.
@@ -40,25 +36,9 @@ Brow is built for people experimenting with serious browser agents, not toy demo
 
 ## Architecture At A Glance
 
-```text
-┌────────────────────────── Chrome Session ──────────────────────────┐
-│                                                                    │
-│  Side Panel UI + Agent Runtime                                     │
-│  - chat, transcript, config, approvals, tool timeline              │
-│  - LangGraph.js agent assembly and streaming                       │
-│            │                                                       │
-│            ├── Built-in browser tools                              │
-│            ├── Remote MCP server tools and MCP Apps                │
-│            └── WebMCP tool wrappers                                │
-│                         │                                          │
-│                 Background service worker                          │
-│                         │                                          │
-│              Content scripts + page bridge runtime                 │
-│                         │                                          │
-│           Live tab DOM, browser state, navigator.modelContext      │
-│                                                                    │
-└────────────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/assets/schema.png" alt="Brow" width="820" />
+</p>
 
 For the maintainer-oriented runtime map, see [docs/maintainer-architecture.md](docs/maintainer-architecture.md).
 

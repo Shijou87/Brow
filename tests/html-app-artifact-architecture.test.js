@@ -96,7 +96,7 @@ test('HTML App Artifact feature is wired through the built-in tool, sidepanel co
   assert.match(sandboxPage, /installInnerKeyboardGuards/);
 
   assert.match(webpackConfig, /'html-app-view': '\.\/src\/html-app-view\/index\.ts'/);
-  assert.match(webpackConfig, /\{ from: 'html-app-view\.html', to: '\.' \}/);
+  assert.match(webpackConfig, /\{ from: 'src\/extension-pages\/html-app-view\.html', to: '\.' \}/);
 });
 
 test('Brow ships a built-in HTML App theme skill and guidance for artifact generation', () => {

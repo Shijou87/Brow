@@ -71,6 +71,31 @@ export interface PageAutomationInteractionRuntime {
 export function createInteractionRuntime(
   base: PageAutomationBaseRuntime,
 ): PageAutomationInteractionRuntime {
+  const setStyleCustomProperty = (
+    style: CSSStyleDeclaration & Record<string, string>,
+    property: string,
+    value: string,
+  ) => {
+    if (typeof style.setProperty === 'function') {
+      style.setProperty(property, value);
+      return;
+    }
+
+    style[property] = value;
+  };
+
+  const removeStyleCustomProperty = (
+    style: CSSStyleDeclaration & Record<string, string>,
+    property: string,
+  ) => {
+    if (typeof style.removeProperty === 'function') {
+      style.removeProperty(property);
+      return;
+    }
+
+    delete style[property];
+  };
+
   const collectOverlayParts = (root: HTMLDivElement): OverlayParts => ({
     root,
     highlight: root.querySelector('.brow-automation-highlight') as HTMLDivElement,
@@ -452,7 +477,10 @@ export function createInteractionRuntime(
     delete badge.dataset.speaker;
     delete badge.dataset.variant;
     delete badge.dataset.tailEdge;
-    badge.style.removeProperty('--speech-tail-offset');
+    removeStyleCustomProperty(
+      badge.style as CSSStyleDeclaration & Record<string, string>,
+      '--speech-tail-offset',
+    );
   };
 
   const positionSpeechBubbleForBrow = (state: BrowCharacterState) => {
@@ -494,7 +522,11 @@ export function createInteractionRuntime(
     badge.style.left = `${badgeLeft}px`;
     badge.style.top = `${badgeTop}px`;
     badge.dataset.tailEdge = tailEdge;
-    badge.style.setProperty('--speech-tail-offset', `${bubbleTargetX}px`);
+    setStyleCustomProperty(
+      badge.style as CSSStyleDeclaration & Record<string, string>,
+      '--speech-tail-offset',
+      `${bubbleTargetX}px`,
+    );
   };
 
   let browLoopId: number | null = null;
@@ -668,7 +700,10 @@ export function createInteractionRuntime(
     delete badge.dataset.variant;
     delete badge.dataset.tailEdge;
     badge.dataset.followCursor = 'true';
-    badge.style.removeProperty('--speech-tail-offset');
+    removeStyleCustomProperty(
+      badge.style as CSSStyleDeclaration & Record<string, string>,
+      '--speech-tail-offset',
+    );
     positionBadgeNearCursor(cursorX, cursorY);
   };
 
@@ -717,9 +752,21 @@ export function createInteractionRuntime(
     particle.style.top = `${y}px`;
     particle.style.width = `${size}px`;
     particle.style.height = `${size}px`;
-    particle.style.setProperty('--particle-dx', `${driftX}px`);
-    particle.style.setProperty('--particle-dy', `${driftY}px`);
-    particle.style.setProperty('--particle-duration', `${duration}ms`);
+    setStyleCustomProperty(
+      particle.style as CSSStyleDeclaration & Record<string, string>,
+      '--particle-dx',
+      `${driftX}px`,
+    );
+    setStyleCustomProperty(
+      particle.style as CSSStyleDeclaration & Record<string, string>,
+      '--particle-dy',
+      `${driftY}px`,
+    );
+    setStyleCustomProperty(
+      particle.style as CSSStyleDeclaration & Record<string, string>,
+      '--particle-duration',
+      `${duration}ms`,
+    );
     root.appendChild(particle);
     window.setTimeout(() => particle.remove(), duration + 40);
   };
