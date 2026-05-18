@@ -7,7 +7,7 @@ const {
   readBrowserContextSnapshotCache,
   resetBrowserContextSnapshotCacheForTests,
   shouldReuseCachedBrowserContextSnapshot,
-} = require('../.tmp-browser-context-cache-test/sidepanel/agent-runtime/browser-context-cache.js');
+} = require('../.tmp/browser-context-cache-test/sidepanel/agent-runtime/browser-context-cache.js');
 
 function makeSnapshot(overrides = {}) {
   return {

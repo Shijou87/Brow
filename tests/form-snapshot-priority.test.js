@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   getFormSnapshotControlPriority,
   prioritizeFormSnapshotControls,
-} = require('../.tmp-form-snapshot-priority-test/content-script/form-snapshot-priority.js');
+} = require('../.tmp/form-snapshot-priority-test/content-script/form-snapshot-priority.js');
 
 function control(index, overrides = {}) {
   return {

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   DEFAULT_SYSTEM_PROMPT,
-} = require('../.tmp-system-prompt-guidance-test/config.js');
+} = require('../.tmp/system-prompt-guidance-test/config.js');
 
 test('system prompt explains that postconditions are verification only', () => {
   assert.match(DEFAULT_SYSTEM_PROMPT, /Postconditions are verification checks only/);

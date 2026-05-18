@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   compactAutomationToolResult,
   formatAutomationToolResultText,
-} = require('../.tmp-automation-tool-result-test/sidepanel/agent-runtime/automation-tool-result.js');
+} = require('../.tmp/automation-tool-result-test/sidepanel/agent-runtime/automation-tool-result.js');
 
 test('removes duplicate trace payload and collapses resolved target details', () => {
   const compacted = compactAutomationToolResult({

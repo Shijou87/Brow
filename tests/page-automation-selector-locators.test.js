@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   parseSimpleLocator,
   parseSnapshotRefSelector,
-} = require('../.tmp-selector-locators-test/selector-locators.js');
+} = require('../.tmp/selector-locators-test/selector-locators.js');
 
 test('keeps existing simple locator support', () => {
   assert.deepEqual(parseSimpleLocator('text="Recherche approfondie"'), {

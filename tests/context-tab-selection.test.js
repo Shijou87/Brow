@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   getEffectiveContextTabIds,
-} = require('../.tmp-context-tab-selection-test/context-tab-selection.js');
+} = require('../.tmp/context-tab-selection-test/context-tab-selection.js');
 
 test('defaults to the active tab when no explicit context tabs are provided', () => {
   assert.deepEqual(getEffectiveContextTabIds(undefined, 42), [42]);

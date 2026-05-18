@@ -7,7 +7,7 @@ const {
   isIntentRecoveryEntryAllowed,
   shouldRepairForSatisfiedValuePostconditions,
   shouldSkipActionForSatisfiedPostconditions,
-} = require('../.tmp-click-intent-guards-test/sidepanel/tab-tools/click-intent-guards.js');
+} = require('../.tmp/click-intent-guards-test/sidepanel/tab-tools/click-intent-guards.js');
 
 test('disallows typeable controls as click intent-recovery targets', () => {
   assert.equal(isIntentRecoveryEntryAllowed({ role: 'combobox', tagName: 'input' }, 'click'), false);

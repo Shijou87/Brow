@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   chooseTypeTarget,
-} = require('../.tmp-type-target-selection-test/type-target-selection.js');
+} = require('../.tmp/type-target-selection-test/type-target-selection.js');
 
 test('prefers the explicitly matched type target over an unrelated active field', () => {
   assert.equal(chooseTypeTarget({

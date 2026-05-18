@@ -4,6 +4,7 @@ import type {
   WebMCPDiscoveryResult,
   WebMCPRegistryEntry,
   WorkflowDemonstration,
+  WorkflowRecordingStoredSession,
   WorkflowDemonstrationTabContext,
 } from './types';
 
@@ -17,7 +18,10 @@ export type RuntimeMessageType =
   | 'BROWSER_SNAPSHOT_OPERATION'
   | 'WORKFLOW_RECORDING_START'
   | 'WORKFLOW_RECORDING_STOP'
-  | 'WORKFLOW_RECORDING_STATUS';
+  | 'WORKFLOW_RECORDING_STATUS'
+  | 'WORKFLOW_RECORDING_RESTORE'
+  | 'WORKFLOW_RECORDING_PERSIST'
+  | 'WORKFLOW_RECORDING_CLEAR';
 
 interface BaseRuntimeMessage<T extends RuntimeMessageType, P = undefined> {
   type: T;
@@ -68,6 +72,18 @@ export type WorkflowRecordingStatusMessage = BaseRuntimeMessage<'WORKFLOW_RECORD
   tabId: number;
 }>;
 
+export type WorkflowRecordingRestoreMessage = {
+  type: 'WORKFLOW_RECORDING_RESTORE';
+};
+
+export type WorkflowRecordingPersistMessage = BaseRuntimeMessage<'WORKFLOW_RECORDING_PERSIST', {
+  session: WorkflowRecordingStoredSession;
+}>;
+
+export type WorkflowRecordingClearMessage = {
+  type: 'WORKFLOW_RECORDING_CLEAR';
+};
+
 export interface WebMCPInvokeResult {
   ok: boolean;
   result?: unknown;
@@ -102,6 +118,18 @@ export interface WorkflowRecordingStopResult {
   error?: string;
 }
 
+export interface WorkflowRecordingRestoreResult {
+  ok: boolean;
+  active: boolean;
+  session?: WorkflowRecordingStoredSession;
+  error?: string;
+}
+
+export interface WorkflowRecordingPersistResult {
+  ok: boolean;
+  error?: string;
+}
+
 export type RuntimeMessage =
   | GetRegistryMessage
   | ForceDiscoverMessage
@@ -112,7 +140,10 @@ export type RuntimeMessage =
   | BrowserSnapshotOperationMessage
   | WorkflowRecordingStartMessage
   | WorkflowRecordingStopMessage
-  | WorkflowRecordingStatusMessage;
+  | WorkflowRecordingStatusMessage
+  | WorkflowRecordingRestoreMessage
+  | WorkflowRecordingPersistMessage
+  | WorkflowRecordingClearMessage;
 
 export function isRuntimeMessageType<T extends RuntimeMessageType>(
   message: unknown,

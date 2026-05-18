@@ -7,7 +7,7 @@ const {
   DEFAULT_OPENAI_FIELDS,
   DEFAULT_VLM_CONFIG,
   resolveVLMConfig,
-} = require('../.tmp-system-prompt-guidance-test/config.js');
+} = require('../.tmp/system-prompt-guidance-test/config.js');
 
 const repoRoot = process.cwd();
 const legacyHostedProviderAliasPattern = new RegExp(`llm${'aas'}`, 'i');

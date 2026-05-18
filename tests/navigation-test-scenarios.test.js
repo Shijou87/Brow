@@ -10,7 +10,7 @@ const {
   LIVE_NAVIGATION_SCENARIOS,
   getLocalNavigationScenario,
   getLiveNavigationScenario,
-} = require('../.tmp-navigation-scenarios-test/navigation-test-scenarios.js');
+} = require('../.tmp/navigation-scenarios-test/navigation-test-scenarios.js');
 
 const repoRoot = path.resolve(__dirname, '..');
 

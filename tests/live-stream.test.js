@@ -5,7 +5,7 @@ const {
   decodeLangGraphStreamChunk,
   extractAssistantMessageStreamText,
   extractLlmText,
-} = require('../.tmp-live-stream-test/live-stream.js');
+} = require('../.tmp/live-stream-test/live-stream.js');
 
 test('decodeLangGraphStreamChunk keeps legacy single-mode chunks compatible', () => {
   const payload = { agent: { messages: [] } };

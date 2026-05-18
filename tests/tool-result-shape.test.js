@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   attachToolSnapshotFields,
-} = require('../.tmp-tool-result-shape-test/sidepanel/agent-runtime/tool-result-snapshot.js');
+} = require('../.tmp/tool-result-shape-test/sidepanel/agent-runtime/tool-result-snapshot.js');
 
 function makeSnapshot(snapshotId) {
   return {

@@ -13,8 +13,10 @@
     "declaration": false,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "noImplicitAny": false
+    "noImplicitAny": false,
+    "typeRoots": ["./types", "./node_modules/@types"],
+    "types": ["chrome"]
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "types/**/*.d.ts"],
   "exclude": ["node_modules", "dist"]
 }

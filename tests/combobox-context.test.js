@@ -3,10 +3,10 @@ const assert = require('node:assert/strict');
 
 const {
   buildComboboxState,
-} = require('../.tmp-combobox-context-test/shared/combobox-state.js');
+} = require('../.tmp/combobox-context-test/shared/combobox-state.js');
 const {
   formatBrowserSnapshot,
-} = require('../.tmp-combobox-context-test/sidepanel/agent-runtime/tool-result-snapshot.js');
+} = require('../.tmp/combobox-context-test/sidepanel/agent-runtime/tool-result-snapshot.js');
 
 test('builds selection-required combobox state for external listbox options', () => {
   const state = buildComboboxState({

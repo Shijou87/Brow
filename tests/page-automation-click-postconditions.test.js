@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   browserClick,
-} = require('../.tmp-page-automation-click-test/sidepanel/tab-tools/page-automation.js');
+} = require('../.tmp/page-automation-click-test/sidepanel/tab-tools/page-automation.js');
 
 function makeBounds(overrides = {}) {
   return {

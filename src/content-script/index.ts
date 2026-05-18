@@ -75,30 +75,44 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (isRuntimeMessageType(message, 'WORKFLOW_RECORDING_START')) {
-    const result = workflowDemonstrationRecorder.start({
+    workflowDemonstrationRecorder.start({
       title: message.payload?.title,
       captureTypedValues: message.payload?.captureTypedValues,
       tabId: message.payload?.tabId,
+    }).then((result) => {
+      if (result.ok) {
+        logInfo('content-script', `Workflow demonstration recording started on ${location.href}`);
+      } else {
+        logError('content-script', 'Workflow demonstration recording start failed', result.error);
+      }
+      sendResponse(result);
+    }).catch((err: any) => {
+      logError('content-script', 'Workflow demonstration recording start crashed', err);
+      sendResponse({ ok: false, active: false, stepCount: 0, page: { url: location.href, title: document.title }, error: err?.message ?? 'Start failed' });
     });
-    logInfo('content-script', `Workflow demonstration recording started on ${location.href}`);
-    sendResponse(result);
-    return false;
+    return true;
   }
 
   if (isRuntimeMessageType(message, 'WORKFLOW_RECORDING_STOP')) {
-    const result = workflowDemonstrationRecorder.stop();
-    if (!result.ok) {
-      logError('content-script', 'Workflow demonstration recording stop failed', result.error);
-    } else {
-      logInfo('content-script', `Workflow demonstration recording stopped on ${location.href}`);
-    }
-    sendResponse(result);
-    return false;
+    workflowDemonstrationRecorder.stop().then((result) => {
+      if (!result.ok) {
+        logError('content-script', 'Workflow demonstration recording stop failed', result.error);
+      } else {
+        logInfo('content-script', `Workflow demonstration recording stopped on ${location.href}`);
+      }
+      sendResponse(result);
+    }).catch((err: any) => {
+      logError('content-script', 'Workflow demonstration recording stop crashed', err);
+      sendResponse({ ok: false, active: false, error: err?.message ?? 'Stop failed' });
+    });
+    return true;
   }
 
   if (isRuntimeMessageType(message, 'WORKFLOW_RECORDING_STATUS')) {
-    sendResponse(workflowDemonstrationRecorder.getStatus());
-    return false;
+    workflowDemonstrationRecorder.getStatus().then((result) => sendResponse(result)).catch((err: any) => {
+      sendResponse({ ok: false, active: false, stepCount: 0, page: { url: location.href, title: document.title }, error: err?.message ?? 'Status failed' });
+    });
+    return true;
   }
 
   return false;

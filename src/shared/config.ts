@@ -34,7 +34,7 @@ export function normalizePreferredOpenAiModel(model: string | undefined | null):
 }
 
 export const DEFAULT_OPENAI_FIELDS: ProviderFields = {
-  baseUrl: 'http://localhost:11434/v1',
+  baseUrl: 'https://api.openai.com/v1',
   apiKey: 'not-needed',
   model: 'gpt-5-mini',
   contextWindow: DEFAULT_OPENAI_CONTEXT_WINDOW,

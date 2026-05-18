@@ -5,10 +5,10 @@ const path = require('node:path');
 
 const {
   buildWorkflowDemonstrationContext,
-} = require('../.tmp-workflow-demo-context-test/shared/workflow-demonstration/context-format.js');
+} = require('../.tmp/workflow-demo-context-test/shared/workflow-demonstration/context-format.js');
 const {
   buildSystemPrompt,
-} = require('../.tmp-workflow-demo-context-test/sidepanel/agent-runtime/prompt.js');
+} = require('../.tmp/workflow-demo-context-test/sidepanel/agent-runtime/prompt.js');
 
 function createWorkflowDemonstration() {
   return {

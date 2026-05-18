@@ -5,7 +5,7 @@ const {
   chooseInferredFormSubmitCandidateIndex,
   getFormFillActionOutcome,
   getFormFillTextCommitMode,
-} = require('../.tmp-form-fill-behavior-test/form-fill-behavior.js');
+} = require('../.tmp/form-fill-behavior-test/form-fill-behavior.js');
 
 test('commits combobox-like text fields after value injection', () => {
   assert.equal(getFormFillTextCommitMode({

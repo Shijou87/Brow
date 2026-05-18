@@ -6,11 +6,11 @@ const { zodFunction } = require('openai/helpers/zod');
 const {
   browserDragToolSchema,
   browserFillFormToolSchema,
-} = require('../.tmp-openai-tool-schema-test/browser-tool-schemas.js');
+} = require('../.tmp/openai-tool-schema-test/browser-tool-schemas.js');
 const {
   jsonSchemaToZod,
   normalizeJsonSchemaParsedObject,
-} = require('../.tmp-openai-tool-schema-test/json-schema.js');
+} = require('../.tmp/openai-tool-schema-test/json-schema.js');
 
 function collectInvalidAdditionalProperties(schema, path = '#') {
   if (!schema || typeof schema !== 'object') {

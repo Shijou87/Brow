@@ -4,7 +4,7 @@ const { execFileSync } = require('node:child_process');
 const path = require('node:path');
 
 const repoRoot = path.join(__dirname, '..');
-const outDir = path.join(repoRoot, '.tmp-domain-memory-test');
+const outDir = path.join(repoRoot, '.tmp', 'domain-memory-test');
 const tscBin = path.join(repoRoot, 'node_modules', '.bin', 'tsc');
 
 execFileSync(tscBin, [
@@ -19,6 +19,10 @@ execFileSync(tscBin, [
   'node',
   '--skipLibCheck',
   '--esModuleInterop',
+  '--typeRoots',
+  './types,./node_modules/@types',
+  '--types',
+  'chrome',
 ], {
   cwd: repoRoot,
   stdio: 'inherit',
@@ -34,7 +38,7 @@ const {
   saveDomainMemoryDraft,
   setDomainMemoryEnabled,
   upsertDomainMemoryEntries,
-} = require('../.tmp-domain-memory-test/sidepanel/domain-memory.js');
+} = require('../.tmp/domain-memory-test/sidepanel/domain-memory.js');
 
 function installMockChromeStorage() {
   const data = {};

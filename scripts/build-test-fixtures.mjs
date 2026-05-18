@@ -19,45 +19,53 @@ if (!fs.existsSync(tscBin)) {
   throw new Error(`TypeScript compiler not found at ${tscBin}`);
 }
 
+function tmpOutDir(name) {
+  return `.tmp/${name}`;
+}
+
 const fixtureBuilds = [
-  { outDir: '.tmp-approval-description-test', entries: ['src/sidepanel/agent-runtime/approval-description.ts'] },
-  { outDir: '.tmp-automation-tool-result-test', entries: ['src/sidepanel/agent-runtime/automation-tool-result.ts'] },
-  { outDir: '.tmp-browser-context-cache-test', entries: ['src/sidepanel/agent-runtime/browser-context-cache.ts'] },
-  { outDir: '.tmp-browser-context-layout-test', entries: ['src/sidepanel/agent-runtime/browser-context-layout.ts'] },
-  { outDir: '.tmp-browser-key-retry-test', entries: ['src/sidepanel/tab-tools/browser-key-retry.ts'] },
-  { outDir: '.tmp-click-intent-guards-test', entries: ['src/sidepanel/tab-tools/click-intent-guards.ts'] },
+  { outDir: tmpOutDir('approval-description-test'), entries: ['src/sidepanel/agent-runtime/approval-description.ts'] },
+  { outDir: tmpOutDir('automation-tool-result-test'), entries: ['src/sidepanel/agent-runtime/automation-tool-result.ts'] },
+  { outDir: tmpOutDir('browser-context-cache-test'), entries: ['src/sidepanel/agent-runtime/browser-context-cache.ts'] },
+  { outDir: tmpOutDir('browser-context-layout-test'), entries: ['src/sidepanel/agent-runtime/browser-context-layout.ts'] },
+  { outDir: tmpOutDir('browser-key-retry-test'), entries: ['src/sidepanel/tab-tools/browser-key-retry.ts'] },
+  { outDir: tmpOutDir('click-intent-guards-test'), entries: ['src/sidepanel/tab-tools/click-intent-guards.ts'] },
   {
-    outDir: '.tmp-combobox-context-test',
+    outDir: tmpOutDir('combobox-context-test'),
     entries: [
       'src/shared/combobox-state.ts',
       'src/sidepanel/agent-runtime/tool-result-snapshot.ts',
     ],
   },
   {
-    outDir: '.tmp-context-tab-selection-test',
+    outDir: tmpOutDir('composer-module-test'),
+    entries: ['src/sidepanel/chat-view/composer-module.ts'],
+  },
+  {
+    outDir: tmpOutDir('context-tab-selection-test'),
     entries: ['src/sidepanel/agent-runtime/context-tab-selection.ts'],
     aliases: [['sidepanel/agent-runtime/context-tab-selection.js', 'context-tab-selection.js']],
   },
-  { outDir: '.tmp-domain-memory-test', entries: ['src/sidepanel/domain-memory.ts'] },
+  { outDir: tmpOutDir('domain-memory-test'), entries: ['src/sidepanel/domain-memory.ts'] },
   {
-    outDir: '.tmp-form-fill-behavior-test',
+    outDir: tmpOutDir('form-fill-behavior-test'),
     entries: ['src/sidepanel/tab-tools/form-fill-behavior.ts'],
     aliases: [['sidepanel/tab-tools/form-fill-behavior.js', 'form-fill-behavior.js']],
   },
-  { outDir: '.tmp-form-snapshot-priority-test', entries: ['src/content-script/form-snapshot-priority.ts'] },
+  { outDir: tmpOutDir('form-snapshot-priority-test'), entries: ['src/content-script/form-snapshot-priority.ts'] },
   {
-    outDir: '.tmp-live-stream-test',
+    outDir: tmpOutDir('live-stream-test'),
     entries: ['src/sidepanel/agent-runtime/live-stream.ts'],
     aliases: [['sidepanel/agent-runtime/live-stream.js', 'live-stream.js']],
   },
-  { outDir: '.tmp-message-format-test', entries: ['src/sidepanel/message-format.ts'] },
+  { outDir: tmpOutDir('message-format-test'), entries: ['src/sidepanel/message-format.ts'] },
   {
-    outDir: '.tmp-navigation-scenarios-test',
+    outDir: tmpOutDir('navigation-scenarios-test'),
     entries: ['src/shared/navigation-test-scenarios.ts'],
     aliases: [['shared/navigation-test-scenarios.js', 'navigation-test-scenarios.js']],
   },
   {
-    outDir: '.tmp-openai-tool-schema-test',
+    outDir: tmpOutDir('openai-tool-schema-test'),
     entries: [
       'src/sidepanel/agent-tools/browser-tool-schemas.ts',
       'src/shared/json-schema.ts',
@@ -68,58 +76,62 @@ const fixtureBuilds = [
       ['shared/json-schema.js', 'json-schema.js'],
     ],
   },
-  { outDir: '.tmp-page-automation-click-test', entries: ['src/sidepanel/tab-tools/page-automation.ts'] },
+  { outDir: tmpOutDir('page-automation-click-test'), entries: ['src/sidepanel/tab-tools/page-automation.ts'] },
   {
-    outDir: '.tmp-page-automation-injection-test',
+    outDir: tmpOutDir('page-automation-injection-test'),
     entries: [
       'src/sidepanel/tab-tools/page-automation.ts',
       'src/sidepanel/tab-tools/page-automation/runtime/runtime-install.ts',
     ],
   },
   {
-    outDir: '.tmp-request-context-debug-test',
+    outDir: tmpOutDir('request-context-debug-test'),
     entries: ['src/sidepanel/agent-runtime/request-context-debug.ts'],
     aliases: [['sidepanel/agent-runtime/request-context-debug.js', 'request-context-debug.js']],
   },
   {
-    outDir: '.tmp-selector-locators-test',
+    outDir: tmpOutDir('selector-locators-test'),
     entries: ['src/sidepanel/tab-tools/selector-locators.ts'],
     aliases: [['sidepanel/tab-tools/selector-locators.js', 'selector-locators.js']],
   },
   {
-    outDir: '.tmp-system-prompt-guidance-test',
+    outDir: tmpOutDir('system-prompt-guidance-test'),
     entries: ['src/shared/config.ts'],
     aliases: [
       ['shared/config.js', 'config.js'],
       ['shared/html-app-artifact-guidance.js', 'html-app-artifact-guidance.js'],
     ],
   },
-  { outDir: '.tmp-tool-classification-test', entries: ['src/sidepanel/agent-runtime/tool-classification.ts'] },
-  { outDir: '.tmp-tool-context-carry-forward-test', entries: ['src/sidepanel/agent-runtime/tool-context-carry-forward.ts'] },
-  { outDir: '.tmp-tool-result-shape-test', entries: ['src/sidepanel/agent-runtime/tool-result-snapshot.ts'] },
+  { outDir: tmpOutDir('tool-classification-test'), entries: ['src/sidepanel/agent-runtime/tool-classification.ts'] },
+  { outDir: tmpOutDir('tool-context-carry-forward-test'), entries: ['src/sidepanel/agent-runtime/tool-context-carry-forward.ts'] },
+  { outDir: tmpOutDir('tool-result-shape-test'), entries: ['src/sidepanel/agent-runtime/tool-result-snapshot.ts'] },
   {
-    outDir: '.tmp-type-target-selection-test',
+    outDir: tmpOutDir('type-target-selection-test'),
     entries: ['src/sidepanel/tab-tools/type-target-selection.ts'],
     aliases: [['sidepanel/tab-tools/type-target-selection.js', 'type-target-selection.js']],
   },
   {
-    outDir: '.tmp-ui-format-test',
+    outDir: tmpOutDir('ui-format-test'),
     entries: ['src/sidepanel/chat-view/ui-format.ts'],
   },
   {
-    outDir: '.tmp-untrusted-context-test',
+    outDir: tmpOutDir('untrusted-context-test'),
     entries: [
       'src/sidepanel/agent-runtime/prompt.ts',
       'src/sidepanel/agent-runtime/untrusted-context.ts',
     ],
   },
-  { outDir: '.tmp-webmcp-aftermath-test', entries: ['src/sidepanel/webmcp-tool-factory.ts'] },
+  { outDir: tmpOutDir('webmcp-aftermath-test'), entries: ['src/sidepanel/webmcp-tool-factory.ts'] },
   {
-    outDir: '.tmp-workflow-demo-context-test',
+    outDir: tmpOutDir('workflow-demo-context-test'),
     entries: [
       'src/shared/workflow-demonstration/context-format.ts',
       'src/sidepanel/agent-runtime/prompt.ts',
     ],
+  },
+  {
+    outDir: tmpOutDir('workflow-step-builder-test'),
+    entries: ['src/shared/workflow-demonstration/step-builder.ts'],
   },
 ];
 
@@ -144,6 +156,10 @@ for (const build of fixtureBuilds) {
     '--resolveJsonModule',
     '--lib',
     'ES2020,DOM,DOM.Iterable',
+    '--typeRoots',
+    './types,./node_modules/@types',
+    '--types',
+    'chrome',
   ], {
     cwd: repoRoot,
     stdio: 'inherit',
@@ -163,7 +179,7 @@ await new Promise((resolve, reject) => {
     context: repoRoot,
     entry: './src/sidepanel/tab-tools/page-automation/runtime-entry.ts',
     output: {
-      path: path.join(repoRoot, '.tmp-page-automation-injection-test'),
+      path: path.join(repoRoot, '.tmp', 'page-automation-injection-test'),
       filename: 'page-automation-runtime.js',
       clean: false,
     },

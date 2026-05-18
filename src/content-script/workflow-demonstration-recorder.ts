@@ -9,6 +9,7 @@ import type {
   WorkflowDemonstrationKeyboardEvidence,
   WorkflowDemonstrationPointer,
   WorkflowDemonstrationPointerSample,
+  WorkflowRecordingStoredSession,
   WorkflowDemonstrationReplayability,
   WorkflowDemonstrationScrollEvidence,
   WorkflowDemonstrationStep,
@@ -19,11 +20,18 @@ import type {
   WorkflowDemonstrationValue,
 } from '../shared/types';
 import type {
+  WorkflowRecordingPersistResult,
+  WorkflowRecordingRestoreResult,
   WorkflowRecordingStartResult,
   WorkflowRecordingStatusResult,
   WorkflowRecordingStopResult,
 } from '../shared/messages';
-  import { StepBuilder, type WorkflowRawValueInput } from '../shared/workflow-demonstration';
+import {
+  normalizeWorkflowDemonstration,
+  StepBuilder,
+  type WorkflowRawEvent,
+  type WorkflowRawValueInput,
+} from '../shared/workflow-demonstration';
 import {
   buildWorkflowTargetSelector as buildSelector,
   cleanOptionalDomText as cleanInlineText,
@@ -43,13 +51,15 @@ interface RecorderSession {
   title?: string;
   tabId?: number;
   startedAt: number;
+  captureTypedValues: boolean;
+  initialTab: WorkflowDemonstrationTabContext;
   builder: StepBuilder;
 }
 
 export interface WorkflowDemonstrationRecorder {
-  start: (options?: RecorderStartOptions) => WorkflowRecordingStartResult;
-  stop: () => WorkflowRecordingStopResult;
-  getStatus: () => WorkflowRecordingStatusResult;
+  start: (options?: RecorderStartOptions) => Promise<WorkflowRecordingStartResult>;
+  stop: () => Promise<WorkflowRecordingStopResult>;
+  getStatus: () => Promise<WorkflowRecordingStatusResult>;
 }
 
 const TEXT_INPUT_TYPES = new Set(['', 'email', 'number', 'search', 'tel', 'text', 'url']);
@@ -60,6 +70,10 @@ const GENERIC_CONTAINER_TAG_NAMES = new Set(['div', 'g', 'path', 'span', 'svg'])
 function stableId(prefix: string): string {
   return globalThis.crypto?.randomUUID?.()
     ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function currentTabContext(tabId?: number): WorkflowDemonstrationTabContext {
@@ -334,15 +348,52 @@ function rawValueFromElement(element: Element): WorkflowRawValueInput | undefine
   return undefined;
 }
 
-function defaultTitleForSession(): string {
+function normalizeStoredTabContext(raw: unknown): WorkflowDemonstrationTabContext | undefined {
+  if (!isRecord(raw) || typeof raw.url !== 'string') return undefined;
+  return {
+    url: raw.url,
+    title: typeof raw.title === 'string' ? raw.title : undefined,
+    tabId: typeof raw.tabId === 'number' ? raw.tabId : undefined,
+  };
+}
+
+function defaultTitleForSession(url = location.href): string {
   const hostname = (() => {
     try {
-      return new URL(location.href).hostname.replace(/^www\./, '');
+      return new URL(url).hostname.replace(/^www\./, '');
     } catch {
       return location.hostname || 'current page';
     }
   })();
   return `Workflow demonstration on ${hostname}`;
+}
+
+function normalizeStoredRecorderSession(raw: unknown): RecorderSession | undefined {
+  if (!isRecord(raw) || typeof raw.id !== 'string' || typeof raw.startedAt !== 'number') return undefined;
+  const initialTab = normalizeStoredTabContext(raw.initialTab);
+  const partialDemonstration = normalizeWorkflowDemonstration(raw.partialDemonstration);
+  if (!initialTab || !partialDemonstration) return undefined;
+
+  const captureTypedValues = raw.captureTypedValues !== false;
+  const tabId = typeof raw.tabId === 'number' ? raw.tabId : initialTab.tabId;
+
+  return {
+    id: raw.id,
+    title: typeof raw.title === 'string' ? raw.title : undefined,
+    tabId,
+    startedAt: raw.startedAt,
+    captureTypedValues,
+    initialTab,
+    builder: StepBuilder.fromDemonstration(partialDemonstration, { captureTypedValues }),
+  };
+}
+
+function sendRuntimeMessage<Response>(message: unknown, fallback: Response): Promise<Response> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      resolve((response ?? fallback) as Response);
+    });
+  });
 }
 
 /**
@@ -351,15 +402,86 @@ function defaultTitleForSession(): string {
  */
 export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationRecorder {
   let session: RecorderSession | null = null;
+  let listenersAttached = false;
 
   const getCurrentTabContext = (tabId = session?.tabId) => currentTabContext(tabId);
+
+  const buildStatus = (): WorkflowRecordingStatusResult => ({
+    ok: true,
+    active: Boolean(session),
+    workflowDemonstrationId: session?.id,
+    stepCount: session?.builder.getStepCount() ?? 0,
+    page: getCurrentTabContext(),
+    startedAt: session?.startedAt,
+  });
+
+  const persistSession = async (): Promise<void> => {
+    const currentSession = session;
+    if (!currentSession) return;
+
+    const snapshot: WorkflowRecordingStoredSession = {
+      id: currentSession.id,
+      title: currentSession.title,
+      tabId: currentSession.tabId,
+      startedAt: currentSession.startedAt,
+      captureTypedValues: currentSession.captureTypedValues,
+      initialTab: currentSession.initialTab,
+      partialDemonstration: currentSession.builder.build({
+        id: currentSession.id,
+        title: currentSession.title || defaultTitleForSession(currentSession.initialTab.url),
+        demonstratedTab: currentSession.initialTab,
+        createdAt: currentSession.startedAt,
+        updatedAt: Date.now(),
+      }),
+    };
+
+    await sendRuntimeMessage<WorkflowRecordingPersistResult>(
+      {
+        type: 'WORKFLOW_RECORDING_PERSIST',
+        payload: { session: snapshot },
+      },
+      { ok: false, error: 'No response' },
+    );
+  };
+
+  const clearPersistedSession = async (): Promise<void> => {
+    await sendRuntimeMessage<WorkflowRecordingPersistResult>(
+      { type: 'WORKFLOW_RECORDING_CLEAR' },
+      { ok: false, error: 'No response' },
+    );
+  };
+
+  const restorePersistedSession = async (): Promise<void> => {
+    const result = await sendRuntimeMessage<WorkflowRecordingRestoreResult>(
+      { type: 'WORKFLOW_RECORDING_RESTORE' },
+      { ok: false, active: false, error: 'No response' },
+    );
+    if (!result.ok || !result.session) return;
+
+    const restored = normalizeStoredRecorderSession(result.session);
+    if (!restored) {
+      await clearPersistedSession();
+      return;
+    }
+
+    session = restored;
+    attachListeners();
+  };
+
+  const ready = restorePersistedSession();
+
+  const recordEvent = (event: WorkflowRawEvent) => {
+    if (!session) return;
+    session.builder.addEvent(event);
+    void persistSession();
+  };
 
   const handleClick = (event: MouseEvent) => {
     if (!session || event.button !== 0) return;
     const element = resolveElementTarget(event.target, event.composedPath());
     if (!element) return;
     if (element instanceof HTMLInputElement && element.type.toLowerCase() === 'file') return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'click',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -381,7 +503,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
 
     const value = rawValueFromElement(element);
     if (!value) return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'input',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -396,7 +518,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
     if (!element) return;
     const value = rawValueFromElement(element);
     if (!value) return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'change',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -409,7 +531,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
     if (!session) return;
     const element = resolveElementTarget(event.target);
     if (!element) return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'submit',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -440,7 +562,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
     if (editable && !isShortcut && !isNavigationKey) return;
 
     const element = resolveElementTarget(event.target);
-    session.builder.addEvent({
+    recordEvent({
       kind: 'keydown',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -451,7 +573,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
 
   const handleScroll = () => {
     if (!session) return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'scroll',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -466,7 +588,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
     if (!session) return;
     const element = resolveElementTarget(event.target);
     if (!element) return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'dragstart',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -477,7 +599,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
 
   const handleDragOver = (event: DragEvent) => {
     if (!session) return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'dragover',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -492,7 +614,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
       session.builder.clearPendingDrag();
       return;
     }
-    session.builder.addEvent({
+    recordEvent({
       kind: 'drop',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
@@ -508,14 +630,21 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
 
   const handleUrlSignal = () => {
     if (!session) return;
-    session.builder.addEvent({
+    recordEvent({
       kind: 'navigation',
       timestamp: Date.now(),
       tab: getCurrentTabContext(),
     });
   };
 
+  const handlePageHide = () => {
+    if (!session) return;
+    void persistSession();
+  };
+
   const attachListeners = () => {
+    if (listenersAttached) return;
+    listenersAttached = true;
     document.addEventListener('click', handleClick, true);
     document.addEventListener('input', handleInput, true);
     document.addEventListener('change', handleChange, true);
@@ -528,9 +657,12 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
     document.addEventListener('dragend', clearDragSource, true);
     window.addEventListener('hashchange', handleUrlSignal, true);
     window.addEventListener('popstate', handleUrlSignal, true);
+    window.addEventListener('pagehide', handlePageHide, true);
   };
 
   const detachListeners = () => {
+    if (!listenersAttached) return;
+    listenersAttached = false;
     document.removeEventListener('click', handleClick, true);
     document.removeEventListener('input', handleInput, true);
     document.removeEventListener('change', handleChange, true);
@@ -543,32 +675,30 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
     document.removeEventListener('dragend', clearDragSource, true);
     window.removeEventListener('hashchange', handleUrlSignal, true);
     window.removeEventListener('popstate', handleUrlSignal, true);
+    window.removeEventListener('pagehide', handlePageHide, true);
   };
 
-  const getStatus = (): WorkflowRecordingStatusResult => ({
-    ok: true,
-    active: Boolean(session),
-    workflowDemonstrationId: session?.id,
-    stepCount: session?.builder.getStepCount() ?? 0,
-    page: getCurrentTabContext(),
-    startedAt: session?.startedAt,
-  });
-
   return {
-    start(options) {
-      if (session) return getStatus();
+    async start(options) {
+      await ready;
+      if (session) return buildStatus();
       const tabContext = currentTabContext(options?.tabId);
+      const captureTypedValues = options?.captureTypedValues !== false;
       session = {
         id: stableId('workflow-demonstration'),
         title: cleanInlineText(options?.title, 120),
         tabId: options?.tabId,
         startedAt: Date.now(),
-        builder: new StepBuilder(tabContext, { captureTypedValues: options?.captureTypedValues !== false }),
+        captureTypedValues,
+        initialTab: tabContext,
+        builder: new StepBuilder(tabContext, { captureTypedValues }),
       };
       attachListeners();
-      return getStatus();
+      await persistSession();
+      return buildStatus();
     },
-    stop() {
+    async stop() {
+      await ready;
       if (!session) {
         return { ok: false, active: false, error: 'No active workflow demonstration recording.' };
       }
@@ -581,6 +711,7 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
       detachListeners();
       const currentSession = session;
       session = null;
+      await clearPersistedSession();
       const workflowDemonstration = currentSession.builder.build({
         id: currentSession.id,
         title: currentSession.title || defaultTitleForSession(),
@@ -594,6 +725,9 @@ export function createWorkflowDemonstrationRecorder(): WorkflowDemonstrationReco
         workflowDemonstration,
       };
     },
-    getStatus,
+    async getStatus() {
+      await ready;
+      return buildStatus();
+    },
   };
 }

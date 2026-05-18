@@ -96,7 +96,7 @@ function isTextEntryValue(rawValue: WorkflowRawValueInput): boolean {
 export class StepBuilder implements WorkflowStepBuilder {
   private readonly options: StepBuilderOptions;
 
-  private readonly steps: WorkflowDemonstrationStep[] = [];
+  private readonly steps: WorkflowDemonstrationStep[];
 
   private lastTab: WorkflowDemonstrationTabContext;
 
@@ -104,9 +104,37 @@ export class StepBuilder implements WorkflowStepBuilder {
 
   private lastScroll: LastScrollState | undefined;
 
-  constructor(initialTab: WorkflowDemonstrationTabContext, options: StepBuilderOptions = {}) {
-    this.lastTab = initialTab;
+  constructor(
+    initialTab: WorkflowDemonstrationTabContext,
+    options: StepBuilderOptions = {},
+    seed?: {
+      steps?: WorkflowDemonstrationStep[];
+      lastTab?: WorkflowDemonstrationTabContext;
+    },
+  ) {
+    this.steps = (seed?.steps ?? []).map((step) => ({
+      ...step,
+      tab: { ...step.tab },
+      target: step.target ? { ...step.target, signature: { ...step.target.signature } } : undefined,
+      destination: step.destination ? { ...step.destination, signature: { ...step.destination.signature } } : undefined,
+      pointer: step.pointer ? { ...step.pointer } : undefined,
+      pointerPath: step.pointerPath ? step.pointerPath.map((sample) => ({ ...sample })) : undefined,
+      trace: step.trace ? { ...step.trace } : undefined,
+      value: step.value ? { ...step.value } : undefined,
+    }));
+    this.lastTab = seed?.lastTab ? { ...seed.lastTab } : { ...initialTab };
     this.options = options;
+  }
+
+  static fromDemonstration(
+    demonstration: WorkflowDemonstration,
+    options: StepBuilderOptions = {},
+  ): StepBuilder {
+    const lastStepTab = demonstration.steps[demonstration.steps.length - 1]?.tab;
+    return new StepBuilder(demonstration.demonstratedTab, options, {
+      steps: demonstration.steps,
+      lastTab: lastStepTab ?? demonstration.demonstratedTab,
+    });
   }
 
   addEvent(event: WorkflowRawEvent): void {

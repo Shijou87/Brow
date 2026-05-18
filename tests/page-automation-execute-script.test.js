@@ -10,9 +10,9 @@ const {
   tabsKey,
   tabsType,
   waitForTabSettled,
-} = require('../.tmp-page-automation-injection-test/sidepanel/tab-tools/page-automation.js');
+} = require('../.tmp/page-automation-injection-test/sidepanel/tab-tools/page-automation.js');
 const injectedRuntimeBundleSource = fs.readFileSync(
-  path.join(__dirname, '..', '.tmp-page-automation-injection-test', 'page-automation-runtime.js'),
+  path.join(__dirname, '..', '.tmp', 'page-automation-injection-test', 'page-automation-runtime.js'),
   'utf8',
 );
 

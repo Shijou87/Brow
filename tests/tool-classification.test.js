@@ -5,7 +5,7 @@ const {
   DEFAULT_DISABLED_TOOL_NAMES,
   isApprovalGatedToolName,
   isAutomationToolName,
-} = require('../.tmp-tool-classification-test/sidepanel/agent-runtime/tool-classification.js');
+} = require('../.tmp/tool-classification-test/sidepanel/agent-runtime/tool-classification.js');
 
 test('keeps outbound screenshot and visual-query tools approval-gated without treating them as default-disabled automation', () => {
   assert.equal(isAutomationToolName('browser_visual_query'), false);

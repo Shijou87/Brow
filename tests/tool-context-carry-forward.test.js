@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   buildToolContextCarryForwardMessage,
-} = require('../.tmp-tool-context-carry-forward-test/sidepanel/agent-runtime/tool-context-carry-forward.js');
+} = require('../.tmp/tool-context-carry-forward-test/sidepanel/agent-runtime/tool-context-carry-forward.js');
 
 test('returns null when no completed or error steps exist', () => {
   assert.equal(buildToolContextCarryForwardMessage([

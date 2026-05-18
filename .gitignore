@@ -3,7 +3,7 @@ node_modules/
 
 # Build output
 dist/
-.tmp-*/
+.tmp/
 .perf/
 NUL
 

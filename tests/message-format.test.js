@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   escapeHtml,
   formatAssistantMessage,
-} = require('../.tmp-message-format-test/sidepanel/message-format.js');
+} = require('../.tmp/message-format-test/sidepanel/message-format.js');
 
 test('escapes raw HTML in assistant messages instead of rendering tags', () => {
   const formatted = formatAssistantMessage('<img src=x onerror="alert(1)"> hello');

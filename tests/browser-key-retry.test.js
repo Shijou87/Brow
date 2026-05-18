@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   shouldRetryBodyMediaKey,
-} = require('../.tmp-browser-key-retry-test/sidepanel/tab-tools/browser-key-retry.js');
+} = require('../.tmp/browser-key-retry-test/sidepanel/tab-tools/browser-key-retry.js');
 
 test('retries a media toggle key on body after the initial target fails the media postcondition', () => {
   assert.equal(shouldRetryBodyMediaKey({

@@ -857,9 +857,12 @@ export class ComposerModule {
 
     const query = match[2] ?? '';
     const tokenStart = selectionStart - match[0].length + match[1].length;
+    const shouldResetHighlight = this.contextPickerMode !== 'mention' || this.contextPickerQuery !== query;
     this.contextPickerMode = 'mention';
     this.contextPickerQuery = query;
-    this.contextPickerHighlightIndex = 0;
+    if (shouldResetHighlight) {
+      this.contextPickerHighlightIndex = 0;
+    }
     this.mentionRange = { start: tokenStart, end: selectionStart };
     this.skillMentionRange = null;
     void this.refreshContextPicker();
@@ -885,9 +888,13 @@ export class ComposerModule {
       return false;
     }
 
+    const query = match[1] ?? '';
+    const shouldResetHighlight = this.contextPickerMode !== 'skill' || this.contextPickerQuery !== query;
     this.contextPickerMode = 'skill';
-    this.contextPickerQuery = match[1] ?? '';
-    this.contextPickerHighlightIndex = 0;
+    this.contextPickerQuery = query;
+    if (shouldResetHighlight) {
+      this.contextPickerHighlightIndex = 0;
+    }
     this.mentionRange = null;
     this.skillMentionRange = { start: 0, end: token.length };
     void this.refreshContextPicker();

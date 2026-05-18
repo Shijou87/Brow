@@ -584,6 +584,16 @@ export interface WorkflowDemonstration {
   updatedAt: number;
 }
 
+export interface WorkflowRecordingStoredSession {
+  id: string;
+  title?: string;
+  tabId?: number;
+  startedAt: number;
+  captureTypedValues: boolean;
+  initialTab: WorkflowDemonstrationTabContext;
+  partialDemonstration: WorkflowDemonstration;
+}
+
 // ─── Brow Domain Skills ────────────────────────────────────────────────────
 
 export interface DomainSkillMatcher {

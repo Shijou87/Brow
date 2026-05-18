@@ -5,7 +5,7 @@ const {
   getWebMCPAftermathWaitMs,
   isLikelyMutatingWebMCPTool,
   shouldCaptureWebMCPAftermath,
-} = require('../.tmp-webmcp-aftermath-test/sidepanel/webmcp-tool-factory.js');
+} = require('../.tmp/webmcp-aftermath-test/sidepanel/webmcp-tool-factory.js');
 
 test('treats read-style WebMCP tools as no-snapshot aftermath by default', () => {
   const descriptor = {

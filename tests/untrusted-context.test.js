@@ -3,10 +3,10 @@ const assert = require('node:assert/strict');
 
 const {
   buildSystemPrompt,
-} = require('../.tmp-untrusted-context-test/sidepanel/agent-runtime/prompt.js');
+} = require('../.tmp/untrusted-context-test/sidepanel/agent-runtime/prompt.js');
 const {
   wrapUntrustedContextBlock,
-} = require('../.tmp-untrusted-context-test/sidepanel/agent-runtime/untrusted-context.js');
+} = require('../.tmp/untrusted-context-test/sidepanel/agent-runtime/untrusted-context.js');
 
 test('system prompt warns that page and tool text may be untrusted external content', () => {
   const prompt = buildSystemPrompt({

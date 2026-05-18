@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   buildApprovalAwaitingDescription,
-} = require('../.tmp-approval-description-test/sidepanel/agent-runtime/approval-description.js');
+} = require('../.tmp/approval-description-test/sidepanel/agent-runtime/approval-description.js');
 
 test('describes http_fetch approvals with the request method and destination host', () => {
   const description = buildApprovalAwaitingDescription({

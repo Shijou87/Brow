@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   buildBrowserContextSnapshotLayout,
   buildBrowserContextSnapshotText,
-} = require('../.tmp-browser-context-layout-test/sidepanel/agent-runtime/browser-context-layout.js');
+} = require('../.tmp/browser-context-layout-test/sidepanel/agent-runtime/browser-context-layout.js');
 
 test('includes active tab context and attached snapshot text', () => {
   const text = buildBrowserContextSnapshotText({

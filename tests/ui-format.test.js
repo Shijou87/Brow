@@ -5,7 +5,7 @@ const {
   formatRelativeTime,
   formatSchemaType,
   renderToolInputParameters,
-} = require('../.tmp-ui-format-test/sidepanel/chat-view/ui-format.js');
+} = require('../.tmp/ui-format-test/sidepanel/chat-view/ui-format.js');
 
 test('formatRelativeTime uses friendly recent buckets', () => {
   const originalNow = Date.now;

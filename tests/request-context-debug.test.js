@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   formatRequestContextDebugText,
-} = require('../.tmp-request-context-debug-test/request-context-debug.js');
+} = require('../.tmp/request-context-debug-test/request-context-debug.js');
 
 test('renders the exact prompt surface and live updates together', () => {
   const text = formatRequestContextDebugText({

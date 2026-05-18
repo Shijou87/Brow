@@ -11,7 +11,33 @@ import {
 } from '../shared/messages';
 import { clearDiscoveryState, ensureBridgeScripts, runDiscovery, scheduleDiscovery, shouldRefreshDiscovery } from './discovery';
 import { getRegistrySnapshot } from './webmcp-registry';
-import type { WebMCPRegistryEntry } from '../shared/types';
+import type { WebMCPRegistryEntry, WorkflowRecordingStoredSession } from '../shared/types';
+
+const WORKFLOW_RECORDING_STORAGE_PREFIX = 'agent-webmcp-workflow-recording:';
+
+function workflowRecordingStorageKey(tabId: number): string {
+  return `${WORKFLOW_RECORDING_STORAGE_PREFIX}${tabId}`;
+}
+
+function getStorageValue<T>(key: string): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(key, (result) => {
+      resolve(result[key] as T | undefined);
+    });
+  });
+}
+
+function setStorageValue(key: string, value: unknown): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [key]: value }, () => resolve());
+  });
+}
+
+function removeStorageValue(key: string): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove(key, () => resolve());
+  });
+}
 
 // ─── Open side panel on action click ────────────────────────────────────────
 
@@ -62,7 +88,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ─── Message handler (from side panel) ──────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (isRuntimeMessageType(message, 'GET_REGISTRY')) {
     // Return the full registry to the side panel
     sendResponse(getRegistrySnapshot());
@@ -114,6 +140,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         .catch((err) => sendResponse({ ok: false, error: err?.message ?? 'Browser Snapshot operation failed' }));
       return true;
     }
+  }
+
+  if (isRuntimeMessageType(message, 'WORKFLOW_RECORDING_RESTORE')) {
+    const tabId = sender.tab?.id;
+    if (tabId === undefined) {
+      sendResponse({ ok: false, active: false, error: 'No sender tab' });
+      return false;
+    }
+    getStorageValue<WorkflowRecordingStoredSession>(workflowRecordingStorageKey(tabId))
+      .then((session) => sendResponse({ ok: true, active: Boolean(session), session }))
+      .catch((err) => sendResponse({ ok: false, active: false, error: err?.message ?? 'Restore failed' }));
+    return true;
+  }
+
+  if (isRuntimeMessageType(message, 'WORKFLOW_RECORDING_PERSIST')) {
+    const tabId = sender.tab?.id;
+    const session = message.payload?.session;
+    if (tabId === undefined || !session) {
+      sendResponse({ ok: false, error: 'Missing sender tab or session payload' });
+      return false;
+    }
+    setStorageValue(workflowRecordingStorageKey(tabId), { ...session, tabId })
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err?.message ?? 'Persist failed' }));
+    return true;
+  }
+
+  if (isRuntimeMessageType(message, 'WORKFLOW_RECORDING_CLEAR')) {
+    const tabId = sender.tab?.id;
+    if (tabId === undefined) {
+      sendResponse({ ok: false, error: 'No sender tab' });
+      return false;
+    }
+    removeStorageValue(workflowRecordingStorageKey(tabId))
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err?.message ?? 'Clear failed' }));
+    return true;
   }
 
   if (
