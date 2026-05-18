@@ -7,7 +7,7 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 18px;
 }
 
@@ -16,17 +16,19 @@
 .conversations-panel-inner {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: 16px;
+  min-height: 0;
   min-width: 0;
 }
 
+.tools-panel-inner,
+.conversations-panel-inner,
 .mcp-panel {
   overflow: hidden;
 }
 
 .mcp-panel-inner {
-  flex: 1;
-  min-height: 0;
   padding: 16px;
   border: 2px solid $outline-variant;
   background: $bg;
@@ -51,14 +53,23 @@
 }
 
 .tools-groups-container,
-.conversations-list-container,
+.conversations-list-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 10px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 4px 10px 0;
+}
+
 .mcp-servers-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-height: 0;
   overflow: visible;
-  padding: 0 4px 10px 0;
 }
 
 .mcp-servers-list {

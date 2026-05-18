@@ -325,9 +325,11 @@ a {
 .chat-messages,
 .tool-steps-timeline,
 .tools-panel,
+.tools-groups-container,
 .mcp-panel,
 .mcp-panel-inner,
 .conversations-panel,
+.conversations-list-container,
 .llm-config-panel {
   scrollbar-width: thin;
   scrollbar-color: $accent $bg;
@@ -357,4 +359,3 @@ a {
   gap: 12px;
   padding: 22px 18px 14px;
 }
-

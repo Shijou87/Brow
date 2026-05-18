@@ -13,7 +13,7 @@
 .mcp-panel-inner,
 .conversations-panel-inner {
   position: relative;
-  min-height: 100%;
+  min-height: 0;
   padding: 20px 18px 18px;
   border-radius: 0;
   border: 2px solid $outline-variant;
